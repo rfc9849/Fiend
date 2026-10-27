@@ -1,0 +1,58 @@
+[package]
+name = "fiend-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1"
+h2 = "0.4"
+hex = "0.4"
+http = "1"
+thiserror = "2"
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dependencies.hmac]
+version = "0.13"
+
+[dependencies.aes-gcm]
+version = "0.11"
+
+[dependencies.hkdf]
+version = "0.13"
+
+[dependencies.tokio]
+version = "1"
+features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"]
+
+[dependencies.ml-kem]
+version = "0.3"
+features = ["getrandom", "zeroize"]
+
+[dependencies.p256]
+version = "0.14"
+features = ["ecdh"]
+
+[dependencies.rand]
+version = "0.10"
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1"
+
+[dependencies.sha2]
+version = "0.11"
+
+[dependencies.socket2]
+version = "0.6"
+features = ["all"]
+
+[dependencies.x25519-dalek]
+version = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
