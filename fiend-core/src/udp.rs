@@ -91,19 +91,18 @@ pub async fn write_response<W>(writer: &mut W, source: &Address, payload: &[u8])
 where
     W: AsyncWrite + Unpin,
 {
-    let mut address = Vec::with_capacity(19);
+    let mut frame = Vec::with_capacity(3 + 19 + payload.len());
+    frame.extend_from_slice(&[0, 0, FLAG_ADDRESS]);
     source
-        .encode_into(&mut address)
+        .encode_into(&mut frame)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let length = 1 + address.len() + payload.len();
+    frame.extend_from_slice(payload);
+    let length = frame.len() - 2;
     if length > MAX_FRAME {
         return Err(invalid("UDP response is too large"));
     }
-
-    writer.write_all(&(length as u16).to_be_bytes()).await?;
-    writer.write_all(&[FLAG_ADDRESS]).await?;
-    writer.write_all(&address).await?;
-    writer.write_all(payload).await
+    frame[..2].copy_from_slice(&(length as u16).to_be_bytes());
+    writer.write_all(&frame).await
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

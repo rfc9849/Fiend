@@ -7,6 +7,16 @@ use crate::transport;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl Error {
+    pub fn closes_link(&self) -> bool {
+        match self {
+            Self::Transport(_) | Self::Closed | Self::Io(_) => true,
+            Self::H2(error) => error.is_io() || error.is_go_away(),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("transport: {0}")]

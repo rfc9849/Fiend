@@ -112,11 +112,13 @@ impl Client {
                 .acquire_owned()
                 .await
                 .map_err(|_| io::Error::other("connection limit closed"))?;
-            let (stream, peer) = listener.accept().await?;
+            let (stream, peer) = crate::net::accept(&listener).await;
             let client = self.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                let _ = client.handle(stream, peer).await;
+                if let Err(error) = client.handle(stream, peer).await {
+                    tracing::debug!(%error, %peer, "client handler failed");
+                }
             });
         }
     }
@@ -179,6 +181,8 @@ impl Client {
     }
 }
 
+const DIAL_PENDING: usize = 16;
+
 struct UdpAssociation {
     inner: Arc<ClientInner>,
     socket: Arc<UdpSocket>,
@@ -186,6 +190,7 @@ struct UdpAssociation {
     client_addr: Arc<Mutex<Option<SocketAddr>>>,
     flows: HashMap<Address, Flow>,
     dialing: HashSet<Address>,
+    pending: HashMap<Address, Vec<Vec<u8>>>,
     events: mpsc::UnboundedSender<FlowEvent>,
     receiver: mpsc::UnboundedReceiver<FlowEvent>,
     next_id: u64,
@@ -208,6 +213,7 @@ impl UdpAssociation {
             client_addr: Arc::new(Mutex::new(None)),
             flows: HashMap::new(),
             dialing: HashSet::new(),
+            pending: HashMap::new(),
             events,
             receiver,
             next_id: 1,
@@ -265,9 +271,14 @@ impl UdpAssociation {
             return;
         };
 
-        if self.dialing.contains(&destination)
-            || self.flows.len() + self.dialing.len() >= self.inner.config.max_udp_flows
-        {
+        if self.dialing.contains(&destination) {
+            let queue = self.pending.entry(destination).or_default();
+            if queue.len() < DIAL_PENDING {
+                queue.push(frame);
+            }
+            return;
+        }
+        if self.flows.len() + self.dialing.len() >= self.inner.config.max_udp_flows {
             return;
         }
 
@@ -301,12 +312,20 @@ impl UdpAssociation {
         match event {
             FlowEvent::Ready { address, flow } => {
                 self.dialing.remove(&address);
+                if let Some(queue) = self.pending.remove(&address) {
+                    for frame in queue {
+                        if flow.sender.try_send(frame).is_err() {
+                            break;
+                        }
+                    }
+                }
                 if !flow.closed.load(Ordering::Acquire) && !self.flows.contains_key(&address) {
                     self.flows.insert(address, flow);
                 }
             }
             FlowEvent::Failed { address } => {
                 self.dialing.remove(&address);
+                self.pending.remove(&address);
             }
             FlowEvent::Closed { address, id } => {
                 if self.flows.get(&address).map(|flow| flow.id) == Some(id) {

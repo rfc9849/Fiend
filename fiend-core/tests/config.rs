@@ -136,7 +136,10 @@ origin_host = "origin.example"
     assert_eq!(settings.config.origin_host, "origin.example");
     assert_eq!(settings.config.origin_port, 443);
     assert_eq!(settings.config.origin, Default::default());
-    assert_eq!(settings.config.replay_ttl, Duration::from_secs(3600));
+    assert_eq!(
+        settings.config.replay_ttl,
+        Duration::from_secs(3 * 3600 + 300)
+    );
     assert_eq!(settings.config.udp_idle, Duration::from_secs(60));
     assert_eq!(settings.config.max_connections, 1024);
     assert_eq!(settings.config.tcp_notsent_lowat, 0);
@@ -147,7 +150,7 @@ origin_host = "origin.example"
 #[test]
 fn server_loads_overrides_and_binary_secret() {
     let dir = temp_dir("server-overrides");
-    fs::write(dir.join("secret.bin"), [0x42u8; 32]).expect("write secret");
+    fs::write(dir.join("secret.bin"), [0x01u8; 32]).expect("write secret");
     let path = write(
         &dir,
         "server.toml",
@@ -156,7 +159,7 @@ listen = "127.0.0.1:8443"
 secret_file = "secret.bin"
 origin_host = "origin.example"
 origin_port = 9443
-replay_ttl_ms = 5000
+replay_ttl_ms = 14400000
 max_connections = 2048
 tcp_notsent_lowat = 131072
 
@@ -180,10 +183,10 @@ max_links = 3
 
     let settings = config::load_server(&path).expect("load server");
     assert_eq!(settings.listen.to_string(), "127.0.0.1:8443");
-    assert_eq!(settings.config.secret, vec![0x42u8; 32]);
+    assert_eq!(settings.config.secret, vec![0x01u8; 32]);
     assert_eq!(settings.config.origin_host, "origin.example");
     assert_eq!(settings.config.origin_port, 9443);
-    assert_eq!(settings.config.replay_ttl, Duration::from_millis(5000));
+    assert_eq!(settings.config.replay_ttl, Duration::from_secs(4 * 3600));
     assert_eq!(settings.config.udp_idle, Duration::from_millis(2500));
     assert_eq!(settings.config.max_connections, 2048);
     assert_eq!(settings.config.tcp_notsent_lowat, 131072);
@@ -200,6 +203,27 @@ max_links = 3
     assert_eq!(settings.config.origin.key_share_group, 29);
     assert_eq!(settings.config.origin.extension_order, vec![43, 51]);
     assert_eq!(settings.config.origin.record_sizes, vec![35, 4000, 300]);
+}
+
+#[test]
+fn ambiguous_secret_file_is_rejected() {
+    let dir = temp_dir("ambiguous-secret");
+    fs::write(dir.join("secret.txt"), "42424242424242424242424242424242").expect("write secret");
+    let path = write(
+        &dir,
+        "server.toml",
+        r#"
+secret_file = "secret.txt"
+origin_host = "origin.example"
+"#,
+    );
+    let error = config::load_server(&path).err().expect("ambiguous secret");
+    assert!(
+        error
+            .to_string()
+            .contains("write 32 raw bytes or 64 hex characters"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -375,7 +399,16 @@ template = "template.json"
 
 #[test]
 fn server_errors_are_specific() {
-    let cases: [(&str, &str, &str); 6] = [
+    let cases: [(&str, &str, &str); 7] = [
+        (
+            "short replay ttl",
+            r#"
+secret = "SECRET"
+origin_host = "origin.example"
+replay_ttl_ms = 3600000
+"#,
+            "replay_ttl_ms must be at least",
+        ),
         (
             "missing origin",
             r#"

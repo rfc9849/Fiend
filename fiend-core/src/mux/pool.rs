@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Notify, Semaphore};
 use tokio::time::{sleep, timeout};
 
 use super::config::Config;
@@ -26,7 +26,8 @@ struct PoolInner<S> {
     config: Config,
     dial: DialFn<S>,
     links: Mutex<Vec<Arc<ClientLink>>>,
-    dial_lock: AsyncMutex<()>,
+    dial_permit: Arc<Semaphore>,
+    ready: Notify,
     backoff: Mutex<Backoff>,
     closed: AtomicBool,
     next_id: AtomicU64,
@@ -88,7 +89,8 @@ where
                 config,
                 dial,
                 links: Mutex::new(Vec::new()),
-                dial_lock: AsyncMutex::new(()),
+                dial_permit: Arc::new(Semaphore::new(1)),
+                ready: Notify::new(),
                 backoff: Mutex::new(Backoff::new()),
                 closed: AtomicBool::new(false),
                 next_id: AtomicU64::new(1),
@@ -133,14 +135,12 @@ where
             {
                 Ok(Ok(lane)) => return Ok(lane),
                 Ok(Err(Error::Rejected(status))) => return Err(Error::Rejected(status)),
-                Ok(Err(error)) => {
+                Ok(Err(error)) if error.closes_link() => {
                     self.inner.discard(&link);
                     last = error;
                 }
-                Err(_) => {
-                    self.inner.discard(&link);
-                    last = Error::Timeout;
-                }
+                Ok(Err(error)) => last = error,
+                Err(_) => last = Error::Timeout,
             }
         }
         Err(last)
@@ -217,22 +217,6 @@ where
         (light, fallback, count)
     }
 
-    fn least_loaded(&self) -> (Option<Arc<ClientLink>>, usize) {
-        let mut links = self.lock_links();
-        links.retain(|link| !link.is_closed());
-        let mut best = None;
-        let mut best_load = usize::MAX;
-        for link in links.iter() {
-            let load = link.load();
-            if load < best_load {
-                best = Some(link.clone());
-                best_load = load;
-            }
-        }
-        let count = links.len();
-        (best, count)
-    }
-
     fn stats(&self) -> PoolStats {
         let mut links = self.lock_links();
         links.retain(|link| !link.is_closed());
@@ -245,59 +229,43 @@ where
     }
 
     async fn acquire(self: &Arc<Self>, deadline: Instant) -> Result<Arc<ClientLink>> {
-        if self.closed() {
-            return Err(Error::Closed);
-        }
-        let (best, count) = self.least_loaded();
-        if let Some(link) = &best
-            && link.load() == 0
-        {
-            return Ok(link.clone());
-        }
-        if count < self.config.max_links {
-            return self.dial_fresh(deadline).await;
-        }
-        best.ok_or(Error::Unavailable)
-    }
-
-    async fn dial(self: &Arc<Self>, deadline: Instant) -> Result<Arc<ClientLink>> {
-        self.dial_inner(deadline, false).await
-    }
-
-    async fn dial_fresh(self: &Arc<Self>, deadline: Instant) -> Result<Arc<ClientLink>> {
-        self.dial_inner(deadline, true).await
-    }
-
-    async fn dial_inner(
-        self: &Arc<Self>,
-        deadline: Instant,
-        require_idle: bool,
-    ) -> Result<Arc<ClientLink>> {
-        let _guard = self.dial_lock.lock().await;
-        if self.closed() {
-            return Err(Error::Closed);
-        }
-
-        if require_idle {
-            let (best, count) = self.least_loaded();
-            if let Some(link) = &best
-                && link.load() == 0
-            {
-                return Ok(link.clone());
+        loop {
+            if self.closed() {
+                return Err(Error::Closed);
             }
-            if count >= self.config.max_links {
-                return self.least_loaded().0.ok_or(Error::Unavailable);
-            }
-        } else {
             let (light, fallback, count) = self.snapshot();
             if let Some(link) = light {
                 return Ok(link);
             }
+            if count < self.config.max_links
+                && let Ok(permit) = self.dial_permit.clone().try_acquire_owned()
+            {
+                let result = self.dial_now(deadline).await;
+                drop(permit);
+                self.ready.notify_waiters();
+                return match result {
+                    Ok(link) => Ok(link),
+                    Err(error) => fallback.ok_or(error),
+                };
+            }
             if count >= self.config.max_links {
                 return fallback.ok_or(Error::Unavailable);
             }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return fallback.ok_or(Error::Timeout);
+            }
+            let wait = remaining.min(self.config.open_timeout);
+            if timeout(wait, self.ready.notified()).await.is_err() {
+                return fallback.ok_or(Error::Timeout);
+            }
         }
+    }
 
+    async fn dial_now(self: &Arc<Self>, deadline: Instant) -> Result<Arc<ClientLink>> {
+        if self.closed() {
+            return Err(Error::Closed);
+        }
         let delay = self.lock_backoff().wait();
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() || delay >= remaining {
@@ -391,8 +359,16 @@ where
         if light.is_some() || count >= self.config.max_links {
             return;
         }
+        let Ok(permit) = self.dial_permit.clone().try_acquire_owned() else {
+            return;
+        };
         let deadline = Instant::now() + self.config.open_timeout;
-        let _ = self.dial(deadline).await;
+        let pool = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = pool.dial_now(deadline).await;
+            drop(permit);
+            pool.ready.notify_waiters();
+        });
     }
 
     fn reap_if_idle(&self, link: &Arc<ClientLink>) {

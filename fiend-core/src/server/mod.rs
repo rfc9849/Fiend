@@ -41,7 +41,7 @@ impl ServerConfig {
             origin_host: origin_host.into(),
             origin_port,
             origin: OriginProfile::default(),
-            replay_ttl: Duration::from_secs(3600),
+            replay_ttl: transport::AUTH_WINDOW + Duration::from_secs(300),
             mux: mux::Config::default(),
             udp_idle: Duration::from_secs(60),
             max_connections: 1024,
@@ -64,8 +64,17 @@ struct ServerInner {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        let replay = FreshnessCheck::new(config.replay_ttl);
+        let replay = FreshnessCheck::new(config.replay_ttl.max(transport::AUTH_WINDOW));
         let connections = Arc::new(Semaphore::new(config.max_connections.max(1)));
+        let mut config = config;
+        if config.origin.record_sizes.is_empty() {
+            let suite = if config.origin.cipher_suite == 0 {
+                0x1301
+            } else {
+                config.origin.cipher_suite
+            };
+            config.origin.record_sizes = transport::default_flight_sizes(suite);
+        }
         Self {
             inner: Arc::new(ServerInner {
                 config,
@@ -84,8 +93,13 @@ impl Server {
                 .acquire_owned()
                 .await
                 .map_err(|_| io::Error::other("connection limit closed"))?;
-            let (stream, _) = listener.accept().await?;
-            stream.set_nodelay(true)?;
+            let (stream, _) = crate::net::accept(&listener).await;
+            if let Err(error) = stream.set_nodelay(true) {
+                tracing::debug!(%error, "cannot set TCP_NODELAY");
+            }
+            if let Err(error) = crate::net::set_tcp_keepalive(&stream) {
+                tracing::debug!(%error, "cannot set TCP keepalive");
+            }
             if let Err(error) =
                 crate::net::set_tcp_notsent_lowat(&stream, self.inner.config.tcp_notsent_lowat)
             {
@@ -94,7 +108,9 @@ impl Server {
             let server = self.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                let _ = server.handle(stream).await;
+                if let Err(error) = server.handle(stream).await {
+                    tracing::debug!(%error, "connection handler failed");
+                }
             });
         }
     }
@@ -123,7 +139,9 @@ async fn serve_mux(session: Session<TcpStream>, config: ServerConfig) -> mux::Re
     while let Some(incoming) = connection.accept().await? {
         let config = config.clone();
         tokio::spawn(async move {
-            let _ = handle_incoming(incoming, config).await;
+            if let Err(error) = handle_incoming(incoming, config).await {
+                tracing::debug!(%error, "lane handler failed");
+            }
         });
     }
     Ok(())
@@ -164,16 +182,21 @@ async fn handle_udp(incoming: Incoming, config: &ServerConfig) -> mux::Result<()
 }
 
 async fn connect_udp(address: &Address, policy: TargetPolicy) -> io::Result<UdpSocket> {
-    let target = target::resolve(address, &policy).await?;
-
-    let bind = if target.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    };
-    let socket = UdpSocket::bind(bind).await?;
-    socket.connect(target).await?;
-    Ok(socket)
+    let targets = target::resolve_all(address, &policy).await?;
+    let mut last = None;
+    for target in targets {
+        let bind = if target.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = UdpSocket::bind(bind).await?;
+        match socket.connect(target).await {
+            Ok(()) => return Ok(socket),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "target has no addresses")))
 }
 
 async fn bridge_udp(

@@ -284,7 +284,11 @@ pub fn generate_server_share(spec: &KeyShareSpec) -> Result<ServerShare> {
             );
             let secret = EphemeralSecret::random_from_rng(&mut rand::rng());
             let public = X25519PublicKey::from(&secret).as_bytes().to_vec();
-            let shared = secret.diffie_hellman(&client).as_bytes().to_vec();
+            let shared = secret.diffie_hellman(&client);
+            if !shared.was_contributory() {
+                return Err(Error::invalid("invalid X25519 client key_share"));
+            }
+            let shared = shared.as_bytes().to_vec();
             Ok(ServerShare {
                 group: X25519,
                 public,
@@ -330,6 +334,9 @@ pub fn generate_server_share(spec: &KeyShareSpec) -> Result<ServerShare> {
             let x25519_secret = EphemeralSecret::random_from_rng(&mut rand::rng());
             let x25519_public = X25519PublicKey::from(&x25519_secret);
             let x25519_shared = x25519_secret.diffie_hellman(&client_x25519);
+            if !x25519_shared.was_contributory() {
+                return Err(Error::invalid("invalid X25519 share in hybrid key_share"));
+            }
 
             let mut public = Vec::with_capacity(MLKEM_CIPHERTEXT_SIZE + X25519_SIZE);
             public.extend_from_slice(&ciphertext);
@@ -358,7 +365,11 @@ pub fn client_shared_secret(share: GeneratedKeyShare, server: &[u8]) -> Result<V
                 <[u8; X25519_SIZE]>::try_from(server)
                     .map_err(|_| Error::invalid("invalid X25519 ServerHello key_share"))?,
             );
-            Ok(secret.diffie_hellman(&public).as_bytes().to_vec())
+            let shared = secret.diffie_hellman(&public);
+            if !shared.was_contributory() {
+                return Err(Error::invalid("invalid X25519 ServerHello key_share"));
+            }
+            Ok(shared.as_bytes().to_vec())
         }
         KeyShareSecret::P256(secret) => {
             let public = PublicKey::from_sec1_bytes(server)
@@ -382,10 +393,42 @@ pub fn client_shared_secret(share: GeneratedKeyShare, server: &[u8]) -> Result<V
                 <[u8; X25519_SIZE]>::try_from(&server[MLKEM_CIPHERTEXT_SIZE..])
                     .map_err(|_| Error::invalid("invalid X25519 ServerHello key_share"))?,
             );
+            let x25519_shared = x25519.diffie_hellman(&public);
+            if !x25519_shared.was_contributory() {
+                return Err(Error::invalid("invalid X25519 ServerHello key_share"));
+            }
             let mut shared = Vec::with_capacity(64);
             shared.extend_from_slice(&kem_shared);
-            shared.extend_from_slice(x25519.diffie_hellman(&public).as_bytes());
+            shared.extend_from_slice(x25519_shared.as_bytes());
             Ok(shared)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fingerprint::{GeneratedKeyShare, KeyShareSecret};
+
+    #[test]
+    fn zero_x25519_client_key_share_is_rejected() {
+        let spec = KeyShareSpec {
+            group: X25519,
+            offset: 0,
+            size: X25519_SIZE,
+            public: vec![0u8; X25519_SIZE],
+        };
+        assert!(generate_server_share(&spec).is_err());
+    }
+
+    #[test]
+    fn zero_x25519_server_key_share_is_rejected() {
+        let secret = EphemeralSecret::random_from_rng(&mut rand::rng());
+        let share = GeneratedKeyShare {
+            group: X25519,
+            secret: KeyShareSecret::X25519(secret),
+            public: vec![0u8; X25519_SIZE],
+        };
+        assert!(client_shared_secret(share, &[0u8; X25519_SIZE]).is_err());
     }
 }

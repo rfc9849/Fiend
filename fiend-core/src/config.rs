@@ -14,7 +14,7 @@ use crate::fingerprint::Template;
 use crate::mux;
 use crate::server::ServerConfig;
 use crate::target::TargetPolicy;
-use crate::transport::OriginProfile;
+use crate::transport::{AUTH_WINDOW, OriginProfile};
 
 const DEFAULT_CLIENT_LISTEN: &str = "127.0.0.1:1080";
 const DEFAULT_SERVER_LISTEN: &str = "0.0.0.0:443";
@@ -128,9 +128,15 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
 
     let replay_ttl = option_duration(
         file.replay_ttl_ms,
-        Duration::from_secs(3600),
+        AUTH_WINDOW + Duration::from_secs(300),
         "server replay_ttl_ms",
     )?;
+    if replay_ttl < AUTH_WINDOW {
+        return Err(invalid(format!(
+            "server replay_ttl_ms must be at least {} (the authentication window)",
+            AUTH_WINDOW.as_millis()
+        )));
+    }
     let udp_idle = option_duration(
         file.udp.idle_ms,
         Duration::from_secs(60),
@@ -432,6 +438,13 @@ fn load_secret(
                 source,
             })?;
             if raw.len() == SECRET_LEN {
+                if raw.iter().all(u8::is_ascii_hexdigit) {
+                    return Err(invalid(format!(
+                        "secret file {} has {SECRET_LEN} hex characters; write {SECRET_LEN} raw bytes or {} hex characters",
+                        path.display(),
+                        SECRET_LEN * 2
+                    )));
+                }
                 return Ok(raw);
             }
             let text = String::from_utf8(raw).map_err(|_| {

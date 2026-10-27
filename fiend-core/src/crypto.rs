@@ -2,13 +2,12 @@ use aes_gcm::{AeadInOut, Aes256Gcm, KeyInit, Nonce, Tag};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use std::fmt;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const LABEL_PSK_IDENTITY: &[u8] = b"psk-identity";
-const LABEL_TICKET_OBFUSCATOR: &[u8] = b"ticket-age-obfuscator";
 const LABEL_SERVER_AUTH: &[u8] = b"sh-auth";
 const LABEL_HANDSHAKE_DONE: &[u8] = b"handshake-done";
 const LABEL_CLIENT_FINISHED: &[u8] = b"client-finished";
@@ -56,12 +55,30 @@ pub fn auth_token_matches(
     )
 }
 
-pub fn server_auth_random(secret: &[u8], client_random: &[u8]) -> [u8; 32] {
-    hmac_sha256(secret, &[client_random, LABEL_SERVER_AUTH])
+pub const SERVER_NONCE_SIZE: usize = 16;
+
+pub fn server_auth_random(
+    secret: &[u8],
+    client_random: &[u8],
+    nonce: &[u8; SERVER_NONCE_SIZE],
+) -> [u8; 32] {
+    let tag = hmac_sha256(secret, &[LABEL_SERVER_AUTH, client_random, nonce]);
+    let mut random = [0u8; 32];
+    random[..SERVER_NONCE_SIZE].copy_from_slice(nonce);
+    random[SERVER_NONCE_SIZE..].copy_from_slice(&tag[..32 - SERVER_NONCE_SIZE]);
+    random
 }
 
 pub fn server_auth_random_matches(secret: &[u8], client_random: &[u8], supplied: &[u8]) -> bool {
-    hmac_sha256_matches(secret, &[client_random, LABEL_SERVER_AUTH], supplied)
+    if supplied.len() != 32 {
+        return false;
+    }
+    let (nonce, tag) = supplied.split_at(SERVER_NONCE_SIZE);
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(LABEL_SERVER_AUTH);
+    mac.update(client_random);
+    mac.update(nonce);
+    mac.verify_truncated_left(tag).is_ok()
 }
 
 pub fn handshake_terminator(
@@ -118,28 +135,6 @@ pub fn client_finished_matches(
         &[LABEL_CLIENT_FINISHED, client_random, server_random],
         supplied,
     )
-}
-
-pub fn derive_psk_identity(secret: &[u8], unix_time: i64) -> [u8; 32] {
-    let hour = (unix_time / 3600) as u64;
-    hmac_sha256(secret, &[LABEL_PSK_IDENTITY, &hour.to_le_bytes()])
-}
-
-pub fn derive_ticket_age_obfuscator(secret: &[u8]) -> u32 {
-    let digest = hmac_sha256(secret, &[LABEL_TICKET_OBFUSCATOR]);
-    u32::from_le_bytes(digest[..4].try_into().expect("four bytes"))
-}
-
-pub fn ticket_age_with_obfuscator(obfuscator: u32, unix_time: i64) -> [u8; 4] {
-    let minutes_in_hour = (unix_time.rem_euclid(3600) / 60) as u32;
-    let age = minutes_in_hour
-        .wrapping_mul(60_000)
-        .wrapping_add(obfuscator);
-    age.to_be_bytes()
-}
-
-pub fn ticket_age(secret: &[u8], unix_time: i64) -> [u8; 4] {
-    ticket_age_with_obfuscator(derive_ticket_age_obfuscator(secret), unix_time)
 }
 
 pub struct RecordCipher {
@@ -242,7 +237,7 @@ pub fn derive_session_keys(
     server_random: &[u8],
     shared: &[u8],
 ) -> Result<SessionKeyPair, Error> {
-    let mut ikm = Vec::with_capacity(secret.len() + shared.len());
+    let mut ikm = Zeroizing::new(Vec::with_capacity(secret.len() + shared.len()));
     ikm.extend_from_slice(secret);
     ikm.extend_from_slice(shared);
     let mut salt = Vec::with_capacity(client_random.len() + server_random.len());
@@ -254,12 +249,12 @@ pub fn derive_session_keys(
         hkdf.expand(label, output).map_err(|_| Error::KeyDerivation)
     };
 
-    let mut c2s_key = [0u8; 32];
-    let mut s2c_key = [0u8; 32];
+    let mut c2s_key = Zeroizing::new([0u8; 32]);
+    let mut s2c_key = Zeroizing::new([0u8; 32]);
     let mut c2s_iv = [0u8; 12];
     let mut s2c_iv = [0u8; 12];
-    expand(b"c2s-key", &mut c2s_key)?;
-    expand(b"s2c-key", &mut s2c_key)?;
+    expand(b"c2s-key", &mut c2s_key[..])?;
+    expand(b"s2c-key", &mut s2c_key[..])?;
     expand(b"c2s-iv", &mut c2s_iv)?;
     expand(b"s2c-iv", &mut s2c_iv)?;
 
@@ -289,31 +284,15 @@ mod tests {
     }
 
     #[test]
-    fn psk_identity_matches_reference() {
-        let psk = derive_psk_identity(&SECRET, 3_600);
-        assert_eq!(
-            hex::encode(psk),
-            "de0b6b1d61164fafcbf9326ec8933d19d3f6255841768332f3bf1623fb759237"
-        );
-    }
-
-    #[test]
-    fn ticket_values_match_reference() {
-        let obfuscator = derive_ticket_age_obfuscator(&SECRET);
-        assert_eq!(obfuscator, 0x0ae1_2c56);
-        assert_eq!(
-            ticket_age_with_obfuscator(obfuscator, 4_500),
-            [0x0a, 0xee, 0xe7, 0xf6]
-        );
-    }
-
-    #[test]
     fn handshake_macs_match_reference() {
         let client = [0x11; 32];
         let server = [0x22; 32];
-        assert_eq!(
-            hex::encode(server_auth_random(&SECRET, &client)),
-            "cf9f1f0299e076efdcb2f33dfa222c03aa7c994e595fc08695931a4bcb602d02"
+        let nonce = [0x44; SERVER_NONCE_SIZE];
+        let random = server_auth_random(&SECRET, &client, &nonce);
+        assert_eq!(random[..SERVER_NONCE_SIZE], nonce);
+        assert_ne!(
+            random,
+            server_auth_random(&SECRET, &client, &[0x45; SERVER_NONCE_SIZE])
         );
         assert_eq!(
             hex::encode(handshake_terminator(&SECRET, &client, &server, 3)),
@@ -324,11 +303,11 @@ mod tests {
             "80f81ef6d887bca4ff1223df6d914f0901df0105d22ff2cfeeb49d533da2aa7a"
         );
 
-        assert!(server_auth_random_matches(
-            &SECRET,
-            &client,
-            &server_auth_random(&SECRET, &client)
-        ));
+        assert!(server_auth_random_matches(&SECRET, &client, &random));
+        let mut tampered = random;
+        tampered[0] ^= 1;
+        assert!(!server_auth_random_matches(&SECRET, &client, &tampered));
+        assert!(!server_auth_random_matches(&SECRET, &[0x12; 32], &random));
         assert!(!server_auth_random_matches(&SECRET, &client, &[0u8; 32]));
         assert!(client_finished_matches(
             &SECRET,

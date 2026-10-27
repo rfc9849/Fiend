@@ -9,4 +9,6 @@ pub use keyshare::{
     X25519_MLKEM768, X25519_MLKEM768_SIZE, X25519_SIZE,
 };
 pub use parse::parse_client_hello;
-pub use template::{BuiltClientHello, DEFAULT_RECORD_MAX, FieldOffset, GreaseField, Template};
+pub use template::{
+    BuiltClientHello, DEFAULT_RECORD_MAX, EchGrease, FieldOffset, GreaseField, GreaseKind, Template,
+};

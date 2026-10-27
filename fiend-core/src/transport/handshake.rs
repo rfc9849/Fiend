@@ -1,6 +1,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio::time::Instant;
+
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use zeroize::Zeroizing;
 
 use super::error::{Error, Result};
 use super::freshness::FreshnessCheck;
@@ -15,8 +18,12 @@ use super::session::Session;
 use crate::crypto;
 use crate::fingerprint::{BuiltClientHello, DEFAULT_RECORD_MAX, Template, parse_client_hello};
 
-pub const HANDSHAKE_VERSION: u8 = 3;
+pub const HANDSHAKE_VERSION: u8 = 4;
+pub const AUTH_WINDOW: Duration = Duration::from_secs(3 * 3600);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const PRE_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIENT_FINISHED_TIMEOUT: Duration = Duration::from_secs(60);
+const ALERT_WIRE_BODY: usize = 2 + 1 + 16;
 const MAX_HANDSHAKE_RECORD: usize = DEFAULT_RECORD_MAX + 16 + 256;
 const MAX_RECORD_WIRE: usize = 5 + DEFAULT_RECORD_MAX + 16;
 const EARLY_DATA_MIN: usize = 200;
@@ -71,7 +78,7 @@ where
         .into_iter()
         .find(|share| share.group == parsed.group)
         .ok_or_else(|| Error::invalid("ServerHello selected an unoffered key_share group"))?;
-    let shared = client_shared_secret(selected, &parsed.key_share)?;
+    let shared = Zeroizing::new(client_shared_secret(selected, &parsed.key_share)?);
     let pair = crypto::derive_session_keys(secret, &tls_random, &parsed.random, &shared)?;
 
     read_change_cipher_spec(&mut stream).await?;
@@ -129,35 +136,29 @@ pub async fn accept<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut header = [0u8; 5];
-    read_exact_timeout(&mut stream, &mut header).await?;
-    if header[0] != REC_HANDSHAKE {
-        return Ok(AcceptOutcome::Passthrough {
-            stream,
-            buffered: header.to_vec(),
-        });
-    }
-    let length = u16::from_be_bytes([header[3], header[4]]) as usize;
-    if !(4..=MAX_HANDSHAKE_RECORD).contains(&length) {
-        return Ok(AcceptOutcome::Passthrough {
-            stream,
-            buffered: header.to_vec(),
-        });
-    }
-    let mut body = vec![0u8; length];
-    read_exact_timeout(&mut stream, &mut body).await?;
-
-    let mut buffered = Vec::with_capacity(5 + length);
-    buffered.extend_from_slice(&header);
-    buffered.extend_from_slice(&body);
-
-    let tls_random: [u8; 32] = match body.get(6..38) {
-        Some(random) => random.try_into().expect("32-byte slice"),
-        None => return passthrough(stream, buffered),
-    };
-    if !verify_auth_token(&body, secret, unix_time()) {
+    let deadline = Instant::now() + PRE_AUTH_TIMEOUT;
+    let mut buffered = Vec::with_capacity(2048);
+    if !read_prefix(&mut stream, &mut buffered, 1, deadline).await? || buffered[0] != REC_HANDSHAKE
+    {
         return passthrough(stream, buffered);
     }
+    if !read_prefix(&mut stream, &mut buffered, 5, deadline).await? {
+        return passthrough(stream, buffered);
+    }
+    let length = u16::from_be_bytes([buffered[3], buffered[4]]) as usize;
+    if !(4..=MAX_HANDSHAKE_RECORD).contains(&length) {
+        return passthrough(stream, buffered);
+    }
+    if !read_prefix(&mut stream, &mut buffered, 5 + length, deadline).await? {
+        return passthrough(stream, buffered);
+    }
+
+    let body = &buffered[5..];
+    if !verify_auth_token(body, secret, unix_time()) {
+        return passthrough(stream, buffered);
+    }
+    let tls_random: [u8; 32] = body[6..38].try_into().expect("32-byte slice");
+    let session_id: [u8; 32] = body[39..71].try_into().expect("32-byte slice");
     if !replay.check(&tls_random) {
         return passthrough(stream, buffered);
     }
@@ -168,21 +169,23 @@ where
     };
 
     if template.early_data {
-        let mut early_header = [0u8; 5];
-        read_exact_timeout(&mut stream, &mut early_header).await?;
+        let deadline = Instant::now() + PRE_AUTH_TIMEOUT;
+        let start = buffered.len();
+        if !read_prefix(&mut stream, &mut buffered, start + 5, deadline).await? {
+            return passthrough(stream, buffered);
+        }
+        let early_header = &buffered[start..start + 5];
         let early_len = u16::from_be_bytes([early_header[3], early_header[4]]) as usize;
         if early_header[0] != REC_APPDATA
             || early_header[1..3] != TLS_VERSION
             || early_len == 0
             || early_len > MAX_HANDSHAKE_RECORD
         {
-            buffered.extend_from_slice(&early_header);
             return passthrough(stream, buffered);
         }
-        let mut early = vec![0u8; early_len];
-        read_exact_timeout(&mut stream, &mut early).await?;
-        buffered.extend_from_slice(&early_header);
-        buffered.extend_from_slice(&early);
+        if !read_prefix(&mut stream, &mut buffered, start + 5 + early_len, deadline).await? {
+            return passthrough(stream, buffered);
+        }
     }
 
     let chosen = match choose_server_share(&template, origin.key_share_group) {
@@ -194,14 +197,15 @@ where
         Err(_) => return passthrough(stream, buffered),
     };
     let cipher_suite = choose_cipher_suite(&template, origin.cipher_suite);
-    let server_random = crypto::server_auth_random(secret, &tls_random);
-    let session_id = &body[39..71];
+    let mut nonce = [0u8; crypto::SERVER_NONCE_SIZE];
+    rand::fill(&mut nonce);
+    let server_random = crypto::server_auth_random(secret, &tls_random, &nonce);
 
-    write_server_flight(
+    write_all_timeout(
         &mut stream,
-        ServerFlight {
+        &build_server_flight(ServerFlight {
             server_random,
-            session_id,
+            session_id: &session_id,
             cipher_suite,
             group: server_share.group,
             key: &server_share.public,
@@ -209,21 +213,31 @@ where
             client_random: &tls_random,
             profile_sizes: &origin.record_sizes,
             extension_order: &origin.extension_order,
-        },
+        })?,
     )
     .await?;
 
-    read_client_finished(
-        &mut stream,
-        secret,
-        &tls_random,
-        &server_random,
-        cipher_suite,
+    let finished = tokio::time::timeout(
+        CLIENT_FINISHED_TIMEOUT,
+        read_client_finished(
+            &mut stream,
+            secret,
+            &tls_random,
+            &server_random,
+            cipher_suite,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| Error::Timeout)?;
+    if let Err(error) = finished {
+        if matches!(error, Error::Invalid(_)) {
+            write_fake_alert(&mut stream).await;
+        }
+        return Err(error);
+    }
 
-    let pair =
-        crypto::derive_session_keys(secret, &tls_random, &server_random, &server_share.shared)?;
+    let shared = Zeroizing::new(server_share.shared);
+    let pair = crypto::derive_session_keys(secret, &tls_random, &server_random, &shared)?;
     let (write_cipher, read_cipher) = pair.for_server();
     Ok(AcceptOutcome::Session(Box::new(Session::new(
         stream,
@@ -257,22 +271,19 @@ fn passthrough<S>(stream: S, buffered: Vec<u8>) -> Result<AcceptOutcome<S>> {
     Ok(AcceptOutcome::Passthrough { stream, buffered })
 }
 
-struct ServerFlight<'a> {
-    server_random: [u8; 32],
-    session_id: &'a [u8],
-    cipher_suite: u16,
-    group: u16,
-    key: &'a [u8],
-    secret: &'a [u8],
-    client_random: &'a [u8],
-    profile_sizes: &'a [usize],
-    extension_order: &'a [u16],
+pub struct ServerFlight<'a> {
+    pub server_random: [u8; 32],
+    pub session_id: &'a [u8],
+    pub cipher_suite: u16,
+    pub group: u16,
+    pub key: &'a [u8],
+    pub secret: &'a [u8],
+    pub client_random: &'a [u8],
+    pub profile_sizes: &'a [usize],
+    pub extension_order: &'a [u16],
 }
 
-async fn write_server_flight<S>(stream: &mut S, flight: ServerFlight<'_>) -> Result<()>
-where
-    S: AsyncWrite + Unpin,
-{
+pub fn build_server_flight(flight: ServerFlight<'_>) -> Result<Vec<u8>> {
     let ServerFlight {
         server_random,
         session_id,
@@ -296,13 +307,7 @@ where
 
     let mut sizes = profile_sizes.to_vec();
     if sizes.is_empty() {
-        let certificate_verify = if cipher_suite == 0x1303 { 97 } else { 286 };
-        sizes = vec![
-            35,
-            random_range(2500, 4500),
-            certificate_verify,
-            finished_record_wire_size(cipher_suite),
-        ];
+        sizes = default_flight_sizes(cipher_suite);
     }
     let last = sizes.len() - 1;
     sizes[last] = finished_record_wire_size(cipher_suite);
@@ -325,7 +330,17 @@ where
             rand::fill(&mut flight[start..]);
         }
     }
-    write_all_timeout(stream, &flight).await
+    Ok(flight)
+}
+
+pub fn default_flight_sizes(cipher_suite: u16) -> Vec<usize> {
+    let certificate_verify = if cipher_suite == 0x1303 { 97 } else { 286 };
+    vec![
+        35,
+        3400,
+        certificate_verify,
+        finished_record_wire_size(cipher_suite),
+    ]
 }
 
 async fn read_client_finished<S>(
@@ -338,9 +353,25 @@ async fn read_client_finished<S>(
 where
     S: AsyncRead + Unpin,
 {
-    read_change_cipher_spec(stream).await?;
+    let mut header = [0u8; 5];
+    stream.read_exact(&mut header).await?;
+    if header != [0x14, 0x03, 0x03, 0, 1] {
+        return Err(Error::invalid("invalid ChangeCipherSpec"));
+    }
+    let mut value = [0u8; 1];
+    stream.read_exact(&mut value).await?;
+    if value[0] != 1 {
+        return Err(Error::invalid("invalid ChangeCipherSpec value"));
+    }
 
-    let (record_type, body) = read_record_parts(stream).await?;
+    stream.read_exact(&mut header).await?;
+    let record_type = header[0];
+    let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+    if length > MAX_HANDSHAKE_RECORD {
+        return Err(Error::invalid("TLS record too large"));
+    }
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).await?;
     if record_type != REC_APPDATA {
         return Err(Error::invalid("invalid client Finished record"));
     }
@@ -351,6 +382,23 @@ where
         return Err(Error::invalid("client Finished authentication failed"));
     }
     Ok(())
+}
+
+async fn write_fake_alert<S>(stream: &mut S)
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut alert = [0u8; 5 + ALERT_WIRE_BODY];
+    alert[..5].copy_from_slice(&[
+        REC_APPDATA,
+        TLS_VERSION[0],
+        TLS_VERSION[1],
+        0,
+        ALERT_WIRE_BODY as u8,
+    ]);
+    rand::fill(&mut alert[5..]);
+    let _ = write_all_timeout(stream, &alert).await;
+    let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.shutdown()).await;
 }
 
 async fn write_client_finished<S>(
@@ -422,6 +470,35 @@ where
     let mut body = vec![0u8; length];
     read_exact_timeout(stream, &mut body).await?;
     Ok((header[0], body))
+}
+
+async fn read_prefix<S>(
+    stream: &mut S,
+    buffered: &mut Vec<u8>,
+    wanted: usize,
+    deadline: Instant,
+) -> Result<bool>
+where
+    S: AsyncRead + Unpin,
+{
+    while buffered.len() < wanted {
+        let start = buffered.len();
+        buffered.resize(wanted, 0);
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut buffered[start..])).await;
+        let count = match read {
+            Ok(Ok(count)) => count,
+            Ok(Err(error)) => {
+                buffered.truncate(start);
+                return Err(error.into());
+            }
+            Err(_) => 0,
+        };
+        buffered.truncate(start + count);
+        if count == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 async fn read_exact_timeout<S>(stream: &mut S, buffer: &mut [u8]) -> Result<()>

@@ -63,10 +63,6 @@ impl LinkShared {
         self.pending.fetch_sub(1, Ordering::AcqRel);
     }
 
-    pub(crate) fn load(&self) -> usize {
-        self.lanes.load(Ordering::Acquire) + self.pending.load(Ordering::Acquire)
-    }
-
     pub(crate) fn lane_closed(&self) {
         if self.lanes.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.idle_notify.notify_one();
@@ -185,10 +181,6 @@ impl ClientLink {
 
     pub(crate) fn lanes(&self) -> usize {
         self.shared.lanes()
-    }
-
-    pub(crate) fn load(&self) -> usize {
-        self.shared.load()
     }
 
     pub(crate) async fn open_lane(

@@ -5,8 +5,9 @@ use fiend_core::fingerprint::{
     X25519_MLKEM768, X25519_MLKEM768_SIZE, X25519_SIZE, parse_client_hello,
 };
 use fiend_core::transport::{
-    AcceptOutcome, FreshnessCheck, OriginProfile, Session, accept, connect, parse_server_hello,
-    probe_origin_at, serve_connection, server_hello_extension_order,
+    AcceptOutcome, FreshnessCheck, OriginProfile, ServerFlight, Session, accept,
+    build_server_flight, connect, parse_server_hello, probe_origin_at, serve_connection,
+    server_hello_extension_order,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpListener;
@@ -99,6 +100,8 @@ fn synthetic_template(group: u16) -> Template {
         }],
         cipher_suites: cipher_suites.to_vec(),
         early_data: false,
+        ech: None,
+        extensions_offset: extensions_length,
     };
     template
         .verify(&template.raw)
@@ -128,6 +131,40 @@ async fn connect_pair(template: &Template) -> (Session<DuplexStream>, Session<Du
     };
     let client = connected.expect("client handshake");
     (client, server)
+}
+
+#[test]
+fn default_flight_sizes_are_stable_across_connections() {
+    let build = || {
+        build_server_flight(ServerFlight {
+            server_random: [1u8; 32],
+            session_id: &[2u8; 32],
+            cipher_suite: 0x1301,
+            group: X25519,
+            key: &[3u8; 32],
+            secret: &[4u8; 32],
+            client_random: &[5u8; 32],
+            profile_sizes: &[],
+            extension_order: &[],
+        })
+        .expect("build flight")
+    };
+    let first = build();
+    let second = build();
+    let sizes = |flight: &[u8]| {
+        let mut sizes = Vec::new();
+        let mut position = 0;
+        while position + 5 <= flight.len() {
+            let length = u16::from_be_bytes([flight[position + 3], flight[position + 4]]) as usize;
+            sizes.push(length);
+            position += 5 + length;
+        }
+        assert_eq!(position, flight.len());
+        sizes
+    };
+    assert_eq!(first.len(), second.len());
+    assert_eq!(sizes(&first), sizes(&second));
+    assert_eq!(sizes(&first).len(), 6);
 }
 
 #[test]
@@ -262,6 +299,77 @@ async fn replayed_client_hello_is_passed_through() {
     match outcome {
         AcceptOutcome::Passthrough { buffered, .. } => assert_eq!(buffered, hello),
         AcceptOutcome::Session(_) => panic!("replayed ClientHello was accepted"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_probes_are_passed_through() {
+    let secret = [0x42u8; 32];
+    let replay = FreshnessCheck::new(Duration::from_secs(3600));
+    let profile = OriginProfile::default();
+    for probe in [
+        &[][..],
+        &[0x16, 0x03][..],
+        &[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00][..],
+        &[0x47][..],
+    ] {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        client.write_all(probe).await.expect("write probe");
+        let outcome = accept(server, &secret, &replay, &profile)
+            .await
+            .expect("stalled probe must not fail");
+        match outcome {
+            AcceptOutcome::Passthrough { buffered, .. } => assert_eq!(buffered, probe),
+            AcceptOutcome::Session(_) => panic!("probe was accepted"),
+        }
+        drop(client);
+    }
+}
+
+async fn probe_replay(hello: &[u8], secret: &[u8]) -> ([u8; 32], Vec<u8>) {
+    let replay = FreshnessCheck::new(Duration::from_secs(3600));
+    let profile = OriginProfile::default();
+    let (mut client, server) = tokio::io::duplex(64 * 1024);
+    client.write_all(hello).await.expect("write hello");
+    let probe = async {
+        let mut header = [0u8; 5];
+        client
+            .read_exact(&mut header)
+            .await
+            .expect("ServerHello header");
+        let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+        let mut record = header.to_vec();
+        record.resize(5 + length, 0);
+        client
+            .read_exact(&mut record[5..])
+            .await
+            .expect("ServerHello body");
+        let random = parse_server_hello(&record).expect("parse").random;
+        client
+            .write_all(&[0x14, 0x03, 0x03, 0, 1, 1, 0x17, 0x03, 0x03, 0, 2, 0, 0])
+            .await
+            .expect("write garbage Finished");
+        let mut tail = Vec::new();
+        client.read_to_end(&mut tail).await.expect("read tail");
+        (random, tail)
+    };
+    let (accepted, (random, tail)) = tokio::join!(accept(server, secret, &replay, &profile), probe);
+    assert!(accepted.is_err());
+    (random, tail)
+}
+
+#[tokio::test]
+async fn replay_after_restart_gets_fresh_server_random_and_alert() {
+    let template = sample();
+    let secret = [0x42u8; 32];
+    let hello = template.build(&secret).expect("build hello").record;
+
+    let (first, first_tail) = probe_replay(&hello, &secret).await;
+    let (second, second_tail) = probe_replay(&hello, &secret).await;
+    assert_ne!(first, second);
+    for tail in [first_tail, second_tail] {
+        let alert = &tail[tail.len() - 24..];
+        assert_eq!(&alert[..5], &[0x17, 0x03, 0x03, 0, 19]);
     }
 }
 
@@ -407,4 +515,22 @@ async fn origin_probe_reads_server_shape_metadata() {
     assert_eq!(profile.extension_order, vec![0x002b, 0x0033]);
     assert_eq!(profile.record_sizes, vec![105, 205]);
     origin.await.expect("origin task");
+}
+
+#[tokio::test]
+async fn session_records_may_coalesce_writes() {
+    let template = sample();
+    let (mut client, mut server) = connect_pair(&template).await;
+    for size in [1usize, 100, 16_384, 20_000] {
+        let payload: Vec<u8> = (0..size).map(|index| index as u8).collect();
+        client.write_all(&payload).await.expect("client write");
+        client.flush().await.expect("client flush");
+        let mut read = vec![0u8; size];
+        server.read_exact(&mut read).await.expect("server read");
+        assert_eq!(read, payload);
+    }
+    server.write_all(b"back").await.expect("server write");
+    let mut read = [0u8; 4];
+    client.read_exact(&mut read).await.expect("client read");
+    assert_eq!(&read, b"back");
 }

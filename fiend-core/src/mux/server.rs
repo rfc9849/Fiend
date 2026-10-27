@@ -4,7 +4,6 @@ use bytes::Bytes;
 use h2::RecvStream;
 use h2::server::{Connection, SendResponse};
 use tokio::io::{AsyncRead, AsyncWrite, copy_bidirectional};
-use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use super::config::Config;
@@ -171,29 +170,18 @@ pub(crate) async fn handle_tcp(
         incoming.reject(http::StatusCode::BAD_REQUEST);
         return Ok(());
     }
-    let target = match timeout(target_timeout, target::resolve(&incoming.address, &policy)).await {
-        Ok(Ok(target)) => target,
-        Ok(Err(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+    let mut upstream = match target::connect_tcp(&incoming.address, &policy, target_timeout).await {
+        Ok(upstream) => upstream,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             incoming.reject(http::StatusCode::FORBIDDEN);
             return Ok(());
         }
-        Ok(Err(_)) => {
-            incoming.reject(http::StatusCode::BAD_GATEWAY);
-            return Ok(());
-        }
-        Err(_) => {
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
             incoming.reject(http::StatusCode::GATEWAY_TIMEOUT);
             return Ok(());
         }
-    };
-    let mut upstream = match timeout(target_timeout, TcpStream::connect(target)).await {
-        Ok(Ok(upstream)) => upstream,
-        Ok(Err(_)) => {
-            incoming.reject(http::StatusCode::BAD_GATEWAY);
-            return Ok(());
-        }
         Err(_) => {
-            incoming.reject(http::StatusCode::GATEWAY_TIMEOUT);
+            incoming.reject(http::StatusCode::BAD_GATEWAY);
             return Ok(());
         }
     };

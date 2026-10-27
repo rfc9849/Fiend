@@ -1,6 +1,8 @@
 use super::error::{Error, Result};
 use super::keyshare::{self, KeyShareSpec};
-use super::template::{DEFAULT_RECORD_MAX, FieldOffset, GreaseField, Template};
+use super::template::{
+    DEFAULT_RECORD_MAX, EchGrease, FieldOffset, GreaseField, GreaseKind, Template,
+};
 
 pub fn parse_client_hello(raw: &[u8]) -> Result<Template> {
     if raw.len() < 44 {
@@ -51,7 +53,7 @@ pub fn parse_client_hello(raw: &[u8]) -> Result<Template> {
     if pos + cs_len > raw.len() {
         return Err(Error::invalid("cipher suites truncated"));
     }
-    scan_grease_u16_list(raw, pos, cs_len, &mut grease);
+    scan_grease_u16_list(raw, pos, cs_len, GreaseKind::Cipher, &mut grease);
     for [high, low] in raw[pos..pos + cs_len].as_chunks::<2>().0 {
         cipher_suites.push(u16::from_be_bytes([*high, *low]));
     }
@@ -69,6 +71,7 @@ pub fn parse_client_hello(raw: &[u8]) -> Result<Template> {
     if raw.len() < pos + 2 {
         return Err(Error::invalid("truncated at extensions length"));
     }
+    let extensions_offset = pos;
     let ext_total_len = u16_at(raw, pos)? as usize;
     let ext_start = pos + 2;
     let ext_end = ext_start + ext_total_len;
@@ -83,6 +86,8 @@ pub fn parse_client_hello(raw: &[u8]) -> Result<Template> {
     let mut psk_identity = None;
     let mut ticket_age = None;
     let mut psk_binder = None;
+    let mut ech = None;
+    let mut grease_extensions = 0;
 
     let mut p = ext_start;
     while p < ext_end {
@@ -99,8 +104,15 @@ pub fn parse_client_hello(raw: &[u8]) -> Result<Template> {
         }
 
         if keyshare::is_grease(ext_type) {
+            let kind = match grease_extensions {
+                0 => GreaseKind::Extension1,
+                1 => GreaseKind::Extension2,
+                _ => GreaseKind::Other,
+            };
+            grease_extensions += 1;
             grease.push(GreaseField {
                 value_offset: p,
+                kind,
                 data_offset: (ext_len > 0).then_some(ext_data),
                 data_size: (ext_len > 0).then_some(ext_len),
             });
@@ -119,18 +131,36 @@ pub fn parse_client_hello(raw: &[u8]) -> Result<Template> {
                     if ext_len < 2 {
                         return Err(Error::invalid("supported_groups extension too short"));
                     }
-                    scan_grease_u16_list(raw, ext_data + 2, ext_len - 2, &mut grease);
+                    scan_grease_u16_list(
+                        raw,
+                        ext_data + 2,
+                        ext_len - 2,
+                        GreaseKind::Group,
+                        &mut grease,
+                    );
                 }
                 0x000d => {
                     if ext_len < 2 {
                         return Err(Error::invalid("signature_algorithms extension too short"));
                     }
-                    scan_grease_u16_list(raw, ext_data + 2, ext_len - 2, &mut grease);
+                    scan_grease_u16_list(
+                        raw,
+                        ext_data + 2,
+                        ext_len - 2,
+                        GreaseKind::SignatureAlgorithm,
+                        &mut grease,
+                    );
                 }
                 0x002b => {
                     if ext_len >= 2 {
-                        let versions_len = raw[ext_data] as usize;
-                        scan_grease_u16_list(raw, ext_data + 1, versions_len, &mut grease);
+                        let versions_len = (raw[ext_data] as usize).min(ext_len - 1);
+                        scan_grease_u16_list(
+                            raw,
+                            ext_data + 1,
+                            versions_len,
+                            GreaseKind::Version,
+                            &mut grease,
+                        );
                     }
                 }
                 0x0033 => {
@@ -141,6 +171,9 @@ pub fn parse_client_hello(raw: &[u8]) -> Result<Template> {
                     });
                     key_shares = specs;
                     grease.append(&mut greases);
+                }
+                0xfe0d => {
+                    ech = parse_ech(raw, p, ext_data, ext_len);
                 }
                 0x0029 => {
                     let parsed = parse_psk(raw, ext_data, ext_len)?;
@@ -171,6 +204,8 @@ pub fn parse_client_hello(raw: &[u8]) -> Result<Template> {
         key_shares,
         cipher_suites,
         early_data,
+        ech,
+        extensions_offset,
     };
     template.validate()?;
     Ok(template)
@@ -183,7 +218,13 @@ fn u16_at(raw: &[u8], offset: usize) -> Result<u16> {
     Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
-fn scan_grease_u16_list(raw: &[u8], start: usize, length: usize, out: &mut Vec<GreaseField>) {
+fn scan_grease_u16_list(
+    raw: &[u8],
+    start: usize,
+    length: usize,
+    kind: GreaseKind,
+    out: &mut Vec<GreaseField>,
+) {
     let end = start.saturating_add(length).min(raw.len());
     let mut i = start;
     while i + 1 < end {
@@ -191,12 +232,43 @@ fn scan_grease_u16_list(raw: &[u8], start: usize, length: usize, out: &mut Vec<G
         if keyshare::is_grease(value) {
             out.push(GreaseField {
                 value_offset: i,
+                kind,
                 data_offset: None,
                 data_size: None,
             });
         }
         i += 2;
     }
+}
+
+fn parse_ech(raw: &[u8], extension: usize, data: usize, length: usize) -> Option<EchGrease> {
+    let end = data + length;
+    if length < 8 || raw[data] != 0 {
+        return None;
+    }
+    let config_id = data + 5;
+    let enc_len = u16::from_be_bytes([raw[data + 6], raw[data + 7]]) as usize;
+    let enc = data + 8;
+    if enc_len != 32 || enc + enc_len + 2 > end {
+        return None;
+    }
+    let payload_len = u16::from_be_bytes([raw[enc + enc_len], raw[enc + enc_len + 1]]) as usize;
+    let payload = enc + enc_len + 2;
+    if payload_len == 0 || payload + payload_len != end {
+        return None;
+    }
+    Some(EchGrease {
+        extension,
+        config_id,
+        enc: FieldOffset {
+            offset: enc,
+            size: enc_len,
+        },
+        payload: FieldOffset {
+            offset: payload,
+            size: payload_len,
+        },
+    })
 }
 
 fn parse_sni(data: &[u8]) -> Result<String> {
@@ -240,6 +312,7 @@ fn parse_key_share(
         if keyshare::is_grease(group) {
             grease.push(GreaseField {
                 value_offset: p,
+                kind: GreaseKind::Group,
                 data_offset: (kex_len > 0).then_some(kex_start),
                 data_size: (kex_len > 0).then_some(kex_len),
             });

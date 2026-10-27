@@ -163,6 +163,43 @@ async fn wait_for_links(pool: &LinkPool<DuplexStream>, count: usize) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_lane_opens_do_not_serialize_dials() {
+    let template = Arc::new(Template::from_json(TEMPLATE_JSON).expect("load sample template"));
+    let (sender, receiver) = mpsc::unbounded_channel();
+    start_server(receiver, Config::default(), echo_handler());
+    let pool = Arc::new(LinkPool::new(Config::default(), move || {
+        let template = template.clone();
+        let sender = sender.clone();
+        Box::pin(async move {
+            sleep(Duration::from_millis(150)).await;
+            let (client, server) = connect_pair(&template).await?;
+            sender
+                .send(server)
+                .map_err(|_| fiend_core::transport::Error::invalid("server task stopped"))?;
+            Ok(client)
+        })
+    }));
+
+    let start = Instant::now();
+    let mut handles = Vec::new();
+    for index in 0..6 {
+        let pool = pool.clone();
+        handles.push(tokio::spawn(async move {
+            pool.open_lane(&format!("echo.test:{index}"), LaneKind::Tcp)
+                .await
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("task").expect("open lane");
+    }
+    assert!(
+        start.elapsed() < Duration::from_millis(700),
+        "lane opens serialized the dials: {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h2_lane_round_trip_uses_connect_authority() {
     let pool = test_pool(echo_handler());
     let mut lane = Mux::open(&pool, "echo.test:7", LaneKind::Tcp)
