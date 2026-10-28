@@ -562,3 +562,41 @@ async fn close_wakes_blocked_opens_and_cancels_dial() {
 }
 
 use std::task::Poll;
+
+#[tokio::test(start_paused = true)]
+async fn spread_request_dials_a_second_link() {
+    let pool = pool(Config::default());
+    let link = add_link(&pool).await;
+    let _held = link.reserve();
+    pool.inner.state().spread_request = true;
+    let dial = pool
+        .inner
+        .maintain()
+        .expect("a spread request opens another link");
+    pool.inner.dial_finished(dial.await);
+    assert_eq!(pool.stats().links, 2);
+    assert_eq!(pool.stats().dial_attempts, 1);
+    assert!(!pool.inner.state().spread_request);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_loaded_single_link_spreads_a_new_lane() {
+    let pool = pool(Config::default());
+    let link = add_link(&pool).await;
+    let _a = link.reserve();
+    let _b = link.reserve();
+    let inner = pool.inner.clone();
+    let task = tokio::spawn(async move {
+        inner
+            .acquire(Instant::now() + Duration::from_secs(5))
+            .await
+            .map(|reservation| reservation.link.id())
+    });
+    settle_until(|| pool.inner.state().spread_request).await;
+    let dial = pool.inner.maintain().expect("spread dial");
+    pool.inner.dial_finished(dial.await);
+    let id = task.await.unwrap().unwrap();
+    assert_ne!(id, link.id());
+    assert_eq!(pool.stats().links, 2);
+    assert_eq!(pool.stats().dial_attempts, 1);
+}

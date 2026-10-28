@@ -99,6 +99,9 @@ impl Server {
                 .await
                 .map_err(|_| io::Error::other("connection limit closed"))?;
             let (stream, _) = crate::net::accept(&listener).await;
+            if let Err(error) = crate::net::set_link_buffers(&stream) {
+                tracing::debug!(%error, "cannot set link buffers");
+            }
             if let Err(error) = stream.set_nodelay(true) {
                 tracing::debug!(%error, "cannot set TCP_NODELAY");
             }

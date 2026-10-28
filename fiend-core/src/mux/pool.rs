@@ -21,6 +21,8 @@ pub type DialFn<S> = Arc<dyn Fn() -> DialFuture<S> + Send + Sync>;
 type LinkFuture = Pin<Box<dyn Future<Output = Result<ClientLink>> + Send>>;
 
 const GROWTH_COOLDOWN: Duration = Duration::from_secs(5);
+const SPREAD_WAIT: Duration = Duration::from_secs(1);
+const SPREAD_LANES: usize = 2;
 
 #[cfg(test)]
 #[path = "pool_tests.rs"]
@@ -55,6 +57,7 @@ struct State {
     failed_closures: u64,
     pressure_watermark: usize,
     speculative_attempts: usize,
+    spread_request: bool,
     last_growth: Option<Instant>,
     quiet_since: Option<Instant>,
 }
@@ -130,6 +133,7 @@ where
                     failed_closures: 0,
                     pressure_watermark: 0,
                     speculative_attempts: 0,
+                    spread_request: false,
                     last_growth: None,
                     quiet_since: None,
                 }),
@@ -231,6 +235,7 @@ where
             state.backoff.reset();
             state.pressure_watermark = 0;
             state.speculative_attempts = 0;
+            state.spread_request = false;
             state.last_growth = None;
             state.quiet_since = None;
         }
@@ -356,16 +361,30 @@ where
             state.dial_failures + state.failed_closures
         };
         self.wake.notify_one();
+        let mut spread_until: Option<Instant> = None;
         loop {
             let ready = self.ready.notified();
             tokio::pin!(ready);
             ready.as_mut().enable();
             {
-                let state = self.state();
+                let mut state = self.state();
                 if self.closed() {
                     return Err(Error::Closed);
                 }
-                if let Some(link) = state
+                let now = Instant::now();
+                let loaded = !state.links.is_empty()
+                    && state.links.len() < self.config.max_links
+                    && state.links.iter().all(|link| {
+                        link.is_closed() || link.shared().work().total() >= SPREAD_LANES
+                    });
+                let spread = loaded
+                    && state.backoff.delay.is_zero()
+                    && spread_until.is_none_or(|until| now < until);
+                if spread {
+                    state.spread_request = true;
+                    spread_until.get_or_insert(now + SPREAD_WAIT);
+                    self.wake.notify_one();
+                } else if let Some(link) = state
                     .links
                     .iter()
                     .filter(|link| !link.is_closed() && link.has_capacity())
@@ -432,7 +451,9 @@ where
             state.quiet_since = None;
         }
         let capacity = state.links.iter().any(|link| link.has_capacity());
-        let required = self.waiters.load(Ordering::Acquire) > 0 && !capacity;
+        let waiters = self.waiters.load(Ordering::Acquire);
+        let required = waiters > 0 && !capacity;
+        let spread = state.spread_request && state.links.len() < self.config.max_links;
         let speculative = pressure > state.pressure_watermark
             && state
                 .links
@@ -445,13 +466,14 @@ where
         if state.dialing
             || state.links.len() >= self.config.max_links
             || now < state.backoff.next
-            || !(required || speculative)
+            || !(required || speculative || spread)
         {
             return None;
         }
         state.dialing = true;
         state.dial_attempts += 1;
-        if !required {
+        state.spread_request = false;
+        if !required && !spread {
             state.speculative_attempts += 1;
         }
         let id = state.next_id;
@@ -459,7 +481,7 @@ where
         let dial = self.dial.clone();
         let config = self.config.clone();
         let wake = self.wake.clone();
-        tracing::debug!(link_id = id, required, "mux link dial");
+        tracing::debug!(link_id = id, required, spread, "mux link dial");
         Some(Box::pin(async move {
             timeout(config.open_timeout, async {
                 let session = dial().await?;
