@@ -146,15 +146,24 @@ pub async fn connect_tcp(
     let candidates = tokio::time::timeout_at(deadline, resolve_all(address, policy))
         .await
         .map_err(|_| timed_out())??;
+    let total = candidates.len();
     let mut last = None;
-    for candidate in candidates {
-        match tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(candidate)).await {
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            last = Some(timed_out());
+            break;
+        }
+        let attempts_left = (total - index) as u32;
+        match tokio::time::timeout(
+            remaining / attempts_left,
+            tokio::net::TcpStream::connect(candidate),
+        )
+        .await
+        {
             Ok(Ok(stream)) => return Ok(stream),
             Ok(Err(error)) => last = Some(error),
-            Err(_) => {
-                last = Some(timed_out());
-                break;
-            }
+            Err(_) => last = Some(timed_out()),
         }
     }
     Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "target has no addresses")))
