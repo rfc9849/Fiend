@@ -1,0 +1,10 @@
+[package]
+name = "fiend-tun"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fiend-core = { path = "../fiend-core" }
+hickory-proto = "0.26.3"
+lru = "0.19"
+thiserror = "2"
