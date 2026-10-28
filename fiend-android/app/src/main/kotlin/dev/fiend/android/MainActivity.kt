@@ -1,12 +1,23 @@
 package dev.fiend.android
 
 import android.os.Bundle
+import android.os.Build
+import android.app.Activity
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.VpnService
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -14,20 +25,40 @@ import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.fiend.android.ui.FiendApp
 import dev.fiend.core.data.SettingsRepository
+import dev.fiend.core.data.ProfileRepository
+import dev.fiend.core.data.TunnelController
+import dev.fiend.core.model.TunnelState
 import dev.fiend.core.designsystem.theme.FiendTheme
 import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.ThemeMode
 import javax.inject.Inject
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.launch
+import androidx.lifecycle.viewModelScope
 
 @HiltViewModel
-class MainViewModel @Inject constructor(settings: SettingsRepository) : ViewModel() {
+class MainViewModel @Inject constructor(settings: SettingsRepository, profiles: ProfileRepository, tunnel: TunnelController) : ViewModel() {
     val settings: StateFlow<AppSettings> = settings.settings
+    init {
+        viewModelScope.launch {
+            settings.settings.filter { it.connectOnStart }.first()
+            val list = profiles.profiles.first { it.isNotEmpty() }
+            val id = profiles.activeProfileId.value ?: list.first().id
+            if (tunnel.state.value == TunnelState.Disconnected) tunnel.connect(id)
+        }
+    }
 }
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
+    @Inject lateinit var tunnel: TunnelController
+    private val consent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        tunnel.permissionResult(it.resultCode == Activity.RESULT_OK)
+    }
+    private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
@@ -35,6 +66,25 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             val settings by viewModel.settings.collectAsStateWithLifecycle()
+            val permissionRequired by tunnel.permissionRequired.collectAsStateWithLifecycle()
+            val tunnelState by tunnel.state.collectAsStateWithLifecycle()
+            var consentOpen by rememberSaveable { mutableStateOf(false) }
+            var notificationsAsked by rememberSaveable { mutableStateOf(false) }
+            LaunchedEffect(permissionRequired) {
+                if (!permissionRequired) consentOpen = false
+                else if (!consentOpen) {
+                    consentOpen = true
+                    val request = VpnService.prepare(this@MainActivity)
+                    if (request == null) tunnel.permissionResult(true) else consent.launch(request)
+                }
+            }
+            LaunchedEffect(tunnelState) {
+                if (tunnelState is TunnelState.Connected && Build.VERSION.SDK_INT >= 33 && !notificationsAsked &&
+                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    notificationsAsked = true
+                    notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
             val dark = when (settings.themeMode) {
                 ThemeMode.System -> isSystemInDarkTheme()
                 ThemeMode.Light -> false

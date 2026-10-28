@@ -3,6 +3,7 @@ import org.gradle.api.tasks.OutputDirectory
 
 plugins {
     alias(libs.plugins.fiend.android.library)
+    alias(libs.plugins.fiend.hilt)
 }
 
 abstract class RustExecTask : Exec() {
@@ -80,5 +81,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.core.ktx)
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation("app.cash.turbine:turbine:1.2.1")
     testRuntimeOnly("net.java.dev.jna:jna:5.19.1@jar")
 }

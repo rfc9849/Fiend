@@ -7,12 +7,13 @@ data class Profile(
     val port: Int,
     val secret: String,
     val templateId: String,
+    val templateJson: String? = null,
     val countryCode: String? = null,
     val latencyMs: Int? = null,
     val lastConnectedAt: Long? = null,
     val tuning: Tuning = Tuning(),
 ) {
-    val authority: String get() = "$host:$port"
+    val authority: String get() = if (':' in host && !host.startsWith('[')) "[$host]:$port" else "$host:$port"
 
     val secretHint: String get() = secret.takeLast(4)
 }

@@ -5,3 +5,9 @@ plugins {
 android {
     namespace = "dev.fiend.feature.home"
 }
+
+dependencies {
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation("app.cash.turbine:turbine:1.2.1")
+}

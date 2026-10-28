@@ -35,6 +35,9 @@ interface ProfileRepository {
 interface TunnelController {
     val state: StateFlow<TunnelState>
     val stats: StateFlow<TunnelStats>
+    val permissionRequired: StateFlow<Boolean>
+
+    fun permissionResult(granted: Boolean)
 
     fun connect(profileId: String)
 

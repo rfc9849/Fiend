@@ -6,10 +6,8 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import dev.fiend.core.data.mock.MockAppsRepository
-import dev.fiend.core.data.mock.MockLogRepository
 import dev.fiend.core.data.mock.MockProfileRepository
 import dev.fiend.core.data.mock.MockSettingsRepository
-import dev.fiend.core.data.mock.MockTunnelController
 import javax.inject.Qualifier
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -27,7 +25,7 @@ internal interface DataModule {
     fun profiles(impl: MockProfileRepository): ProfileRepository
 
     @Binds
-    fun tunnel(impl: MockTunnelController): TunnelController
+    fun tunnel(impl: RealTunnelController): TunnelController
 
     @Binds
     fun settings(impl: MockSettingsRepository): SettingsRepository
@@ -36,7 +34,7 @@ internal interface DataModule {
     fun apps(impl: MockAppsRepository): AppsRepository
 
     @Binds
-    fun logs(impl: MockLogRepository): LogRepository
+    fun logs(impl: RealLogRepository): LogRepository
 
     companion object {
         @Provides
