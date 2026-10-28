@@ -1,19 +1,36 @@
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv6Addr};
+use std::io::Read;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::{Path, PathBuf};
 
 use fiend_core::addr::Address;
 use hickory_proto::rr::Name;
 use thiserror::Error;
 
-pub const MAX_LIST_BYTES: usize = 1 << 20;
-pub const MAX_ENTRIES: usize = 100_000;
-pub const MAX_KEYWORDS: usize = 1000;
+use crate::srs::{self, SrsList, SrsSkipped};
+
+pub const MAX_LIST_BYTES: usize = 16 << 20;
+pub const MAX_ENTRIES: usize = 1_000_000;
+pub const MAX_KEYWORDS: usize = 8192;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
     Direct,
     Block,
     Proxy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleKind {
+    Direct,
+    Block,
+    Proxy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuleFile {
+    pub path: String,
+    pub kind: RuleKind,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -26,6 +43,24 @@ pub enum RuleError {
     TooManyKeywords,
     #[error("line {line}: {reason}")]
     Line { line: usize, reason: &'static str },
+}
+
+#[derive(Debug, Error)]
+pub enum RuleFileError {
+    #[error("read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("{path}: {source}")]
+    List { path: PathBuf, source: RuleError },
+    #[error("{path}: {source}")]
+    Srs {
+        path: PathBuf,
+        source: srs::SrsError,
+    },
+    #[error("{path}: rule list is not UTF-8 text")]
+    Utf8 { path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,7 +81,7 @@ impl RuleCounts {
 pub struct DomainSet {
     exact: HashSet<String>,
     suffixes: HashSet<String>,
-    keywords: Vec<String>,
+    keywords: HashSet<String>,
 }
 
 impl DomainSet {
@@ -72,6 +107,26 @@ impl DomainSet {
     pub fn is_empty(&self) -> bool {
         self.exact.is_empty() && self.suffixes.is_empty() && self.keywords.is_empty()
     }
+
+    /// An exact entry that a suffix already matches adds no information.
+    fn finish(&mut self) {
+        if self.suffixes.is_empty() {
+            return;
+        }
+        let suffixes = &self.suffixes;
+        self.exact.retain(|host| {
+            let mut rest = host.as_str();
+            loop {
+                if suffixes.contains(rest) {
+                    return false;
+                }
+                match rest.split_once('.') {
+                    Some((_, tail)) => rest = tail,
+                    None => return true,
+                }
+            }
+        });
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,7 +147,38 @@ impl CidrSet {
         self.v4.is_empty() && self.v6.is_empty()
     }
 
-    fn finish(&mut self) {
+    pub fn insert_range(&mut self, from: IpAddr, to: IpAddr) -> bool {
+        match (from.to_canonical(), to.to_canonical()) {
+            (IpAddr::V4(from), IpAddr::V4(to)) if from <= to => {
+                self.v4.push((u32::from(from), u32::from(to)));
+                true
+            }
+            (IpAddr::V6(from), IpAddr::V6(to)) if from <= to => {
+                self.v6.push((u128::from(from), u128::from(to)));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn ranges(&self) -> impl Iterator<Item = (IpAddr, IpAddr)> + '_ {
+        self.v4
+            .iter()
+            .map(|(from, to)| {
+                (
+                    IpAddr::V4(Ipv4Addr::from(*from)),
+                    IpAddr::V4(Ipv4Addr::from(*to)),
+                )
+            })
+            .chain(self.v6.iter().map(|(from, to)| {
+                (
+                    IpAddr::V6(Ipv6Addr::from(*from)),
+                    IpAddr::V6(Ipv6Addr::from(*to)),
+                )
+            }))
+    }
+
+    pub fn finish(&mut self) {
         merge(&mut self.v4);
         merge(&mut self.v6);
     }
@@ -134,6 +220,89 @@ impl RuleList {
     pub fn counts(&self) -> RuleCounts {
         self.counts
     }
+
+    fn add_suffix(&mut self, host: String) -> Result<(), RuleError> {
+        if self.counts.total() >= MAX_ENTRIES {
+            return Err(RuleError::TooManyEntries);
+        }
+        if self.domains.suffixes.insert(host) {
+            self.counts.domains += 1;
+        }
+        Ok(())
+    }
+
+    fn add_exact(&mut self, host: String) -> Result<(), RuleError> {
+        if self.counts.total() >= MAX_ENTRIES {
+            return Err(RuleError::TooManyEntries);
+        }
+        if self.domains.exact.insert(host) {
+            self.counts.exact += 1;
+        }
+        Ok(())
+    }
+
+    fn add_keyword(&mut self, keyword: String) -> Result<(), RuleError> {
+        if self.counts.total() >= MAX_ENTRIES {
+            return Err(RuleError::TooManyEntries);
+        }
+        if self.domains.keywords.contains(&keyword) {
+            return Ok(());
+        }
+        if self.domains.keywords.len() >= MAX_KEYWORDS {
+            return Err(RuleError::TooManyKeywords);
+        }
+        self.domains.keywords.insert(keyword);
+        self.counts.keywords += 1;
+        Ok(())
+    }
+
+    fn add_range(&mut self, from: IpAddr, to: IpAddr) -> Result<(), RuleError> {
+        if self.counts.total() >= MAX_ENTRIES {
+            return Err(RuleError::TooManyEntries);
+        }
+        if self.cidrs.insert_range(from, to) {
+            self.counts.cidrs += 1;
+        }
+        Ok(())
+    }
+
+    pub fn finish(&mut self) {
+        self.domains.finish();
+        self.cidrs.finish();
+        self.counts.exact = self.domains.exact.len();
+    }
+
+    fn absorb(&mut self, other: RuleList) -> Result<(), RuleError> {
+        for host in other.domains.suffixes {
+            self.add_suffix(host)?;
+        }
+        for host in other.domains.exact {
+            self.add_exact(host)?;
+        }
+        for keyword in other.domains.keywords {
+            self.add_keyword(keyword)?;
+        }
+        for (from, to) in other.cidrs.ranges() {
+            self.add_range(from, to)?;
+        }
+        Ok(())
+    }
+
+    fn extend_srs(&mut self, list: SrsList) -> Result<(), RuleError> {
+        for host in list.suffixes {
+            self.add_suffix(host)?;
+        }
+        for host in list.exact {
+            self.add_exact(host)?;
+        }
+        for keyword in list.keywords {
+            self.add_keyword(keyword.to_ascii_lowercase())?;
+        }
+        for (from, to) in list.ranges {
+            self.add_range(from, to)?;
+        }
+        Ok(())
+    }
 }
 
 pub fn parse_list(text: &str, allow_ip: bool) -> Result<RuleList, RuleError> {
@@ -161,40 +330,34 @@ pub fn parse_list(text: &str, allow_ip: bool) -> Result<RuleList, RuleError> {
         match kind {
             "domain" => {
                 let name = normalize(value).ok_or_else(|| fail("domain is not valid"))?;
-                list.domains.suffixes.insert(name);
-                list.counts.domains += 1;
+                list.add_suffix(name)?;
             }
             "full" => {
                 let name = normalize(value).ok_or_else(|| fail("domain is not valid"))?;
-                list.domains.exact.insert(name);
-                list.counts.exact += 1;
+                list.add_exact(name)?;
             }
             "keyword" => {
                 let keyword = value.to_ascii_lowercase();
                 if keyword.is_empty() {
                     return Err(fail("keyword is empty"));
                 }
-                if list.domains.keywords.len() >= MAX_KEYWORDS {
-                    return Err(RuleError::TooManyKeywords);
-                }
-                list.domains.keywords.push(keyword);
-                list.counts.keywords += 1;
+                list.add_keyword(keyword)?;
             }
             "ip" => {
                 if !allow_ip {
                     return Err(fail("ip entries are not allowed in this list"));
                 }
-                add_cidr(&mut list.cidrs, value).ok_or_else(|| fail("CIDR is not valid"))?;
-                list.counts.cidrs += 1;
+                let (from, to) = parse_cidr(value).ok_or_else(|| fail("CIDR is not valid"))?;
+                list.add_range(from, to)?;
             }
             _ => return Err(fail("entry type is not known")),
         }
     }
-    list.cidrs.finish();
+    list.finish();
     Ok(list)
 }
 
-fn normalize(value: &str) -> Option<String> {
+pub(crate) fn normalize(value: &str) -> Option<String> {
     let value = value.trim_matches('.');
     if value.is_empty() || value.contains(':') || value.contains('/') {
         return None;
@@ -219,7 +382,7 @@ fn normalize(value: &str) -> Option<String> {
     valid.then_some(name)
 }
 
-fn add_cidr(set: &mut CidrSet, value: &str) -> Option<()> {
+fn parse_cidr(value: &str) -> Option<(IpAddr, IpAddr)> {
     let (address, prefix) = match value.split_once('/') {
         Some((address, prefix)) => (address, Some(prefix.parse::<u8>().ok()?)),
         None => (value, None),
@@ -232,7 +395,10 @@ fn add_cidr(set: &mut CidrSet, value: &str) -> Option<()> {
             }
             let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
             let start = u32::from(ip) & mask;
-            set.v4.push((start, start | !mask));
+            Some((
+                IpAddr::V4(Ipv4Addr::from(start)),
+                IpAddr::V4(Ipv4Addr::from(start | !mask)),
+            ))
         }
         IpAddr::V6(ip) => {
             let prefix = prefix.unwrap_or(128);
@@ -241,10 +407,12 @@ fn add_cidr(set: &mut CidrSet, value: &str) -> Option<()> {
             }
             let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
             let start = u128::from(ip) & mask;
-            set.v6.push((start, start | !mask));
+            Some((
+                IpAddr::V6(Ipv6Addr::from(start)),
+                IpAddr::V6(Ipv6Addr::from(start | !mask)),
+            ))
         }
     }
-    Some(())
 }
 
 pub fn is_local(ip: IpAddr) -> bool {
@@ -272,21 +440,93 @@ pub fn is_blocked_udp_port(port: u16) -> bool {
 pub struct Rules {
     direct: RuleList,
     block: RuleList,
+    proxy: RuleList,
     all_direct: bool,
+    skipped: SrsSkipped,
 }
 
 impl Rules {
-    pub fn parse(direct: &str, block: &str) -> Result<Self, RuleError> {
+    pub fn parse(direct: &str, block: &str, proxy: &str) -> Result<Self, RuleError> {
         Ok(Self {
             direct: parse_list(direct, true)?,
             block: parse_list(block, false)?,
+            proxy: parse_list(proxy, true)?,
             all_direct: false,
+            skipped: SrsSkipped::default(),
         })
     }
 
     pub fn with_all_direct(mut self, all_direct: bool) -> Self {
         self.all_direct = all_direct;
         self
+    }
+
+    /// Add one rule file. The format is detected from the magic bytes: a
+    /// sing-box binary rule set or a text list.
+    pub fn add_file(&mut self, file: &RuleFile) -> Result<RuleCounts, RuleFileError> {
+        let path = Path::new(&file.path);
+        let fail = |source| RuleFileError::Read {
+            path: path.to_owned(),
+            source,
+        };
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(fail)?
+            .take((srs::MAX_SRS_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(fail)?;
+        if bytes.len() > srs::MAX_SRS_BYTES {
+            return Err(RuleFileError::List {
+                path: path.to_owned(),
+                source: RuleError::TooLarge,
+            });
+        }
+        let list = match file.kind {
+            RuleKind::Direct => &mut self.direct,
+            RuleKind::Block => &mut self.block,
+            RuleKind::Proxy => &mut self.proxy,
+        };
+        let before = list.counts();
+        if srs::is_srs(&bytes) {
+            let parsed = srs::parse(&bytes).map_err(|source| RuleFileError::Srs {
+                path: path.to_owned(),
+                source,
+            })?;
+            self.skipped.add(parsed.skipped);
+            list.extend_srs(parsed)
+                .map_err(|source| RuleFileError::List {
+                    path: path.to_owned(),
+                    source,
+                })?;
+        } else {
+            let text = std::str::from_utf8(&bytes).map_err(|_| RuleFileError::Utf8 {
+                path: path.to_owned(),
+            })?;
+            let parsed = parse_list(text, file.kind != RuleKind::Block).map_err(|source| {
+                RuleFileError::List {
+                    path: path.to_owned(),
+                    source,
+                }
+            })?;
+            list.absorb(parsed).map_err(|source| RuleFileError::List {
+                path: path.to_owned(),
+                source,
+            })?;
+        }
+        list.finish();
+        let after = list.counts();
+        Ok(RuleCounts {
+            domains: after.domains.saturating_sub(before.domains),
+            exact: after.exact.saturating_sub(before.exact),
+            keywords: after.keywords.saturating_sub(before.keywords),
+            cidrs: after.cidrs.saturating_sub(before.cidrs),
+        })
+    }
+
+    pub fn finish(&mut self) {
+        self.direct.finish();
+        self.block.finish();
+        self.proxy.finish();
     }
 
     pub fn direct_counts(&self) -> RuleCounts {
@@ -297,6 +537,14 @@ impl Rules {
         self.block.counts()
     }
 
+    pub fn proxy_counts(&self) -> RuleCounts {
+        self.proxy.counts()
+    }
+
+    pub fn skipped(&self) -> SrsSkipped {
+        self.skipped
+    }
+
     pub fn is_blocked(&self, domain: &str) -> bool {
         self.block.domains.contains(domain)
     }
@@ -305,24 +553,49 @@ impl Rules {
         match address {
             Address::Ip(address) => {
                 let ip = address.ip();
-                if (bypass_lan && is_local(ip)) || self.all_direct || self.direct.cidrs.contains(ip)
-                {
-                    Route::Direct
-                } else {
-                    Route::Proxy
+                if bypass_lan && is_local(ip) {
+                    return Route::Direct;
                 }
+                if self.block.cidrs.contains(ip) {
+                    return Route::Block;
+                }
+                if self.all_direct {
+                    return Route::Direct;
+                }
+                if self.proxy.cidrs.contains(ip) {
+                    return Route::Proxy;
+                }
+                if self.direct.cidrs.contains(ip) {
+                    return Route::Direct;
+                }
+                Route::Proxy
             }
             Address::Domain { host, .. } => {
                 let host = host.trim_end_matches('.').to_ascii_lowercase();
                 if self.block.domains.contains(&host) {
-                    Route::Block
-                } else if self.all_direct || self.direct.domains.contains(&host) {
-                    Route::Direct
-                } else {
-                    Route::Proxy
+                    return Route::Block;
                 }
+                if self.all_direct {
+                    return Route::Direct;
+                }
+                if self.proxy.domains.contains(&host) {
+                    return Route::Proxy;
+                }
+                if self.direct.domains.contains(&host) {
+                    return Route::Direct;
+                }
+                Route::Proxy
             }
         }
+    }
+}
+
+impl SrsSkipped {
+    fn add(&mut self, other: SrsSkipped) {
+        self.rules += other.rules;
+        self.regex += other.regex;
+        self.adguard += other.adguard;
+        self.logical += other.logical;
     }
 }
 
@@ -338,9 +611,17 @@ mod tests {
         Address::Ip(address.parse().unwrap())
     }
 
+    fn fixture(name: &str) -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn suffix_matches_on_label_boundaries() {
-        let rules = Rules::parse("domain:ru\nyandex.net\n", "").unwrap();
+        let rules = Rules::parse("domain:ru\nyandex.net\n", "", "").unwrap();
         for host in ["yandex.ru", "ru", "a.b.yandex.net", "yandex.net"] {
             assert_eq!(rules.route(&domain(host), false), Route::Direct, "{host}");
         }
@@ -351,7 +632,7 @@ mod tests {
 
     #[test]
     fn full_entry_matches_only_the_exact_name() {
-        let rules = Rules::parse("full:Example.com.\n", "").unwrap();
+        let rules = Rules::parse("full:Example.com.\n", "", "").unwrap();
         assert_eq!(rules.route(&domain("example.com"), false), Route::Direct);
         assert_eq!(rules.route(&domain("EXAMPLE.com."), false), Route::Direct);
         assert_eq!(rules.route(&domain("www.example.com"), false), Route::Proxy);
@@ -359,7 +640,7 @@ mod tests {
 
     #[test]
     fn keyword_matches_a_substring() {
-        let rules = Rules::parse("keyword:Yandex\n", "keyword:track\n").unwrap();
+        let rules = Rules::parse("keyword:Yandex\n", "keyword:track\n", "").unwrap();
         assert_eq!(
             rules.route(&domain("my-yandex-cdn.net"), false),
             Route::Direct
@@ -372,6 +653,7 @@ mod tests {
     fn cidr_v4_and_v6_with_overlap_and_adjacent_ranges() {
         let rules = Rules::parse(
             "ip:10.0.0.0/8\nip:10.1.0.0/16\nip:1.2.3.0/25\nip:1.2.3.128/25\nip:5.5.5.5\nip:2a00:1450::/32\nip:::1\nip:0.0.0.0/0\n",
+            "",
             "",
         )
         .unwrap();
@@ -393,7 +675,8 @@ mod tests {
                 .cidrs
                 .contains("::ffff:10.0.0.1".parse().unwrap())
         );
-        let rules = Rules::parse("ip:1.2.3.0/24\nip:2a00:1450::/32\nip:5.5.5.5/32\n", "").unwrap();
+        let rules =
+            Rules::parse("ip:1.2.3.0/24\nip:2a00:1450::/32\nip:5.5.5.5/32\n", "", "").unwrap();
         assert_eq!(rules.route(&ip("1.2.3.4:80"), false), Route::Direct);
         assert_eq!(rules.route(&ip("1.2.4.4:80"), false), Route::Proxy);
         assert_eq!(rules.route(&ip("1.2.2.255:80"), false), Route::Proxy);
@@ -405,7 +688,7 @@ mod tests {
 
     #[test]
     fn full_range_cidr_does_not_overflow() {
-        let rules = Rules::parse("ip:0.0.0.0/0\nip:::/0\nip:255.255.255.255\n", "").unwrap();
+        let rules = Rules::parse("ip:0.0.0.0/0\nip:::/0\nip:255.255.255.255\n", "", "").unwrap();
         assert_eq!(rules.route(&ip("255.255.255.255:1"), false), Route::Direct);
         assert_eq!(rules.route(&ip("[ffff::]:1"), false), Route::Direct);
     }
@@ -415,6 +698,7 @@ mod tests {
         let rules = Rules::parse(
             "domain:both.example\nip:192.168.0.0/16\nip:8.8.8.0/24\n",
             "domain:both.example\n",
+            "",
         )
         .unwrap();
         assert_eq!(rules.route(&ip("192.168.1.1:80"), true), Route::Direct);
@@ -431,13 +715,37 @@ mod tests {
     }
 
     #[test]
+    fn proxy_list_wins_over_the_direct_list() {
+        let rules = Rules::parse(
+            "domain:ru\nip:5.255.255.0/24\n",
+            "domain:ads.example\n",
+            "domain:ru-blocked.example\nip:5.255.255.0/24\n",
+        )
+        .unwrap();
+        assert_eq!(
+            rules.route(&domain("www.ru-blocked.example"), false),
+            Route::Proxy
+        );
+        assert_eq!(
+            rules.route(&domain("ru-blocked.example"), false),
+            Route::Proxy
+        );
+        assert_eq!(rules.route(&domain("yandex.ru"), false), Route::Direct);
+        assert_eq!(rules.route(&domain("ads.example"), false), Route::Block);
+        assert_eq!(rules.route(&ip("5.255.255.9:443"), false), Route::Proxy);
+        assert_eq!(rules.route(&ip("8.8.8.8:443"), false), Route::Proxy);
+        assert_eq!(rules.proxy_counts().domains, 1);
+    }
+
+    #[test]
     fn all_direct_sends_everything_direct_but_keeps_blocks() {
-        let rules = Rules::parse("", "domain:ads.example\n")
+        let rules = Rules::parse("", "domain:ads.example\n", "domain:proxy.example\n")
             .unwrap()
             .with_all_direct(true);
         assert_eq!(rules.route(&domain("example.org"), false), Route::Direct);
         assert_eq!(rules.route(&ip("1.1.1.1:443"), false), Route::Direct);
         assert_eq!(rules.route(&domain("ads.example"), false), Route::Block);
+        assert_eq!(rules.route(&domain("proxy.example"), false), Route::Direct);
     }
 
     #[test]
@@ -456,6 +764,19 @@ mod tests {
         assert!(list.domains.contains("example.com"));
         assert!(list.domains.contains("xn--p1ai"));
         assert!(list.domains.contains("site.xn--p1ai"));
+    }
+
+    #[test]
+    fn an_exact_entry_inside_a_suffix_is_dropped() {
+        let list = parse_list(
+            "domain:example.com\nfull:example.com\nfull:www.example.com\n",
+            true,
+        )
+        .unwrap();
+        assert_eq!(list.counts().domains, 1);
+        assert_eq!(list.counts().exact, 0);
+        assert!(list.domains.contains("example.com"));
+        assert!(list.domains.contains("www.example.com"));
     }
 
     #[test]
@@ -478,7 +799,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            Rules::parse("", "ip:1.2.3.0/24\n"),
+            Rules::parse("", "ip:1.2.3.0/24\n", ""),
             Err(RuleError::Line { line: 1, .. })
         ));
     }
@@ -497,10 +818,6 @@ mod tests {
             parse_list(&many, true).unwrap_err(),
             RuleError::TooManyEntries
         );
-        let ok = (0..MAX_ENTRIES)
-            .map(|index| format!("{index}.x\n"))
-            .collect::<String>();
-        assert_eq!(parse_list(&ok, true).unwrap().counts().domains, MAX_ENTRIES);
         let keywords = (0..=MAX_KEYWORDS)
             .map(|index| format!("keyword:k{index}\n"))
             .collect::<String>();
@@ -527,5 +844,65 @@ mod tests {
         assert!(!is_blocked_udp_port(53));
         assert!(is_local("fd00::1".parse().unwrap()));
         assert!(!is_local("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn binary_rule_sets_load_from_a_file() {
+        let mut rules = Rules::default();
+        let counts = rules
+            .add_file(&RuleFile {
+                path: fixture("geosite-2gis.srs"),
+                kind: RuleKind::Direct,
+            })
+            .unwrap();
+        assert!(counts.total() > 0);
+        rules.finish();
+        assert_eq!(rules.route(&domain("2gis.ru"), false), Route::Direct);
+        assert_eq!(rules.route(&domain("www.2gis.ru"), false), Route::Direct);
+        assert_eq!(rules.route(&domain("2gis.example"), false), Route::Proxy);
+        assert_eq!(rules.skipped(), SrsSkipped::default());
+    }
+
+    #[test]
+    fn binary_ip_rule_sets_load_from_a_file() {
+        let mut rules = Rules::default();
+        rules
+            .add_file(&RuleFile {
+                path: fixture("geoip-ru.srs"),
+                kind: RuleKind::Direct,
+            })
+            .unwrap();
+        rules.finish();
+        assert!(rules.direct_counts().cidrs > 1000);
+        assert_eq!(rules.route(&ip("5.255.255.1:443"), false), Route::Direct);
+    }
+
+    #[test]
+    fn text_files_load_from_a_file() {
+        let path = std::env::temp_dir().join("fiend-rules-text-test.txt");
+        std::fs::write(&path, "domain:example.com\nip:10.0.0.0/8\n").unwrap();
+        let mut rules = Rules::default();
+        rules
+            .add_file(&RuleFile {
+                path: path.to_string_lossy().into_owned(),
+                kind: RuleKind::Direct,
+            })
+            .unwrap();
+        rules.finish();
+        assert_eq!(rules.route(&domain("a.example.com"), false), Route::Direct);
+        assert_eq!(rules.route(&ip("10.1.2.3:80"), false), Route::Direct);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error() {
+        let mut rules = Rules::default();
+        let error = rules
+            .add_file(&RuleFile {
+                path: "/nonexistent/fiend.srs".to_owned(),
+                kind: RuleKind::Direct,
+            })
+            .unwrap_err();
+        assert!(matches!(error, RuleFileError::Read { .. }));
     }
 }

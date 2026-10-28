@@ -67,6 +67,19 @@ pub trait Platform: Send + Sync {
     fn on_log(&self, line: LogLine) -> Result<(), PlatformError>;
 }
 
+#[derive(Clone, Copy, uniffi::Enum)]
+pub enum RuleKind {
+    Direct,
+    Block,
+    Proxy,
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct RuleFile {
+    pub path: String,
+    pub kind: RuleKind,
+}
+
 #[derive(uniffi::Record)]
 pub struct TunOptions {
     pub mtu: u16,
@@ -75,6 +88,8 @@ pub struct TunOptions {
     pub direct_all: bool,
     pub direct_rules: String,
     pub block_rules: String,
+    pub proxy_rules: String,
+    pub rule_files: Vec<RuleFile>,
     pub direct_resolver: String,
     pub handshake_timeout_ms: u64,
     pub max_connections: u32,
@@ -99,6 +114,30 @@ pub fn validate_rules(text: String, allow_ip: bool) -> Result<RuleStats, FiendEr
         }
     })?;
     let counts = list.counts();
+    let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+    Ok(RuleStats {
+        domains: count(counts.domains),
+        exact: count(counts.exact),
+        keywords: count(counts.keywords),
+        cidrs: count(counts.cidrs),
+    })
+}
+
+#[uniffi::export]
+pub fn inspect_rule_file(path: String, kind: RuleKind) -> Result<RuleStats, FiendError> {
+    let mut rules = fiend_tun::rules::Rules::default();
+    let counts = rules
+        .add_file(&fiend_tun::rules::RuleFile {
+            path,
+            kind: match kind {
+                RuleKind::Direct => fiend_tun::rules::RuleKind::Direct,
+                RuleKind::Block => fiend_tun::rules::RuleKind::Block,
+                RuleKind::Proxy => fiend_tun::rules::RuleKind::Proxy,
+            },
+        })
+        .map_err(|error| FiendError::InvalidRules {
+            reason: error.to_string(),
+        })?;
     let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
     Ok(RuleStats {
         domains: count(counts.domains),
@@ -219,6 +258,19 @@ impl Tunnel {
                     direct_all: options.direct_all,
                     direct_rules: options.direct_rules,
                     block_rules: options.block_rules,
+                    proxy_rules: options.proxy_rules,
+                    rule_files: options
+                        .rule_files
+                        .into_iter()
+                        .map(|file| fiend_tun::rules::RuleFile {
+                            path: file.path,
+                            kind: match file.kind {
+                                RuleKind::Direct => fiend_tun::rules::RuleKind::Direct,
+                                RuleKind::Block => fiend_tun::rules::RuleKind::Block,
+                                RuleKind::Proxy => fiend_tun::rules::RuleKind::Proxy,
+                            },
+                        })
+                        .collect(),
                     direct_resolver: options.direct_resolver,
                     max_tcp_flows: max_connections,
                     max_udp_flows,
@@ -383,6 +435,8 @@ mod tests {
             direct_all: false,
             direct_rules: String::new(),
             block_rules: String::new(),
+            proxy_rules: String::new(),
+            rule_files: Vec::new(),
             direct_resolver: String::new(),
             handshake_timeout_ms: 10000,
             max_connections: 256,
@@ -407,6 +461,18 @@ mod tests {
         assert!(validate_rules("regexp:x".into(), true).is_err());
         assert!(validate_resolver(String::new()).is_ok());
         assert!(validate_resolver("dns.example".into()).is_err());
+    }
+
+    #[test]
+    fn rule_files_are_inspected() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fiend-tun/tests/data/geosite-2gis.srs")
+            .to_string_lossy()
+            .into_owned();
+        let stats = inspect_rule_file(path.clone(), RuleKind::Direct).unwrap();
+        assert!(stats.domains > 0);
+        assert!(inspect_rule_file(path, RuleKind::Block).is_ok());
+        assert!(inspect_rule_file("/nonexistent/fiend.srs".into(), RuleKind::Direct).is_err());
     }
 
     #[test]

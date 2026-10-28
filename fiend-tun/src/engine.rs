@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::dns::FakeDns;
 use crate::packet::{FlowKey, Packet, Reassembly, Transport, udp_packets};
 use crate::resolve::{Resolver, parse_server};
-use crate::rules::{Route, Rules, is_blocked_udp_port, is_null_network};
+use crate::rules::{Route, RuleFile, Rules, is_blocked_udp_port, is_null_network};
 
 pub trait PacketIo: Send + Sync + 'static {
     fn recv(&self, packet: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send;
@@ -45,6 +45,8 @@ pub struct TunOptions {
     pub direct_all: bool,
     pub direct_rules: String,
     pub block_rules: String,
+    pub proxy_rules: String,
+    pub rule_files: Vec<RuleFile>,
     pub direct_resolver: String,
     pub max_tcp_flows: usize,
     pub max_udp_flows: usize,
@@ -63,6 +65,8 @@ impl Default for TunOptions {
             direct_all: false,
             direct_rules: String::new(),
             block_rules: String::new(),
+            proxy_rules: String::new(),
+            rule_files: Vec::new(),
             direct_resolver: String::new(),
             max_tcp_flows: 256,
             max_udp_flows: 256,
@@ -121,11 +125,24 @@ impl TunEngine {
                 "TUN options are not valid",
             ));
         }
-        let rules = Rules::parse(
+        let mut rules = Rules::parse(
             &std::mem::take(&mut options.direct_rules),
             &std::mem::take(&mut options.block_rules),
+            &std::mem::take(&mut options.proxy_rules),
         )
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        for file in std::mem::take(&mut options.rule_files) {
+            match rules.add_file(&file) {
+                Ok(counts) => tracing::info!(
+                    path = %file.path,
+                    kind = ?file.kind,
+                    entries = counts.total(),
+                    "loaded rule file"
+                ),
+                Err(error) => tracing::warn!(%error, "skipped rule file"),
+            }
+        }
+        rules.finish();
         let rules = Arc::new(rules.with_all_direct(options.direct_all));
         let resolver = Resolver::new(
             parse_server(&options.direct_resolver)?,
