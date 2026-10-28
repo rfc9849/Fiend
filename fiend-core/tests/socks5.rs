@@ -331,6 +331,9 @@ async fn latency_stays_low_under_bulk() {
                 .await
                 .expect("bulk write");
             sent += size as u64;
+            if sent.is_multiple_of(512 << 10) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
         let _ = bulk_write.shutdown().await;
         sent

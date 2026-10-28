@@ -14,6 +14,7 @@ use crate::target::{self, TargetPolicy};
 
 pub struct ServerConnection<S> {
     connection: Connection<S, Bytes>,
+    lane_share: usize,
 }
 
 impl<S> ServerConnection<S>
@@ -32,17 +33,22 @@ where
         let connection = timeout(config.settings_timeout, builder.handshake(session))
             .await
             .map_err(|_| Error::Timeout)??;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            lane_share: config.lane_share,
+        })
     }
 
     pub async fn accept(&mut self) -> Result<Option<Incoming>> {
         loop {
             match self.connection.accept().await {
-                Some(Ok((request, respond))) => match Incoming::parse(request, respond) {
-                    Ok(incoming) => return Ok(Some(incoming)),
-                    Err(Error::InvalidConnect) => continue,
-                    Err(error) => return Err(error),
-                },
+                Some(Ok((request, respond))) => {
+                    match Incoming::parse(request, respond, self.lane_share) {
+                        Ok(incoming) => return Ok(Some(incoming)),
+                        Err(Error::InvalidConnect) => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
                 Some(Err(error)) => return Err(error.into()),
                 None => return Ok(None),
             }
@@ -56,10 +62,15 @@ pub struct Incoming {
     pub address: Address,
     body: RecvStream,
     respond: SendResponse<Bytes>,
+    lane_share: usize,
 }
 
 impl Incoming {
-    fn parse(request: http::Request<RecvStream>, mut respond: SendResponse<Bytes>) -> Result<Self> {
+    fn parse(
+        request: http::Request<RecvStream>,
+        mut respond: SendResponse<Bytes>,
+        lane_share: usize,
+    ) -> Result<Self> {
         let (parts, body) = request.into_parts();
         let authority = parts
             .uri
@@ -102,6 +113,7 @@ impl Incoming {
             address,
             body,
             respond,
+            lane_share,
         })
     }
 
@@ -117,7 +129,7 @@ impl Incoming {
             self.authority,
             send,
             self.body,
-            LaneOptions::server(),
+            LaneOptions::server(self.lane_share),
         ))
     }
 

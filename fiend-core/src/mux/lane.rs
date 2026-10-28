@@ -6,8 +6,9 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use h2::{Reason, RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::Instant;
 
-use super::link::LinkShared;
+use super::link::{LOAD_INTERVAL, LinkShared};
 
 pub const LANE_HEADER: &str = "x-lane";
 
@@ -62,11 +63,11 @@ impl LaneOptions {
         }
     }
 
-    pub(crate) fn server() -> Self {
+    pub(crate) fn server(lane_share: usize) -> Self {
         Self {
             link_id: 0,
             shared: None,
-            lane_share: 32 << 10,
+            lane_share,
             bulk_lane_bytes: 0,
         }
     }
@@ -85,8 +86,10 @@ pub struct H2Lane {
     shared: Option<Arc<LinkShared>>,
     lane_share: usize,
     bulk_lane_bytes: u64,
-    carried: u64,
-    bulk: bool,
+    carried: [u64; 2],
+    sampled: Instant,
+    bulk_until: Option<Instant>,
+    blocked: bool,
 }
 
 impl H2Lane {
@@ -119,8 +122,10 @@ impl H2Lane {
             shared,
             lane_share: lane_share.max(1),
             bulk_lane_bytes,
-            carried: 0,
-            bulk: false,
+            carried: [0; 2],
+            sampled: Instant::now(),
+            bulk_until: None,
+            blocked: false,
         }
     }
 
@@ -129,7 +134,7 @@ impl H2Lane {
     }
 
     pub fn is_bulk(&self) -> bool {
-        self.bulk
+        self.bulk_until.is_some_and(|until| Instant::now() < until)
     }
 
     fn track(&mut self, bytes: usize, inbound: bool) {
@@ -139,11 +144,25 @@ impl H2Lane {
         if bytes == 0 {
             return;
         }
-        shared.note_io(inbound);
-        self.carried = self.carried.saturating_add(bytes as u64);
-        if !self.bulk && self.carried >= self.bulk_lane_bytes {
-            self.bulk = true;
-            shared.add_bulk_lane();
+        shared.note_io(bytes, inbound);
+        let now = Instant::now();
+        if now.duration_since(self.sampled) >= LOAD_INTERVAL {
+            self.sampled = now;
+            self.carried = [0; 2];
+        }
+        let direction = usize::from(inbound);
+        self.carried[direction] = self.carried[direction].saturating_add(bytes as u64);
+        if self.carried[direction] >= self.bulk_lane_bytes {
+            self.bulk_until = Some(now + std::time::Duration::from_secs(1));
+        }
+    }
+
+    fn set_blocked(&mut self, blocked: bool) {
+        if self.blocked != blocked {
+            if let Some(shared) = &self.shared {
+                shared.blocked(blocked);
+            }
+            self.blocked = blocked;
         }
     }
 }
@@ -158,6 +177,7 @@ impl Lane for H2Lane {
     }
 
     fn reset(&mut self) {
+        self.set_blocked(false);
         self.send.send_reset(Reason::CANCEL);
         self.reset = true;
         self.send_eof = true;
@@ -220,6 +240,7 @@ impl AsyncWrite for H2Lane {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
 
+        this.set_blocked(false);
         loop {
             let capacity = this.send.capacity();
             if capacity == 0 {
@@ -233,7 +254,10 @@ impl AsyncWrite for H2Lane {
                     Poll::Ready(None) => {
                         return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        this.set_blocked(true);
+                        return Poll::Pending;
+                    }
                 }
             }
 
@@ -253,6 +277,7 @@ impl AsyncWrite for H2Lane {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        this.set_blocked(false);
         if this.send_eof {
             return Poll::Ready(Ok(()));
         }
@@ -275,13 +300,11 @@ impl AsyncWrite for H2Lane {
 
 impl Drop for H2Lane {
     fn drop(&mut self) {
+        self.set_blocked(false);
         if let Some(shared) = &self.shared {
-            if self.bulk {
-                shared.remove_bulk_lane();
-            }
             shared.lane_closed();
         }
-        if !self.reset && !(self.send_eof && self.recv_eof) {
+        if !(self.reset || self.send_eof && self.recv_eof) {
             self.send.send_reset(Reason::CANCEL);
         }
     }

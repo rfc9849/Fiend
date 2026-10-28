@@ -1,22 +1,30 @@
-use std::future::Future;
+use std::future::{Future, pending};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{Notify, Semaphore};
-use tokio::time::{sleep, timeout};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, MissedTickBehavior, interval, timeout, timeout_at};
 
 use super::config::Config;
 use super::error::{Error, Result};
 use super::lane::{H2Lane, LaneKind};
-use super::link::ClientLink;
+use super::link::{ClientLink, LOAD_INTERVAL, LaneReservation};
 use crate::transport::{self, Session};
 
 pub type DialFuture<S> =
     Pin<Box<dyn Future<Output = std::result::Result<Session<S>, transport::Error>> + Send>>;
 pub type DialFn<S> = Arc<dyn Fn() -> DialFuture<S> + Send + Sync>;
+type LinkFuture = Pin<Box<dyn Future<Output = Result<ClientLink>> + Send>>;
+
+const GROWTH_COOLDOWN: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+#[path = "pool_tests.rs"]
+mod tests;
 
 pub struct LinkPool<S> {
     inner: Arc<PoolInner<S>>,
@@ -25,12 +33,29 @@ pub struct LinkPool<S> {
 struct PoolInner<S> {
     config: Config,
     dial: DialFn<S>,
-    links: Mutex<Vec<Arc<ClientLink>>>,
-    dial_permit: Arc<Semaphore>,
+    state: Mutex<State>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    wake: Arc<Notify>,
     ready: Notify,
-    backoff: Mutex<Backoff>,
+    shutdown: Arc<Notify>,
+    waiters: AtomicUsize,
+    wait_us: AtomicU64,
     closed: AtomicBool,
-    next_id: AtomicU64,
+}
+
+struct State {
+    links: Vec<Arc<ClientLink>>,
+    backoff: Backoff,
+    next_id: u64,
+    dialing: bool,
+    dial_attempts: u64,
+    dial_failures: u64,
+    idle_closures: u64,
+    failed_closures: u64,
+    pressure_watermark: usize,
+    speculative_attempts: usize,
+    last_growth: Option<Instant>,
+    quiet_since: Option<Instant>,
 }
 
 struct Backoff {
@@ -46,18 +71,13 @@ impl Backoff {
         }
     }
 
-    fn wait(&self) -> Duration {
-        self.next.saturating_duration_since(Instant::now())
-    }
-
     fn fail(&mut self, config: &Config) {
-        let delay = if self.delay.is_zero() {
+        self.delay = if self.delay.is_zero() {
             config.backoff_floor
         } else {
-            (self.delay * 2).min(config.backoff_ceiling)
+            self.delay.saturating_mul(2).min(config.backoff_ceiling)
         };
-        self.delay = delay;
-        self.next = Instant::now() + delay;
+        self.next = Instant::now() + self.delay;
     }
 
     fn reset(&mut self) {
@@ -71,6 +91,15 @@ pub struct PoolStats {
     pub links: usize,
     pub bulk_links: usize,
     pub lanes: usize,
+    pub pending_lanes: usize,
+    pub blocked_writers: usize,
+    pub waiting_opens: usize,
+    pub dialing: bool,
+    pub dial_attempts: u64,
+    pub dial_failures: u64,
+    pub idle_closures: u64,
+    pub failed_closures: u64,
+    pub link_wait_us: u64,
     pub link_ids: Vec<u64>,
 }
 
@@ -88,12 +117,27 @@ where
             inner: Arc::new(PoolInner {
                 config,
                 dial,
-                links: Mutex::new(Vec::new()),
-                dial_permit: Arc::new(Semaphore::new(1)),
+                state: Mutex::new(State {
+                    links: Vec::new(),
+                    backoff: Backoff::new(),
+                    next_id: 1,
+                    dialing: false,
+                    dial_attempts: 0,
+                    dial_failures: 0,
+                    idle_closures: 0,
+                    failed_closures: 0,
+                    pressure_watermark: 0,
+                    speculative_attempts: 0,
+                    last_growth: None,
+                    quiet_since: None,
+                }),
+                worker: Mutex::new(None),
+                wake: Arc::new(Notify::new()),
                 ready: Notify::new(),
-                backoff: Mutex::new(Backoff::new()),
+                shutdown: Arc::new(Notify::new()),
+                waiters: AtomicUsize::new(0),
+                wait_us: AtomicU64::new(0),
                 closed: AtomicBool::new(false),
-                next_id: AtomicU64::new(1),
             }),
         }
     }
@@ -103,44 +147,54 @@ where
     }
 
     pub async fn open_lane(&self, authority: &str, kind: LaneKind) -> Result<H2Lane> {
+        let shutdown = self.inner.shutdown.notified();
+        tokio::pin!(shutdown);
+        shutdown.as_mut().enable();
         if self.inner.closed() {
             return Err(Error::Closed);
         }
+        self.inner.start_worker();
         let deadline = Instant::now() + self.inner.config.open_timeout;
+        tokio::select! {
+            biased;
+            _ = shutdown => Err(Error::Closed),
+            result = timeout_at(deadline, self.open_until(authority, kind, deadline)) => {
+                result.unwrap_or(Err(Error::Timeout))
+            }
+        }
+    }
+
+    async fn open_until(
+        &self,
+        authority: &str,
+        kind: LaneKind,
+        deadline: Instant,
+    ) -> Result<H2Lane> {
         let mut last = Error::Unavailable;
-
         for _ in 0..self.inner.config.attempts {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(Error::Timeout);
-            }
-            let link = match self.inner.acquire(deadline).await {
-                Ok(link) => link,
-                Err(Error::Closed) => return Err(Error::Closed),
-                Err(error) => {
-                    last = error;
-                    continue;
-                }
-            };
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(Error::Timeout);
-            }
-
-            match timeout(
-                remaining,
-                link.open_lane(authority, kind, &self.inner.config),
-            )
-            .await
+            let reservation = self.inner.acquire(deadline).await?;
+            let link = reservation.link.clone();
+            match link
+                .open_lane(authority, kind, &self.inner.config, reservation)
+                .await
             {
-                Ok(Ok(lane)) => return Ok(lane),
-                Ok(Err(Error::Rejected(status))) => return Err(Error::Rejected(status)),
-                Ok(Err(error)) if error.closes_link() => {
+                Ok(lane) => {
+                    if link.first_use() {
+                        self.inner.state().backoff.reset();
+                    }
+                    return Ok(lane);
+                }
+                Err(Error::Rejected(status)) => {
+                    if link.first_use() {
+                        self.inner.state().backoff.reset();
+                    }
+                    return Err(Error::Rejected(status));
+                }
+                Err(error) if error.closes_link() => {
                     self.inner.discard(&link);
                     last = error;
                 }
-                Ok(Err(error)) => last = error,
-                Err(_) => last = Error::Timeout,
+                Err(error) => last = error,
             }
         }
         Err(last)
@@ -157,19 +211,91 @@ where
 
 impl<S> Drop for LinkPool<S> {
     fn drop(&mut self) {
-        if self.inner.closed.swap(true, Ordering::AcqRel) {
+        self.inner.close();
+    }
+}
+
+impl<S> PoolInner<S> {
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn close(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let links = std::mem::take(
-            &mut *self
-                .inner
-                .links
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
-        for link in links {
+        self.shutdown.notify_waiters();
+        self.ready.notify_waiters();
+        if let Some(worker) = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            worker.abort();
+        }
+        let mut state = self.state();
+        state.dialing = false;
+        for link in state.links.drain(..) {
             link.close();
         }
+    }
+
+    fn discard(&self, link: &Arc<ClientLink>) {
+        let mut state = self.state();
+        link.close();
+        let before = state.links.len();
+        state
+            .links
+            .retain(|candidate| !Arc::ptr_eq(candidate, link));
+        state.failed_closures += (before - state.links.len()) as u64;
+        if before != state.links.len() {
+            state.backoff.fail(&self.config);
+        }
+        self.wake.notify_one();
+        self.ready.notify_waiters();
+    }
+
+    fn stats(&self) -> PoolStats {
+        let state = self.state();
+        let links: Vec<_> = state
+            .links
+            .iter()
+            .filter(|link| !link.is_closed())
+            .collect();
+        PoolStats {
+            links: links.len(),
+            bulk_links: links.iter().filter(|link| link.is_bulk()).count(),
+            lanes: links.iter().map(|link| link.shared().work().lanes).sum(),
+            pending_lanes: links.iter().map(|link| link.shared().work().pending).sum(),
+            blocked_writers: links
+                .iter()
+                .map(|link| link.shared().blocked_writers())
+                .sum(),
+            waiting_opens: self.waiters.load(Ordering::Acquire),
+            dialing: state.dialing,
+            dial_attempts: state.dial_attempts,
+            dial_failures: state.dial_failures,
+            idle_closures: state.idle_closures,
+            failed_closures: state.failed_closures,
+            link_wait_us: self.wait_us.load(Ordering::Relaxed),
+            link_ids: links.iter().map(|link| link.id()).collect(),
+        }
+    }
+}
+
+struct Demand<'a, S> {
+    pool: &'a PoolInner<S>,
+    started: Instant,
+}
+
+impl<S> Drop for Demand<'_, S> {
+    fn drop(&mut self) {
+        self.pool.waiters.fetch_sub(1, Ordering::AcqRel);
+        self.pool.wait_us.fetch_add(
+            self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+        self.pool.wake.notify_one();
     }
 }
 
@@ -177,230 +303,187 @@ impl<S> PoolInner<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    fn closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
-    }
-
-    fn lock_links(&self) -> MutexGuard<'_, Vec<Arc<ClientLink>>> {
-        self.links
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn lock_backoff(&self) -> MutexGuard<'_, Backoff> {
-        self.backoff
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn snapshot(&self) -> (Option<Arc<ClientLink>>, Option<Arc<ClientLink>>, usize) {
-        let mut links = self.lock_links();
-        links.retain(|link| !link.is_closed());
-        let mut light = None;
-        let mut light_lanes = usize::MAX;
-        let mut fallback = None;
-        let mut fallback_lanes = usize::MAX;
-
-        for link in links.iter() {
-            let lanes = link.lanes();
-            if link.is_bulk() {
-                if lanes < fallback_lanes {
-                    fallback = Some(link.clone());
-                    fallback_lanes = lanes;
-                }
-            } else if lanes < light_lanes {
-                light = Some(link.clone());
-                light_lanes = lanes;
-            }
-        }
-        let count = links.len();
-        (light, fallback, count)
-    }
-
-    fn stats(&self) -> PoolStats {
-        let mut links = self.lock_links();
-        links.retain(|link| !link.is_closed());
-        PoolStats {
-            links: links.len(),
-            bulk_links: links.iter().filter(|link| link.is_bulk()).count(),
-            lanes: links.iter().map(|link| link.lanes()).sum(),
-            link_ids: links.iter().map(|link| link.id()).collect(),
+    fn start_worker(self: &Arc<Self>) {
+        let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        if worker.is_none() && !self.closed() {
+            *worker = Some(tokio::spawn(Self::run(
+                Arc::downgrade(self),
+                self.wake.clone(),
+            )));
         }
     }
 
-    async fn acquire(self: &Arc<Self>, deadline: Instant) -> Result<Arc<ClientLink>> {
+    async fn acquire(&self, deadline: Instant) -> Result<LaneReservation> {
+        self.waiters.fetch_add(1, Ordering::AcqRel);
+        let _demand = Demand {
+            pool: self,
+            started: Instant::now(),
+        };
+        let failures = {
+            let state = self.state();
+            state.dial_failures + state.failed_closures
+        };
+        self.wake.notify_one();
         loop {
-            if self.closed() {
-                return Err(Error::Closed);
-            }
-            let (light, fallback, count) = self.snapshot();
-            if let Some(link) = light {
-                return Ok(link);
-            }
-            if count < self.config.max_links
-                && let Ok(permit) = self.dial_permit.clone().try_acquire_owned()
+            let ready = self.ready.notified();
+            tokio::pin!(ready);
+            ready.as_mut().enable();
             {
-                let result = self.dial_now(deadline).await;
-                drop(permit);
-                self.ready.notify_waiters();
-                return match result {
-                    Ok(link) => Ok(link),
-                    Err(error) => fallback.ok_or(error),
-                };
+                let state = self.state();
+                if self.closed() {
+                    return Err(Error::Closed);
+                }
+                if let Some(link) = state
+                    .links
+                    .iter()
+                    .filter(|link| !link.is_closed() && link.has_capacity())
+                    .min_by_key(|link| (link.is_bulk(), link.shared().work().total()))
+                {
+                    return Ok(link.reserve());
+                }
+                if (state.dial_failures + state.failed_closures).saturating_sub(failures)
+                    >= self.config.attempts as u64
+                {
+                    return Err(Error::Unavailable);
+                }
             }
-            if count >= self.config.max_links {
-                return fallback.ok_or(Error::Unavailable);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return fallback.ok_or(Error::Timeout);
-            }
-            let wait = remaining.min(self.config.open_timeout);
-            if timeout(wait, self.ready.notified()).await.is_err() {
-                return fallback.ok_or(Error::Timeout);
-            }
-        }
-    }
-
-    async fn dial_now(self: &Arc<Self>, deadline: Instant) -> Result<Arc<ClientLink>> {
-        if self.closed() {
-            return Err(Error::Closed);
-        }
-        let delay = self.lock_backoff().wait();
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || delay >= remaining {
-            return Err(Error::Timeout);
-        }
-        if !delay.is_zero() {
-            timeout(remaining, sleep(delay))
+            timeout_at(deadline, ready)
                 .await
                 .map_err(|_| Error::Timeout)?;
         }
-        if self.closed() {
-            return Err(Error::Closed);
-        }
-
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(Error::Timeout);
-        }
-        let session = match timeout(remaining, (self.dial)()).await {
-            Ok(Ok(session)) => session,
-            Ok(Err(error)) => {
-                self.lock_backoff().fail(&self.config);
-                return Err(Error::Transport(error));
-            }
-            Err(_) => {
-                self.lock_backoff().fail(&self.config);
-                return Err(Error::Timeout);
-            }
-        };
-
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            self.lock_backoff().fail(&self.config);
-            return Err(Error::Timeout);
-        }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let link = match timeout(remaining, ClientLink::connect(session, &self.config, id)).await {
-            Ok(Ok(link)) => link,
-            Ok(Err(error)) => {
-                self.lock_backoff().fail(&self.config);
-                return Err(error);
-            }
-            Err(_) => {
-                self.lock_backoff().fail(&self.config);
-                return Err(Error::Timeout);
-            }
-        };
-
-        if self.closed() {
-            link.close();
-            return Err(Error::Closed);
-        }
-        self.lock_backoff().reset();
-        let link = Arc::new(link);
-        self.lock_links().push(link.clone());
-        self.clone().spawn_monitor(link.clone());
-        Ok(link)
     }
 
-    fn spawn_monitor(self: Arc<Self>, link: Arc<ClientLink>) {
-        let weak = Arc::downgrade(&self);
-        let shared = link.shared().clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shared.bulk_notify.notified() => {
-                        let Some(inner) = weak.upgrade() else {
-                            return;
-                        };
-                        inner.ensure_light_link().await;
-                    }
-                    _ = shared.idle_notify.notified() => {
-                        let Some(inner) = weak.upgrade() else {
-                            return;
-                        };
-                        let pause = inner.config.surplus_idle;
-                        sleep(pause).await;
-                        inner.reap_if_idle(&link);
-                    }
-                    _ = shared.closed_notify.notified() => return,
+    fn maintain(&self) -> Option<LinkFuture> {
+        let mut state = self.state();
+        if self.closed() {
+            return None;
+        }
+        let before = state.links.len();
+        state.links.retain(|link| !link.is_closed());
+        state.failed_closures += (before - state.links.len()) as u64;
+        if before != state.links.len() {
+            state.backoff.fail(&self.config);
+        }
+        for link in &state.links {
+            link.shared().sample_load(self.config.bulk_lane_bytes);
+        }
+        let mut index = 0;
+        while state.links.len() > 1 && index < state.links.len() {
+            if state.links[index]
+                .shared()
+                .idle_for_work()
+                .is_some_and(|idle| idle >= self.config.surplus_idle)
+            {
+                let link = state.links.remove(index);
+                link.close();
+                state.idle_closures += 1;
+                tracing::debug!(link_id = link.id(), reason = "idle", "mux link closed");
+            } else {
+                index += 1;
+            }
+        }
+        let now = Instant::now();
+        let pressure = state.links.iter().filter(|link| link.is_bulk()).count();
+        if pressure == 0 {
+            let quiet = *state.quiet_since.get_or_insert(now);
+            if now.duration_since(quiet) >= GROWTH_COOLDOWN {
+                state.pressure_watermark = 0;
+                state.speculative_attempts = 0;
+            }
+        } else {
+            state.quiet_since = None;
+        }
+        let capacity = state.links.iter().any(|link| link.has_capacity());
+        let required = self.waiters.load(Ordering::Acquire) > 0 && !capacity;
+        let speculative = pressure > state.pressure_watermark
+            && state
+                .links
+                .iter()
+                .all(|link| link.is_bulk() || !link.has_capacity())
+            && state.speculative_attempts < self.config.attempts
+            && state
+                .last_growth
+                .is_none_or(|last| last.elapsed() >= GROWTH_COOLDOWN);
+        if state.dialing
+            || state.links.len() >= self.config.max_links
+            || now < state.backoff.next
+            || !(required || speculative)
+        {
+            return None;
+        }
+        state.dialing = true;
+        state.dial_attempts += 1;
+        if !required {
+            state.speculative_attempts += 1;
+        }
+        let id = state.next_id;
+        state.next_id += 1;
+        let dial = self.dial.clone();
+        let config = self.config.clone();
+        let wake = self.wake.clone();
+        tracing::debug!(link_id = id, required, "mux link dial");
+        Some(Box::pin(async move {
+            timeout(config.open_timeout, async {
+                let session = dial().await?;
+                ClientLink::connect(session, &config, id, wake).await
+            })
+            .await
+            .map_err(|_| Error::Timeout)?
+        }))
+    }
+
+    fn dial_finished(&self, result: Result<ClientLink>) {
+        let mut state = self.state();
+        state.dialing = false;
+        match result {
+            Ok(link) if !self.closed() => {
+                if !state.links.is_empty() {
+                    state.last_growth = Some(Instant::now());
+                    state.pressure_watermark =
+                        state.links.iter().filter(|link| link.is_bulk()).count();
                 }
+                tracing::debug!(link_id = link.id(), "mux link ready");
+                state.links.push(Arc::new(link));
             }
-        });
+            Ok(link) => link.close(),
+            Err(error) => {
+                state.backoff.fail(&self.config);
+                state.dial_failures += 1;
+                tracing::debug!(%error, "mux link dial failed");
+            }
+        }
+        self.ready.notify_waiters();
     }
 
-    async fn ensure_light_link(self: &Arc<Self>) {
-        if self.closed() {
-            return;
-        }
-        let (light, _, count) = self.snapshot();
-        if light.is_some() || count >= self.config.max_links {
-            return;
-        }
-        let Ok(permit) = self.dial_permit.clone().try_acquire_owned() else {
-            return;
-        };
-        let deadline = Instant::now() + self.config.open_timeout;
-        let pool = Arc::clone(self);
-        tokio::spawn(async move {
-            let _ = pool.dial_now(deadline).await;
-            drop(permit);
+    async fn run(weak: Weak<Self>, wake: Arc<Notify>) {
+        let mut tick = interval(LOAD_INTERVAL);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut dial: Option<LinkFuture> = None;
+        loop {
+            let Some(pool) = weak.upgrade() else { return };
+            if pool.closed() {
+                return;
+            }
+            if let Some(next) = pool.maintain() {
+                dial = Some(next);
+            }
             pool.ready.notify_waiters();
-        });
-    }
-
-    fn reap_if_idle(&self, link: &Arc<ClientLink>) {
-        if link.lanes() != 0 || link.is_closed() {
-            return;
-        }
-        let mut links = self.lock_links();
-        links.retain(|candidate| !candidate.is_closed());
-        if links.len() <= 1 {
-            return;
-        }
-        let before = links.len();
-        links.retain(|candidate| !Arc::ptr_eq(candidate, link));
-        if links.len() < before {
-            drop(links);
-            link.close();
-        }
-    }
-
-    fn discard(&self, link: &Arc<ClientLink>) {
-        link.close();
-        self.lock_links()
-            .retain(|candidate| !Arc::ptr_eq(candidate, link));
-    }
-
-    fn close(&self) {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let links = std::mem::take(&mut *self.lock_links());
-        for link in links {
-            link.close();
+            drop(pool);
+            tokio::select! {
+                result = async {
+                    match &mut dial {
+                        Some(future) => future.await,
+                        None => pending().await,
+                    }
+                } => {
+                    dial = None;
+                    if let Some(pool) = weak.upgrade() {
+                        pool.dial_finished(result);
+                    }
+                }
+                _ = tick.tick() => {}
+                _ = wake.notified() => {}
+            }
         }
     }
 }

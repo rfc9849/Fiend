@@ -1,14 +1,16 @@
-use std::sync::Arc;
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use bytes::Bytes;
 use h2::client::SendRequest;
 use h2::{Ping, PingPong, Reason};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 use super::config::Config;
 use super::error::{Error, Result};
@@ -16,73 +18,162 @@ use super::lane::{H2Lane, LANE_HEADER, LaneKind, LaneOptions};
 use crate::addr::Address;
 use crate::transport::Session;
 
+pub(crate) const LOAD_INTERVAL: Duration = Duration::from_millis(250);
+const LOAD_COOLDOWN: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy)]
+pub(crate) struct Work {
+    pub(crate) lanes: usize,
+    pub(crate) pending: usize,
+    idle_since: Option<Instant>,
+}
+
+impl Work {
+    pub(crate) fn total(self) -> usize {
+        self.lanes + self.pending
+    }
+
+    fn became_idle(&mut self) {
+        if self.total() == 0 {
+            self.idle_since = Some(Instant::now());
+        }
+    }
+}
+
+struct Load {
+    sampled: Instant,
+    high_samples: usize,
+    hot_until: Instant,
+}
+
 pub(crate) struct LinkShared {
-    lanes: AtomicUsize,
-    pending: AtomicUsize,
-    bulk_lanes: AtomicUsize,
+    work: Mutex<Work>,
+    load: Mutex<Load>,
+    inbound: AtomicU64,
+    outbound: AtomicU64,
+    blocked_writers: AtomicUsize,
+    bulk: AtomicBool,
     closed: AtomicBool,
     last_inbound_ms: AtomicU64,
     epoch: Instant,
-    pub(crate) bulk_notify: Notify,
-    pub(crate) idle_notify: Notify,
-    pub(crate) closed_notify: Notify,
+    wake: Arc<Notify>,
 }
 
 impl LinkShared {
-    fn new() -> Self {
+    fn new(wake: Arc<Notify>) -> Self {
+        let now = Instant::now();
         Self {
-            lanes: AtomicUsize::new(0),
-            pending: AtomicUsize::new(0),
-            bulk_lanes: AtomicUsize::new(0),
+            work: Mutex::new(Work {
+                lanes: 0,
+                pending: 0,
+                idle_since: Some(now),
+            }),
+            load: Mutex::new(Load {
+                sampled: now,
+                high_samples: 0,
+                hot_until: now,
+            }),
+            inbound: AtomicU64::new(0),
+            outbound: AtomicU64::new(0),
+            blocked_writers: AtomicUsize::new(0),
+            bulk: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             last_inbound_ms: AtomicU64::new(0),
-            epoch: Instant::now(),
-            bulk_notify: Notify::new(),
-            idle_notify: Notify::new(),
-            closed_notify: Notify::new(),
+            epoch: now,
+            wake,
         }
     }
 
-    pub(crate) fn note_io(&self, inbound: bool) {
+    fn lock_work(&self) -> MutexGuard<'_, Work> {
+        self.work.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn work(&self) -> Work {
+        *self.lock_work()
+    }
+
+    pub(crate) fn note_io(&self, bytes: usize, inbound: bool) {
         if inbound {
             self.last_inbound_ms
                 .store(self.elapsed_ms(), Ordering::Relaxed);
+            self.inbound.fetch_add(bytes as u64, Ordering::Relaxed);
+        } else {
+            self.outbound.fetch_add(bytes as u64, Ordering::Relaxed);
         }
+    }
+
+    pub(crate) fn blocked(&self, blocked: bool) {
+        if blocked {
+            self.blocked_writers.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.blocked_writers.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn blocked_writers(&self) -> usize {
+        self.blocked_writers.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn sample_load(&self, threshold: u64) {
+        let now = Instant::now();
+        let mut load = self.load.lock().unwrap_or_else(|e| e.into_inner());
+        let elapsed = now.duration_since(load.sampled);
+        if elapsed < LOAD_INTERVAL {
+            return;
+        }
+        let inbound = self.inbound.swap(0, Ordering::Relaxed);
+        let outbound = self.outbound.swap(0, Ordering::Relaxed);
+        let high = u128::from(inbound.max(outbound)) * LOAD_INTERVAL.as_nanos()
+            >= u128::from(threshold) * elapsed.as_nanos()
+            || self.blocked_writers() > 0;
+        load.sampled = now;
+        if high {
+            load.high_samples = load.high_samples.saturating_add(1);
+            if load.high_samples >= 3 {
+                load.hot_until = now + LOAD_COOLDOWN;
+            }
+        } else {
+            load.high_samples = 0;
+        }
+        self.bulk.store(
+            now < load.hot_until && self.work().total() > 0,
+            Ordering::Release,
+        );
     }
 
     pub(crate) fn lane_opened(&self) {
-        self.pending.fetch_sub(1, Ordering::AcqRel);
-        self.lanes.fetch_add(1, Ordering::Relaxed);
+        let mut work = self.lock_work();
+        work.pending -= 1;
+        work.lanes += 1;
     }
 
-    pub(crate) fn reserve_lane(&self) {
-        self.pending.fetch_add(1, Ordering::AcqRel);
+    fn reserve_lane(&self) {
+        let mut work = self.lock_work();
+        work.pending += 1;
+        work.idle_since = None;
     }
 
-    pub(crate) fn release_reservation(&self) {
-        self.pending.fetch_sub(1, Ordering::AcqRel);
+    fn release_reservation(&self) {
+        let mut work = self.lock_work();
+        work.pending -= 1;
+        work.became_idle();
+        self.wake.notify_one();
     }
 
     pub(crate) fn lane_closed(&self) {
-        if self.lanes.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.idle_notify.notify_one();
-        }
+        let mut work = self.lock_work();
+        work.lanes -= 1;
+        work.became_idle();
+        self.wake.notify_one();
     }
 
-    pub(crate) fn add_bulk_lane(&self) {
-        if self.bulk_lanes.fetch_add(1, Ordering::AcqRel) == 0 {
-            self.bulk_notify.notify_one();
-        }
-    }
-
-    pub(crate) fn remove_bulk_lane(&self) {
-        self.bulk_lanes.fetch_sub(1, Ordering::AcqRel);
+    pub(crate) fn idle_for_work(&self) -> Option<Duration> {
+        self.lock_work().idle_since.map(|since| since.elapsed())
     }
 
     pub(crate) fn mark_closed(&self) {
-        if !self.closed.swap(true, Ordering::AcqRel) {
-            self.closed_notify.notify_one();
-        }
+        self.closed.store(true, Ordering::Release);
+        self.wake.notify_one();
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -90,11 +181,7 @@ impl LinkShared {
     }
 
     pub(crate) fn is_bulk(&self) -> bool {
-        self.bulk_lanes.load(Ordering::Acquire) > 0
-    }
-
-    pub(crate) fn lanes(&self) -> usize {
-        self.lanes.load(Ordering::Acquire)
+        self.bulk.load(Ordering::Acquire) && self.work().total() > 0
     }
 
     fn elapsed_ms(&self) -> u64 {
@@ -110,16 +197,24 @@ impl LinkShared {
 pub(crate) struct ClientLink {
     id: u64,
     sender: SendRequest<Bytes>,
+    max_lanes: usize,
+    used: AtomicBool,
     shared: Arc<LinkShared>,
     driver: JoinHandle<()>,
     keepalive: Option<JoinHandle<()>>,
 }
 
 impl ClientLink {
-    pub(crate) async fn connect<S>(session: Session<S>, config: &Config, id: u64) -> Result<Self>
+    pub(crate) async fn connect<S>(
+        session: Session<S>,
+        config: &Config,
+        id: u64,
+        wake: Arc<Notify>,
+    ) -> Result<Self>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        let deadline = Instant::now() + config.settings_timeout;
         let mut builder = h2::client::Builder::new();
         builder
             .initial_window_size(config.stream_window)
@@ -127,20 +222,30 @@ impl ClientLink {
             .max_frame_size(config.max_frame_size)
             .max_concurrent_streams(config.max_concurrent_streams)
             .max_send_buffer_size(config.max_send_buffer_size)
+            .initial_max_send_streams(0)
             .enable_push(false);
 
-        let (sender, mut connection) = timeout(
-            config.settings_timeout,
-            builder.handshake::<_, Bytes>(session),
-        )
-        .await
-        .map_err(|_| Error::Timeout)??;
+        let (sender, mut connection) = timeout_at(deadline, builder.handshake::<_, Bytes>(session))
+            .await
+            .map_err(|_| Error::Timeout)??;
         let ping_pong = connection.ping_pong();
-        let shared = Arc::new(LinkShared::new());
+        let shared = Arc::new(LinkShared::new(wake));
 
         let driver_shared = shared.clone();
+        let driver_sender = sender.clone();
+        let (ready, settings) = oneshot::channel();
         let driver = tokio::spawn(async move {
-            let _ = connection.await;
+            let mut ready = Some(ready);
+            let _ = poll_fn(|cx| {
+                let result = Pin::new(&mut connection).poll(cx);
+                if driver_sender.current_max_send_streams() > 0
+                    && let Some(ready) = ready.take()
+                {
+                    let _ = ready.send(());
+                }
+                result
+            })
+            .await;
             driver_shared.mark_closed();
         });
         let driver_abort = driver.abort_handle();
@@ -154,13 +259,23 @@ impl ClientLink {
             })
         });
 
-        Ok(Self {
+        let link = Self {
             id,
             sender,
+            max_lanes: config.max_concurrent_streams as usize,
+            used: AtomicBool::new(false),
             shared,
             driver,
             keepalive,
-        })
+        };
+        timeout_at(deadline, settings)
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::Unavailable)?;
+        if link.is_closed() {
+            return Err(Error::Unavailable);
+        }
+        Ok(link)
     }
 
     pub(crate) fn id(&self) -> u64 {
@@ -179,8 +294,20 @@ impl ClientLink {
         self.shared.is_bulk()
     }
 
-    pub(crate) fn lanes(&self) -> usize {
-        self.shared.lanes()
+    pub(crate) fn first_use(&self) -> bool {
+        !self.used.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn has_capacity(&self) -> bool {
+        self.shared.work().total() < self.sender.current_max_send_streams().min(self.max_lanes)
+    }
+
+    pub(crate) fn reserve(self: &Arc<Self>) -> LaneReservation {
+        self.shared.reserve_lane();
+        LaneReservation {
+            link: self.clone(),
+            armed: true,
+        }
     }
 
     pub(crate) async fn open_lane(
@@ -188,11 +315,11 @@ impl ClientLink {
         authority: &str,
         kind: LaneKind,
         config: &Config,
+        mut reservation: LaneReservation,
     ) -> Result<H2Lane> {
         if self.is_closed() {
             return Err(Error::Unavailable);
         }
-        let mut reservation = LaneReservation::new(&self.shared);
         Address::from_authority(authority)?;
         let authority_value: http::uri::Authority =
             authority.parse().map_err(|_| Error::InvalidConnect)?;
@@ -252,29 +379,21 @@ impl Drop for ClientLink {
     }
 }
 
-struct LaneReservation<'a> {
-    shared: &'a Arc<LinkShared>,
+pub(crate) struct LaneReservation {
+    pub(crate) link: Arc<ClientLink>,
     armed: bool,
 }
 
-impl<'a> LaneReservation<'a> {
-    fn new(shared: &'a Arc<LinkShared>) -> Self {
-        shared.reserve_lane();
-        Self {
-            shared,
-            armed: true,
-        }
-    }
-
+impl LaneReservation {
     fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
-impl Drop for LaneReservation<'_> {
+impl Drop for LaneReservation {
     fn drop(&mut self) {
         if self.armed {
-            self.shared.release_reservation();
+            self.link.shared.release_reservation();
         }
     }
 }
@@ -295,12 +414,62 @@ async fn keepalive_loop(
             continue;
         }
         match timeout(probe, ping_pong.ping(Ping::opaque())).await {
-            Ok(Ok(_)) => shared.note_io(true),
+            Ok(Ok(_)) => shared.note_io(0, true),
             _ => {
                 shared.mark_closed();
                 driver.abort();
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn pressure_needs_sustained_load_and_expires() {
+        let shared = LinkShared::new(Arc::new(Notify::new()));
+        shared.reserve_lane();
+        for inbound in [true, false] {
+            shared.note_io(256 << 10, inbound);
+            tokio::time::advance(LOAD_INTERVAL).await;
+            shared.sample_load(256 << 10);
+            assert!(!shared.is_bulk());
+            tokio::time::advance(LOAD_INTERVAL).await;
+            shared.sample_load(256 << 10);
+        }
+        for _ in 0..3 {
+            shared.note_io(256 << 10, false);
+            tokio::time::advance(LOAD_INTERVAL).await;
+            shared.sample_load(256 << 10);
+        }
+        assert!(shared.is_bulk());
+        tokio::time::advance(LOAD_COOLDOWN).await;
+        shared.sample_load(256 << 10);
+        assert!(!shared.is_bulk());
+        shared.release_reservation();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_work_resets_continuous_idle() {
+        let shared = LinkShared::new(Arc::new(Notify::new()));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(shared.idle_for_work(), Some(Duration::from_secs(10)));
+        shared.reserve_lane();
+        assert_eq!(shared.work().pending, 1);
+        assert_eq!(shared.idle_for_work(), None);
+        shared.lane_opened();
+        assert_eq!(shared.work().total(), 1);
+        assert_eq!(shared.work().pending, 0);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(shared.idle_for_work(), None);
+        shared.lane_closed();
+        assert_eq!(shared.idle_for_work(), Some(Duration::ZERO));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        shared.reserve_lane();
+        shared.release_reservation();
+        assert_eq!(shared.idle_for_work(), Some(Duration::ZERO));
     }
 }

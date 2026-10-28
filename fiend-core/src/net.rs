@@ -98,7 +98,7 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
-    use super::super::*;
+    use super::*;
 
     #[test]
     fn sets_low_water_mark_on_loopback() {
@@ -107,5 +107,11 @@ mod linux_tests {
         let stream = std::net::TcpStream::connect(address).expect("connect");
         let _peer = listener.accept().expect("accept");
         set_tcp_notsent_lowat(&stream, 64 << 10).expect("set option");
+        assert_eq!(
+            socket2::SockRef::from(&stream)
+                .tcp_notsent_lowat()
+                .expect("read option"),
+            64 << 10
+        );
     }
 }
