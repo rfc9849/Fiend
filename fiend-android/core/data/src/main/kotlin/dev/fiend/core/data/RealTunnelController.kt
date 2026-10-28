@@ -1,5 +1,9 @@
 package dev.fiend.core.data
 
+import android.Manifest
+import android.os.Build
+import android.content.pm.PackageManager
+import dev.fiend.core.engine.needsLocalNetworkAccess
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
@@ -25,6 +29,8 @@ import kotlinx.coroutines.launch
 class RealTunnelController @Inject constructor(
     @ApplicationContext private val context: Context,
     private val engine: EngineState,
+    private val profiles: ProfileRepository,
+    private val settings: SettingsRepository,
     logs: LogRepository,
     @ApplicationScope scope: CoroutineScope,
 ) : TunnelController {
@@ -47,6 +53,7 @@ class RealTunnelController @Inject constructor(
                 receivedBytes = current.receivedBytes.toLong(),
                 sentBytes = current.sentBytes.toLong(),
                 activeFlows = current.activeFlows.toInt(),
+                latencyMs = current.latencyMs?.toInt(),
             ))
             previous = current
             previousTime = now
@@ -57,7 +64,7 @@ class RealTunnelController @Inject constructor(
 
     override fun connect(profileId: String) {
         runCatching {
-            if (VpnService.prepare(context) != null) {
+            if (VpnService.prepare(context) != null || needsLocalPermission(profileId)) {
                 pending.set(profileId)
                 mutablePermissionRequired.value = true
             } else {
@@ -67,11 +74,19 @@ class RealTunnelController @Inject constructor(
         }.onFailure { engine.fail(profileId, it.message ?: "Cannot start the VPN service") }
     }
 
+    override fun localNetworkPermissionNeeded(): Boolean = pending.get()?.let(::needsLocalPermission) ?: false
+
+    private fun needsLocalPermission(profileId: String): Boolean {
+        if (Build.VERSION.SDK_INT < 37 || ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) return false
+        val host = profiles.profiles.value.firstOrNull { it.id == profileId }?.host.orEmpty()
+        return needsLocalNetworkAccess(host, settings.settings.value.bypassLan)
+    }
+
     override fun permissionResult(granted: Boolean) {
         val id = pending.getAndSet(null)
         mutablePermissionRequired.value = false
         if (id == null) return
-        if (granted) connect(id) else engine.fail(id, "VPN permission was not granted")
+        if (granted) connect(id) else engine.fail(id, "Connection permission was not granted")
     }
 
     override fun disconnect() {

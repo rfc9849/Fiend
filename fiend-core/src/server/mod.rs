@@ -194,6 +194,7 @@ async fn serve_mux(session: Session<TcpStream>, config: ServerConfig) -> mux::Re
 }
 
 async fn handle_incoming(incoming: Incoming, config: ServerConfig) -> mux::Result<()> {
+    tracing::debug!(kind = ?incoming.kind, authority = %incoming.address, "server lane request");
     match incoming.kind {
         LaneKind::Tcp => handle_tcp(incoming, config.mux.target_timeout, config.target).await,
         LaneKind::Udp => handle_udp(incoming, &config).await,

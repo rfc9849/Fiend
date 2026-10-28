@@ -41,6 +41,8 @@ interface TunnelController {
     val stats: StateFlow<TunnelStats>
     val permissionRequired: StateFlow<Boolean>
 
+    fun localNetworkPermissionNeeded(): Boolean = false
+
     fun permissionResult(granted: Boolean)
 
     fun connect(profileId: String)

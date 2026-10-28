@@ -73,6 +73,14 @@ class MainActivity : ComponentActivity() {
         tunnel.permissionResult(it.resultCode == Activity.RESULT_OK)
     }
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private val localNetwork = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        if (it) requestVpnConsent() else tunnel.permissionResult(false)
+    }
+
+    private fun requestVpnConsent() {
+        val request = VpnService.prepare(this)
+        if (request == null) tunnel.permissionResult(true) else consent.launch(request)
+    }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -96,8 +104,8 @@ class MainActivity : ComponentActivity() {
                 if (!permissionRequired) consentOpen = false
                 else if (!consentOpen) {
                     consentOpen = true
-                    val request = VpnService.prepare(this@MainActivity)
-                    if (request == null) tunnel.permissionResult(true) else consent.launch(request)
+                    if (Build.VERSION.SDK_INT >= 37 && tunnel.localNetworkPermissionNeeded()) localNetwork.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+                    else requestVpnConsent()
                 }
             }
             LaunchedEffect(tunnelState) {

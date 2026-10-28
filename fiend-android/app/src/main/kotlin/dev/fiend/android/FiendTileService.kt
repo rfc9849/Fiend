@@ -48,7 +48,7 @@ class FiendTileService : TileService() {
                 else -> {
                     val id = profiles.activeProfileId.value ?: profiles.profiles.value.firstOrNull()?.id
                     if (id != null) tunnel.connect(id)
-                    if (id == null || VpnService.prepare(this) != null) {
+                    if (id == null || VpnService.prepare(this) != null || tunnel.permissionRequired.value) {
                         val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         if (Build.VERSION.SDK_INT >= 34) startActivityAndCollapse(PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
                         else {

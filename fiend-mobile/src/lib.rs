@@ -10,7 +10,7 @@ pub use profile::{
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,7 @@ pub struct TunnelStats {
     pub received_bytes: u64,
     pub active_flows: u64,
     pub dropped_packets: u64,
+    pub latency_ms: Option<u32>,
 }
 
 #[derive(uniffi::Object)]
@@ -91,6 +92,7 @@ pub struct Tunnel {
     client: Client,
     platform: Arc<dyn Platform>,
     stopped: Arc<AtomicBool>,
+    latency_ms: Arc<AtomicU64>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -119,7 +121,11 @@ fn engine_error(error: impl std::fmt::Display) -> FiendError {
 
 fn protect(platform: Arc<dyn Platform>) -> fiend_core::net::ProtectSocket {
     Arc::new(move |socket| {
-        if platform.protect(socket.as_raw_fd()).unwrap_or(false) {
+        let allowed = platform.protect(socket.as_raw_fd()).unwrap_or(false);
+        tracing::info!(allowed, "socket protection result");
+        #[cfg(target_os = "android")]
+        tracing::info!(mark = ?socket.mark(), "protected socket mark");
+        if allowed {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -185,17 +191,26 @@ impl Tunnel {
         };
         logging::set_platform(&platform);
         let stopped = Arc::new(AtomicBool::new(false));
+        let latency_ms = Arc::new(AtomicU64::new(u64::MAX));
         let tunnel = Arc::new(Self {
             engine: engine.clone(),
             client: client.clone(),
             platform: platform.clone(),
             stopped: stopped.clone(),
+            latency_ms: latency_ms.clone(),
             task: Mutex::new(None),
         });
         let _ = platform.on_state(TunnelState::Connecting);
         let task = runtime.spawn(async move {
+            tracing::info!("tunnel handshake started");
             let result = async {
+                let start = Instant::now();
                 client.ready().await.map_err(engine_error)?;
+                latency_ms.store(
+                    start.elapsed().as_millis().min(u128::from(u32::MAX)) as u64,
+                    Ordering::Release,
+                );
+                tracing::info!("tunnel handshake completed");
                 if stopped.load(Ordering::Acquire) {
                     return Ok(());
                 }
@@ -204,6 +219,9 @@ impl Tunnel {
             }
             .await;
             engine.stop();
+            if let Err(error) = &result {
+                tracing::error!(%error, "tunnel stopped with an error");
+            }
             if stopped.load(Ordering::Acquire) {
                 let _ = platform.on_state(TunnelState::Disconnected);
             } else if let Err(error) = result {
@@ -233,6 +251,7 @@ impl Tunnel {
             received_bytes: stats.downloaded,
             active_flows: stats.flows,
             dropped_packets: stats.dropped_packets,
+            latency_ms: u32::try_from(self.latency_ms.load(Ordering::Acquire)).ok(),
         }
     }
 
@@ -247,8 +266,16 @@ impl Tunnel {
         let client = self.client.clone();
         let platform = self.platform.clone();
         let stopped = self.stopped.clone();
+        let latency_ms = self.latency_ms.clone();
         runtime.spawn(async move {
+            let start = Instant::now();
             let result = client.ready().await;
+            if result.is_ok() {
+                latency_ms.store(
+                    start.elapsed().as_millis().min(u128::from(u32::MAX)) as u64,
+                    Ordering::Release,
+                );
+            }
             if stopped.load(Ordering::Acquire) {
                 return;
             }

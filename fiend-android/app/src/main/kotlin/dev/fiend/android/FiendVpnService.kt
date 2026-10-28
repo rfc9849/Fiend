@@ -1,5 +1,8 @@
 package dev.fiend.android
 
+import android.Manifest
+import androidx.core.content.ContextCompat
+import dev.fiend.core.engine.needsLocalNetworkAccess
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -13,6 +16,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import dagger.hilt.android.AndroidEntryPoint
 import dev.fiend.core.data.ProfileRepository
@@ -53,7 +57,7 @@ class FiendVpnService : VpnService() {
     @Volatile private var destroyed = false
     private var currentProfileId: String? = null
     private var profileName = "fiend"
-    private var underlying: Network? = null
+    @Volatile private var underlying: Network? = null
     private var watchingNetwork = false
     private val networks = linkedSetOf<Network>()
     private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
@@ -112,6 +116,9 @@ class FiendVpnService : VpnService() {
             check(prepare(this) == null) { "VPN permission is required" }
             val profile = profiles.profile(id).first() ?: error("The selected profile is not available")
             val appSettings = settings.settings.first()
+            if (Build.VERSION.SDK_INT >= 37 && needsLocalNetworkAccess(profile.host, appSettings.bypassLan)) {
+                check(ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) { "Open fiend and grant local network permission" }
+            }
             val config = profile.engineConfig()
             profileName = profile.name
             underlying = findUnderlying()
@@ -234,7 +241,14 @@ class FiendVpnService : VpnService() {
 
     private class ServicePlatform(service: FiendVpnService, private val session: Long) : Platform {
         private val reference = WeakReference(service)
-        override fun protect(fd: Int): Boolean = reference.get()?.protect(fd) ?: false
+        override fun protect(fd: Int): Boolean {
+            val service = reference.get() ?: return false
+            if (!service.protect(fd)) return false
+            return runCatching {
+                service.underlying?.let { network -> ParcelFileDescriptor.fromFd(fd).use { network.bindSocket(it.fileDescriptor) } }
+                true
+            }.getOrDefault(false)
+        }
         override fun onState(state: NativeState) { reference.get()?.nativeState(session, state) }
         override fun onLog(line: NativeLog) {
             reference.get()?.engine?.log(LogLine(line.timestampMs.toLong(), when (line.level) {
