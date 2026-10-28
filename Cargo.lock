@@ -782,6 +782,7 @@ dependencies = [
  "hickory-proto",
  "lru",
  "netstack-smoltcp",
+ "rand 0.10.3",
  "socket2",
  "thiserror",
  "tokio",

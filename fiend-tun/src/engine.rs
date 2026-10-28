@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,8 +18,10 @@ use tokio::task::JoinSet;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::dns::{FakeDns, is_fake_ip};
+use crate::dns::FakeDns;
 use crate::packet::{FlowKey, Packet, Reassembly, Transport, udp_packets};
+use crate::resolve::{Resolver, parse_server};
+use crate::rules::{Route, Rules, is_blocked_udp_port, is_null_network};
 
 pub trait PacketIo: Send + Sync + 'static {
     fn recv(&self, packet: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send;
@@ -40,6 +42,10 @@ pub struct TunOptions {
     pub mtu: u16,
     pub ipv6: bool,
     pub bypass_lan: bool,
+    pub direct_all: bool,
+    pub direct_rules: String,
+    pub block_rules: String,
+    pub direct_resolver: String,
     pub max_tcp_flows: usize,
     pub max_udp_flows: usize,
     pub dns_capacity: usize,
@@ -54,6 +60,10 @@ impl Default for TunOptions {
             mtu: 1500,
             ipv6: true,
             bypass_lan: false,
+            direct_all: false,
+            direct_rules: String::new(),
+            block_rules: String::new(),
+            direct_resolver: String::new(),
             max_tcp_flows: 256,
             max_udp_flows: 256,
             dns_capacity: 8192,
@@ -91,12 +101,14 @@ pub struct TunEngine {
 struct Context {
     client: Client,
     options: TunOptions,
+    rules: Arc<Rules>,
+    resolver: Resolver,
     dns: Mutex<FakeDns>,
     counters: Counters,
 }
 
 impl TunEngine {
-    pub fn new(client: Client, options: TunOptions) -> io::Result<Self> {
+    pub fn new(client: Client, mut options: TunOptions) -> io::Result<Self> {
         if !(1280..=9000).contains(&options.mtu)
             || options.max_tcp_flows == 0
             || options.max_tcp_flows > 4096
@@ -109,12 +121,26 @@ impl TunEngine {
                 "TUN options are not valid",
             ));
         }
-        let dns = FakeDns::new(options.dns_capacity, options.dns_ttl).map_err(io::Error::other)?;
+        let rules = Rules::parse(
+            &std::mem::take(&mut options.direct_rules),
+            &std::mem::take(&mut options.block_rules),
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let rules = Arc::new(rules.with_all_direct(options.direct_all));
+        let resolver = Resolver::new(
+            parse_server(&options.direct_resolver)?,
+            options.protect_socket.clone(),
+        );
+        let dns = FakeDns::new(options.dns_capacity, options.dns_ttl)
+            .map_err(io::Error::other)?
+            .with_rules(rules.clone());
         let (network, _) = watch::channel(0);
         Ok(Self {
             context: Arc::new(Context {
                 client,
                 options,
+                rules,
+                resolver,
                 dns: Mutex::new(dns),
                 counters: Counters::default(),
             }),
@@ -140,6 +166,7 @@ impl TunEngine {
     }
 
     pub fn network_changed(&self) {
+        self.context.resolver.clear();
         self.context.client.network_changed();
         self.network
             .send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -190,6 +217,12 @@ impl Drop for FlowCount {
     fn drop(&mut self) {
         self.0.counters.flows.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+enum Plan {
+    Proxy,
+    Block,
+    Direct(Vec<SocketAddr>),
 }
 
 enum Completed {
@@ -273,6 +306,11 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                     if let Ok(reset) = packet.reset() { let _ = output.try_send(reset); }
                     continue;
                 }
+                if is_null_network(packet.key.destination.ip()) {
+                    context.drop_packet();
+                    if matches!(packet.transport, Transport::Tcp { .. }) && let Ok(reset) = packet.reset() { let _ = output.try_send(reset); }
+                    continue;
+                }
                 match &packet.transport {
                     Transport::Tcp { syn, .. } => {
                         if *syn && (tcp.contains(&packet.key) || tcp.len() >= context.options.max_tcp_flows) {
@@ -291,7 +329,7 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                             } else { context.drop_packet(); }
                             continue;
                         }
-                        if payload.is_empty() { context.drop_packet(); continue; }
+                        if payload.is_empty() || is_blocked_udp_port(packet.key.destination.port()) { context.drop_packet(); continue; }
                         if let Some((_, sender)) = udp.get(&packet.key) && !sender.is_closed() {
                             if sender.try_send(payload.clone()).is_err() { context.drop_packet(); }
                             continue;
@@ -346,17 +384,31 @@ impl Context {
         self.counters.dropped.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn bypass(&self, address: SocketAddr) -> bool {
-        if !self.options.bypass_lan {
-            return false;
-        }
-        match address.ip() {
-            IpAddr::V4(ip) => {
-                !is_fake_ip(ip) && (ip.is_private() || ip.is_link_local() || ip.is_loopback())
-            }
-            IpAddr::V6(ip) => {
-                ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_loopback()
-            }
+    async fn plan(&self, destination: &Address) -> Plan {
+        match self.rules.route(destination, self.options.bypass_lan) {
+            Route::Block => Plan::Block,
+            Route::Proxy => Plan::Proxy,
+            Route::Direct => match destination {
+                Address::Ip(address) => Plan::Direct(vec![*address]),
+                Address::Domain { host, port } => {
+                    match self.resolver.lookup(host, self.options.ipv6).await {
+                        Ok(found) if !found.is_empty() => Plan::Direct(
+                            found
+                                .into_iter()
+                                .map(|ip| SocketAddr::new(ip, *port))
+                                .collect(),
+                        ),
+                        Ok(_) => {
+                            tracing::debug!(%host, "direct resolver found no address, using proxy");
+                            Plan::Proxy
+                        }
+                        Err(error) => {
+                            tracing::warn!(%host, %error, "direct resolver failed, using proxy");
+                            Plan::Proxy
+                        }
+                    }
+                }
+            },
         }
     }
 
@@ -403,20 +455,41 @@ async fn tcp_flow(
         }
     }
     let destination = context.destination(target)?;
-    if context.bypass(target) {
-        let mut direct = timeout(
-            Duration::from_secs(10),
-            fiend_core::net::dial(&target.to_string(), &context.options.protect_socket),
-        )
-        .await??;
-        copy_bidirectional(&mut stream, &mut direct).await?;
-    } else {
-        let mut lane = context
-            .client
-            .open_tcp(&destination)
-            .await
-            .map_err(io::Error::other)?;
-        copy_bidirectional(&mut stream, &mut lane).await?;
+    match context.plan(&destination).await {
+        Plan::Block => {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "destination is blocked",
+            ));
+        }
+        Plan::Direct(addresses) => {
+            let mut direct = timeout(Duration::from_secs(10), async {
+                let mut last =
+                    io::Error::new(io::ErrorKind::AddrNotAvailable, "no direct addresses");
+                for address in addresses {
+                    match fiend_core::net::dial(
+                        &address.to_string(),
+                        &context.options.protect_socket,
+                    )
+                    .await
+                    {
+                        Ok(stream) => return Ok(stream),
+                        Err(error) => last = error,
+                    }
+                }
+                Err(last)
+            })
+            .await??;
+            copy_bidirectional(&mut stream, &mut direct).await?;
+        }
+        Plan::Proxy => {
+            let mut lane = context
+                .client
+                .open_tcp(&destination)
+                .await
+                .map_err(io::Error::other)?;
+            copy_bidirectional(&mut stream, &mut lane).await?;
+        }
     }
     Ok(())
 }
@@ -428,8 +501,15 @@ async fn udp_flow(
     mut packets: mpsc::Receiver<Vec<u8>>,
     output: mpsc::Sender<Vec<u8>>,
 ) -> io::Result<()> {
-    if context.bypass(key.destination) {
-        let socket = protected_udp(key.destination, &context.options.protect_socket)?;
+    let plan = context.plan(&destination).await;
+    if matches!(plan, Plan::Block) {
+        return Ok(());
+    }
+    if let Plan::Direct(addresses) = plan {
+        let target = *addresses.first().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::AddrNotAvailable, "no direct addresses")
+        })?;
+        let socket = protected_udp(target, &context.options.protect_socket)?;
         let mut buffer = vec![0; 65535];
         loop {
             let event = async {
@@ -494,7 +574,7 @@ async fn udp_flow(
     }
 }
 
-fn protected_udp(target: SocketAddr, protect: &ProtectSocket) -> io::Result<UdpSocket> {
+pub(crate) fn protected_udp(target: SocketAddr, protect: &ProtectSocket) -> io::Result<UdpSocket> {
     let socket = Socket::new(
         Domain::for_address(target),
         Type::DGRAM,

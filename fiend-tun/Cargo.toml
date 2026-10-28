@@ -7,6 +7,7 @@ edition = "2024"
 fiend-core = { path = "../fiend-core" }
 hickory-proto = "0.26.3"
 lru = "0.19"
+rand = "0.10"
 thiserror = "2"
 etherparse = "=0.20.3"
 futures = "0.3"

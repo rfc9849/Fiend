@@ -560,3 +560,292 @@ async fn tcp_limit_rejects_new_tuple_and_stop_cancels_waiting_reads() {
         .unwrap()
         .unwrap();
 }
+
+async fn dns_server(
+    code: hickory_proto::op::ResponseCode,
+    address: std::net::Ipv4Addr,
+) -> SocketAddr {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buffer = [0u8; 2048];
+        loop {
+            let (size, from) = socket.recv_from(&mut buffer).await.unwrap();
+            let request = Message::from_vec(&buffer[..size]).unwrap();
+            let mut response = Message::response(request.metadata.id, request.metadata.op_code);
+            response.metadata.response_code = code;
+            let query = request.queries[0].clone();
+            response.add_query(query.clone());
+            if code == hickory_proto::op::ResponseCode::NoError && query.query_type == RecordType::A
+            {
+                response.add_answer(hickory_proto::rr::Record::from_rdata(
+                    query.name,
+                    60,
+                    RData::A(hickory_proto::rr::rdata::A(address)),
+                ));
+            }
+            socket
+                .send_to(&response.to_vec().unwrap(), from)
+                .await
+                .unwrap();
+        }
+    });
+    local
+}
+
+async fn fake_ip(
+    peer: &mut Peer,
+    domain: &str,
+) -> (std::net::Ipv4Addr, hickory_proto::op::ResponseCode) {
+    let mut query = Message::query();
+    query.metadata.id = 7;
+    query.add_query(Query::query(
+        Name::from_ascii(domain).unwrap(),
+        RecordType::A,
+    ));
+    let response = udp_exchange(
+        peer,
+        "10.0.0.2:30000".parse().unwrap(),
+        "8.8.8.8:53".parse().unwrap(),
+        &query.to_vec().unwrap(),
+    )
+    .await;
+    let message = Message::from_vec(&response).unwrap();
+    let ip = match message.answers.first().map(|record| &record.data) {
+        Some(RData::A(ip)) => ip.0,
+        _ => std::net::Ipv4Addr::UNSPECIFIED,
+    };
+    (ip, message.metadata.response_code)
+}
+
+async fn tcp_echo_once(peer: &mut Peer, source: SocketAddr, target: SocketAddr, payload: &[u8]) {
+    let answer = tcp_reply(peer, source, target, payload, payload.len()).await;
+    assert_eq!(answer, payload);
+}
+
+#[tokio::test]
+async fn direct_domain_connects_locally_without_a_lane() {
+    let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut stream, _) = echo.accept().await.unwrap();
+        let mut data = [0; 6];
+        stream.read_exact(&mut data).await.unwrap();
+        stream.write_all(&data).await.unwrap();
+    });
+    let resolver = dns_server(
+        hickory_proto::op::ResponseCode::NoError,
+        std::net::Ipv4Addr::LOCALHOST,
+    )
+    .await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hook = calls.clone();
+    let (engine, client, mut peer, task) = stack(TunOptions {
+        direct_rules: "full:direct.test\n".into(),
+        direct_resolver: resolver.to_string(),
+        protect_socket: Arc::new(move |_| {
+            hook.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+        ..TunOptions::default()
+    })
+    .await;
+    let (ip, _) = fake_ip(&mut peer, "direct.test").await;
+    assert!(fiend_tun::dns::is_fake_ip(ip));
+    let target = SocketAddr::new(ip.into(), port);
+    tcp_echo_once(
+        &mut peer,
+        "10.0.0.2:30001".parse().unwrap(),
+        target,
+        b"direct",
+    )
+    .await;
+    assert_eq!(client.stats().dial_attempts, 0);
+    assert!(calls.load(Ordering::SeqCst) >= 2);
+    engine.stop();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn proxied_domain_still_uses_a_lane() {
+    let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut stream, _) = echo.accept().await.unwrap();
+        let mut data = [0; 5];
+        stream.read_exact(&mut data).await.unwrap();
+        stream.write_all(&data).await.unwrap();
+    });
+    let (engine, client, mut peer, task) = stack(TunOptions {
+        direct_rules: "full:other.test\n".into(),
+        ..TunOptions::default()
+    })
+    .await;
+    let (ip, _) = fake_ip(&mut peer, "localhost").await;
+    let target = SocketAddr::new(ip.into(), port);
+    tcp_echo_once(
+        &mut peer,
+        "10.0.0.2:30001".parse().unwrap(),
+        target,
+        b"proxy",
+    )
+    .await;
+    assert_eq!(client.stats().dial_attempts, 1);
+    engine.stop();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn resolver_failure_falls_back_to_a_lane() {
+    let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut stream, _) = echo.accept().await.unwrap();
+        let mut data = [0; 8];
+        stream.read_exact(&mut data).await.unwrap();
+        stream.write_all(&data).await.unwrap();
+    });
+    let resolver = dns_server(
+        hickory_proto::op::ResponseCode::ServFail,
+        std::net::Ipv4Addr::LOCALHOST,
+    )
+    .await;
+    let (engine, client, mut peer, task) = stack(TunOptions {
+        direct_rules: "domain:localhost\n".into(),
+        direct_resolver: resolver.to_string(),
+        ..TunOptions::default()
+    })
+    .await;
+    let (ip, _) = fake_ip(&mut peer, "localhost").await;
+    let target = SocketAddr::new(ip.into(), port);
+    tcp_echo_once(
+        &mut peer,
+        "10.0.0.2:30001".parse().unwrap(),
+        target,
+        b"fallback",
+    )
+    .await;
+    assert_eq!(client.stats().dial_attempts, 1);
+    engine.stop();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn direct_domain_udp_uses_a_protected_socket() {
+    let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut buffer = [0; 1024];
+        let (size, from) = echo.recv_from(&mut buffer).await.unwrap();
+        echo.send_to(&buffer[..size], from).await.unwrap();
+    });
+    let resolver = dns_server(
+        hickory_proto::op::ResponseCode::NoError,
+        std::net::Ipv4Addr::LOCALHOST,
+    )
+    .await;
+    let (engine, client, mut peer, task) = stack(TunOptions {
+        direct_rules: "domain:direct.test\n".into(),
+        direct_resolver: resolver.to_string(),
+        ..TunOptions::default()
+    })
+    .await;
+    let (ip, _) = fake_ip(&mut peer, "udp.direct.test").await;
+    let target = SocketAddr::new(ip.into(), port);
+    assert_eq!(
+        udp_exchange(
+            &mut peer,
+            "10.0.0.2:30002".parse().unwrap(),
+            target,
+            b"quic"
+        )
+        .await,
+        b"quic"
+    );
+    assert_eq!(client.stats().dial_attempts, 0);
+    engine.stop();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn blocked_domain_gets_nxdomain_and_other_names_do_not() {
+    let (engine, _, mut peer, task) = stack(TunOptions {
+        block_rules: "domain:ads.example\n".into(),
+        ..TunOptions::default()
+    })
+    .await;
+    let (_, code) = fake_ip(&mut peer, "tracker.ads.example").await;
+    assert_eq!(code, hickory_proto::op::ResponseCode::NXDomain);
+    let (ip, code) = fake_ip(&mut peer, "fine.example").await;
+    assert_eq!(code, hickory_proto::op::ResponseCode::NoError);
+    assert!(fiend_tun::dns::is_fake_ip(ip));
+    engine.stop();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn null_network_flows_and_netbios_udp_are_dropped() {
+    let (engine, client, mut peer, task) = stack(TunOptions::default()).await;
+    peer.send(tcp_packet(
+        "10.0.0.2:30000".parse().unwrap(),
+        "0.0.0.0:443".parse().unwrap(),
+        1000,
+        None,
+        true,
+        &[],
+    ))
+    .await;
+    let response = peer.recv().await;
+    let parsed = SlicedPacket::from_ip(&response).unwrap();
+    let Some(TransportSlice::Tcp(tcp)) = parsed.transport else {
+        panic!("TCP required")
+    };
+    assert!(tcp.rst());
+    assert_eq!(engine.stats().dropped_packets, 1);
+    for packet in udp_packets(
+        "10.0.0.2:30001".parse().unwrap(),
+        "203.0.113.5:137".parse().unwrap(),
+        b"netbios",
+        1500,
+        9,
+    )
+    .unwrap()
+    {
+        peer.send(packet).await;
+    }
+    for _ in 0..50 {
+        if engine.stats().dropped_packets == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(engine.stats().dropped_packets, 2);
+    assert_eq!(client.stats().dial_attempts, 0);
+    engine.stop();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn invalid_rules_or_resolver_are_rejected() {
+    let client = Client::new(ClientConfig::new(
+        "127.0.0.1:1".to_string(),
+        [42; 32],
+        Template::from_json(include_str!("../../fiend-core/testdata/template.json")).unwrap(),
+    ));
+    for options in [
+        TunOptions {
+            direct_rules: "bogus:x".into(),
+            ..TunOptions::default()
+        },
+        TunOptions {
+            block_rules: "ip:1.2.3.0/24".into(),
+            ..TunOptions::default()
+        },
+        TunOptions {
+            direct_resolver: "dns.example".into(),
+            ..TunOptions::default()
+        },
+    ] {
+        assert!(TunEngine::new(client.clone(), options).is_err());
+    }
+}

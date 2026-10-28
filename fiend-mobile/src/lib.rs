@@ -28,6 +28,8 @@ pub enum FiendError {
     #[error("Share link is not valid or is too large")]
     InvalidLink,
     #[error("{reason}")]
+    InvalidRules { reason: String },
+    #[error("{reason}")]
     Engine { reason: String },
 }
 
@@ -70,11 +72,49 @@ pub struct TunOptions {
     pub mtu: u16,
     pub ipv6: bool,
     pub bypass_lan: bool,
+    pub direct_all: bool,
+    pub direct_rules: String,
+    pub block_rules: String,
+    pub direct_resolver: String,
     pub handshake_timeout_ms: u64,
     pub max_connections: u32,
     pub udp_idle_ms: u64,
     pub udp_keepalive_ms: u64,
     pub max_udp_flows: u32,
+}
+
+#[derive(uniffi::Record)]
+pub struct RuleStats {
+    pub domains: u32,
+    pub exact: u32,
+    pub keywords: u32,
+    pub cidrs: u32,
+}
+
+#[uniffi::export]
+pub fn validate_rules(text: String, allow_ip: bool) -> Result<RuleStats, FiendError> {
+    let list = fiend_tun::rules::parse_list(&text, allow_ip).map_err(|error| {
+        FiendError::InvalidRules {
+            reason: error.to_string(),
+        }
+    })?;
+    let counts = list.counts();
+    let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+    Ok(RuleStats {
+        domains: count(counts.domains),
+        exact: count(counts.exact),
+        keywords: count(counts.keywords),
+        cidrs: count(counts.cidrs),
+    })
+}
+
+#[uniffi::export]
+pub fn validate_resolver(value: String) -> Result<(), FiendError> {
+    fiend_tun::parse_resolver(&value)
+        .map(|_| ())
+        .map_err(|error| FiendError::InvalidRules {
+            reason: error.to_string(),
+        })
 }
 
 #[derive(uniffi::Record)]
@@ -176,6 +216,10 @@ impl Tunnel {
                     mtu: options.mtu,
                     ipv6: options.ipv6,
                     bypass_lan: options.bypass_lan,
+                    direct_all: options.direct_all,
+                    direct_rules: options.direct_rules,
+                    block_rules: options.block_rules,
+                    direct_resolver: options.direct_resolver,
                     max_tcp_flows: max_connections,
                     max_udp_flows,
                     udp_idle,
@@ -336,12 +380,33 @@ mod tests {
             mtu: 1500,
             ipv6: true,
             bypass_lan: false,
+            direct_all: false,
+            direct_rules: String::new(),
+            block_rules: String::new(),
+            direct_resolver: String::new(),
             handshake_timeout_ms: 10000,
             max_connections: 256,
             udp_idle_ms: 60000,
             udp_keepalive_ms: 20000,
             max_udp_flows: 64,
         }
+    }
+
+    #[test]
+    fn rule_validation_counts_entries_and_reports_errors() {
+        let stats = validate_rules(
+            "domain:a.ru\nfull:b.ru\nkeyword:x\nip:1.2.3.0/24\n".into(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            (stats.domains, stats.exact, stats.keywords, stats.cidrs),
+            (1, 1, 1, 1)
+        );
+        assert!(validate_rules("ip:1.2.3.0/24".into(), false).is_err());
+        assert!(validate_rules("regexp:x".into(), true).is_err());
+        assert!(validate_resolver(String::new()).is_ok());
+        assert!(validate_resolver("dns.example".into()).is_err());
     }
 
     #[test]

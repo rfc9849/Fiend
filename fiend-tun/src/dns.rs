@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fiend_core::addr::Address;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{DNSClass, RData, Record, RecordType, rdata::A};
 use lru::LruCache;
+
+use crate::rules::Rules;
 use thiserror::Error;
 
 pub const DNS_ADDRESS: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
@@ -39,6 +42,7 @@ pub struct FakeDns {
     domains: HashMap<String, Ipv4Addr>,
     next: u32,
     ttl: u32,
+    rules: Option<Arc<Rules>>,
 }
 
 impl FakeDns {
@@ -55,7 +59,13 @@ impl FakeDns {
             domains: HashMap::new(),
             next: FIRST_IP,
             ttl: ttl_seconds,
+            rules: None,
         })
+    }
+
+    pub fn with_rules(mut self, rules: Arc<Rules>) -> Self {
+        self.rules = Some(rules);
+        self
     }
 
     pub fn answer(&mut self, packet: &[u8], now: Instant) -> Result<Vec<u8>, DnsError> {
@@ -104,6 +114,12 @@ impl FakeDns {
                     .to_ascii_lowercase();
                 if !valid_domain(&domain) {
                     response.metadata.response_code = ResponseCode::Refused;
+                } else if self
+                    .rules
+                    .as_ref()
+                    .is_some_and(|rules| rules.is_blocked(&domain))
+                {
+                    response.metadata.response_code = ResponseCode::NXDomain;
                 } else if let Some(ip) = self.allocate(&domain, now) {
                     response.add_answer(Record::from_rdata(query.name, self.ttl, RData::A(A(ip))));
                 } else {
