@@ -12,13 +12,42 @@ pub type ProtectSocket = std::sync::Arc<dyn Fn(&Socket) -> io::Result<()> + Send
 /// default is smaller and limits one link to a few hundred Mbit/s.
 pub const LINK_BUFFER_BYTES: usize = 4 << 20;
 
+/// An explicit socket buffer turns off kernel autotuning, and the kernel caps
+/// it at `net.core.{r,w}mem_max`. Some systems cap that below the autotuning
+/// ceiling, for example an Android emulator with 256 KiB, so a fixed size
+/// would make the window smaller. Set the size only when the cap can hold it.
+fn buffer_target(hard_cap: Option<usize>) -> Option<usize> {
+    let hard_cap = hard_cap?;
+    (hard_cap >= LINK_BUFFER_BYTES).then_some(LINK_BUFFER_BYTES)
+}
+
+#[cfg(target_os = "linux")]
+fn hard_cap(recv: bool) -> Option<usize> {
+    let path = if recv {
+        "/proc/sys/net/core/rmem_max"
+    } else {
+        "/proc/sys/net/core/wmem_max"
+    };
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hard_cap(_recv: bool) -> Option<usize> {
+    None
+}
+
 pub fn set_link_buffers<S>(stream: &S) -> io::Result<()>
 where
     S: std::os::fd::AsFd,
 {
     let socket = socket2::SockRef::from(stream);
-    socket.set_recv_buffer_size(LINK_BUFFER_BYTES)?;
-    socket.set_send_buffer_size(LINK_BUFFER_BYTES)
+    if let Some(size) = buffer_target(hard_cap(true)) {
+        socket.set_recv_buffer_size(size)?;
+    }
+    if let Some(size) = buffer_target(hard_cap(false)) {
+        socket.set_send_buffer_size(size)?;
+    }
+    Ok(())
 }
 
 pub async fn dial(server: &str, protect: &ProtectSocket) -> io::Result<TcpStream> {
@@ -30,11 +59,8 @@ pub async fn dial(server: &str, protect: &ProtectSocket) -> io::Result<TcpStream
             Some(Protocol::TCP),
         )?;
         socket.set_nonblocking(true)?;
-        if let Err(error) = socket.set_recv_buffer_size(LINK_BUFFER_BYTES) {
-            tracing::debug!(%error, "cannot set link receive buffer");
-        }
-        if let Err(error) = socket.set_send_buffer_size(LINK_BUFFER_BYTES) {
-            tracing::debug!(%error, "cannot set link send buffer");
+        if let Err(error) = set_link_buffers(&socket) {
+            tracing::debug!(%error, "cannot set link buffers");
         }
         protect(&socket)?;
         match TcpSocket::from_std_stream(socket.into())
@@ -136,8 +162,22 @@ mod tests {
         let _peer = listener.accept().expect("accept");
         set_link_buffers(&stream).expect("set buffers");
         let socket = socket2::SockRef::from(&stream);
-        assert!(socket.recv_buffer_size().expect("read receive") >= LINK_BUFFER_BYTES);
-        assert!(socket.send_buffer_size().expect("read send") >= LINK_BUFFER_BYTES);
+        if buffer_target(hard_cap(true)).is_some() {
+            assert!(socket.recv_buffer_size().expect("read receive") >= LINK_BUFFER_BYTES);
+        }
+        if buffer_target(hard_cap(false)).is_some() {
+            assert!(socket.send_buffer_size().expect("read send") >= LINK_BUFFER_BYTES);
+        }
+    }
+
+    #[test]
+    fn keeps_autotuning_below_the_hard_cap() {
+        assert_eq!(buffer_target(None), None);
+        assert_eq!(buffer_target(Some(LINK_BUFFER_BYTES - 1)), None);
+        assert_eq!(
+            buffer_target(Some(LINK_BUFFER_BYTES)),
+            Some(LINK_BUFFER_BYTES)
+        );
     }
 
     #[test]
