@@ -453,6 +453,43 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_stalled_link_closes_after_the_keepalive_probe() {
+        use crate::crypto::RecordCipher;
+        use crate::mux::ServerConnection;
+        use std::future::pending;
+
+        let (client, server) = tokio::io::duplex(64 << 10);
+        let session = |io| {
+            Session::new(
+                io,
+                RecordCipher::new(&[1; 32], [2; 12]),
+                RecordCipher::new(&[1; 32], [2; 12]),
+                16384,
+            )
+        };
+        let config = Config::default();
+        let server_config = config.clone();
+        let held = tokio::spawn(async move {
+            let connection = ServerConnection::handshake(session(server), &server_config)
+                .await
+                .expect("server handshake");
+            pending::<()>().await;
+            drop(connection);
+        });
+        let link = ClientLink::connect(session(client), &config, 1, Arc::new(Notify::new()))
+            .await
+            .expect("client handshake");
+        assert!(!link.is_closed());
+        tokio::time::advance(config.ping_interval + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!link.is_closed());
+        tokio::time::advance(config.probe_timeout + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(link.is_closed());
+        held.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn pending_work_resets_continuous_idle() {
         let shared = LinkShared::new(Arc::new(Notify::new()));
         tokio::time::advance(Duration::from_secs(10)).await;

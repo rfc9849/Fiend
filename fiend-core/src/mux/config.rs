@@ -30,7 +30,7 @@ impl Default for Config {
             open_timeout: Duration::from_secs(45),
             settings_timeout: Duration::from_secs(15),
             target_timeout: Duration::from_secs(15),
-            ping_interval: Duration::from_secs(15),
+            ping_interval: Duration::from_secs(10),
             probe_timeout: Duration::from_secs(5),
             surplus_idle: Duration::from_secs(30),
             attempts: 3,
