@@ -3,6 +3,7 @@ package dev.fiend.core.data
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import dev.fiend.core.data.storage.PreferencesStore
@@ -53,6 +54,11 @@ internal class RealSettingsRepository @Inject constructor(
             values[REMOTE_DNS] = true
             values[SPLIT_MODE] = next.splitTunnelMode.name
             values[SPLIT_APPS] = next.splitTunnelApps
+            values[DIRECT_RULES] = next.directRules
+            values[BLOCK_RULES] = next.blockRules
+            values[DIRECT_RESOLVER] = next.directResolver
+            values[DIRECT_MODE] = next.directMode
+            values[MTU] = next.mtu.coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU)
         }
     }
 
@@ -65,6 +71,11 @@ internal class RealSettingsRepository @Inject constructor(
         remoteDns = true,
         splitTunnelMode = SplitTunnelMode.entries.firstOrNull { it.name == values[SPLIT_MODE] } ?: SplitTunnelMode.AllApps,
         splitTunnelApps = values[SPLIT_APPS] ?: emptySet(),
+        directRules = values[DIRECT_RULES] ?: "",
+        blockRules = values[BLOCK_RULES] ?: "",
+        directResolver = values[DIRECT_RESOLVER] ?: "",
+        directMode = values[DIRECT_MODE] ?: false,
+        mtu = (values[MTU] ?: AppSettings.DEFAULT_MTU).coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU),
     )
 
     private companion object {
@@ -76,5 +87,10 @@ internal class RealSettingsRepository @Inject constructor(
         val REMOTE_DNS = booleanPreferencesKey("remote_dns")
         val SPLIT_MODE = stringPreferencesKey("split_mode")
         val SPLIT_APPS = stringSetPreferencesKey("split_apps")
+        val DIRECT_RULES = stringPreferencesKey("direct_rules")
+        val BLOCK_RULES = stringPreferencesKey("block_rules")
+        val DIRECT_RESOLVER = stringPreferencesKey("direct_resolver")
+        val DIRECT_MODE = booleanPreferencesKey("direct_mode")
+        val MTU = intPreferencesKey("mtu")
     }
 }

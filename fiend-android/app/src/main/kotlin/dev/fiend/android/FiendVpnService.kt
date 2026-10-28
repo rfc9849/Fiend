@@ -122,7 +122,7 @@ class FiendVpnService : VpnService() {
             val config = profile.engineConfig()
             profileName = profile.name
             underlying = findUnderlying()
-            val builder = Builder().setSession(profile.name).setMtu(1500)
+            val builder = Builder().setSession(profile.name).setMtu(appSettings.mtu)
                 .addAddress("10.42.0.2", 32)
                 .addAddress("fd42:6669:656e:6400::2", 128)
                 .addRoute("0.0.0.0", 0)
@@ -141,9 +141,20 @@ class FiendVpnService : VpnService() {
                 } catch (_: PackageManager.NameNotFoundException) { }
             }
             check(appSettings.splitTunnelMode != SplitTunnelMode.OnlySelected || allowed > 0) { "Select at least one installed app" }
-            val options = TunOptions(1500u, appSettings.ipv6, appSettings.bypassLan,
-                profile.tuning.handshakeTimeoutMs.toULong(), profile.tuning.maxConnections.toUInt(),
-                profile.tuning.udpIdleMs.toULong(), profile.tuning.udpKeepaliveMs.toULong(), profile.tuning.maxUdpFlows.toUInt())
+            val options = TunOptions(
+                mtu = appSettings.mtu.toUShort(),
+                ipv6 = appSettings.ipv6,
+                bypassLan = appSettings.bypassLan,
+                directAll = appSettings.directMode,
+                directRules = appSettings.directRules,
+                blockRules = appSettings.blockRules,
+                directResolver = appSettings.directResolver,
+                handshakeTimeoutMs = profile.tuning.handshakeTimeoutMs.toULong(),
+                maxConnections = profile.tuning.maxConnections.toUInt(),
+                udpIdleMs = profile.tuning.udpIdleMs.toULong(),
+                udpKeepaliveMs = profile.tuning.udpKeepaliveMs.toULong(),
+                maxUdpFlows = profile.tuning.maxUdpFlows.toUInt(),
+            )
             val platform = ServicePlatform(this, session)
             withContext(Dispatchers.IO) {
                 if (!engine.isCurrent(session)) return@withContext

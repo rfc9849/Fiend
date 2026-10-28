@@ -13,7 +13,27 @@ data class AppSettings(
     val remoteDns: Boolean = true,
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.AllApps,
     val splitTunnelApps: Set<String> = emptySet(),
-)
+    val directRules: String = "",
+    val blockRules: String = "",
+    val directResolver: String = "",
+    val directMode: Boolean = false,
+    val mtu: Int = DEFAULT_MTU,
+) {
+    companion object {
+        const val DEFAULT_MTU = 1500
+        const val MIN_MTU = 1280
+        const val MAX_MTU = 9000
+    }
+}
+
+data class RuleCounts(
+    val domains: Int = 0,
+    val exact: Int = 0,
+    val keywords: Int = 0,
+    val cidrs: Int = 0,
+) {
+    val total: Int get() = domains + exact + keywords + cidrs
+}
 
 data class InstalledApp(
     val packageName: String,

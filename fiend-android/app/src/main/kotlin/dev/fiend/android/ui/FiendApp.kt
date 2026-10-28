@@ -37,6 +37,8 @@ import dev.fiend.feature.profiles.ProfileEditKey
 import dev.fiend.feature.profiles.ProfilesKey
 import dev.fiend.feature.profiles.profilesEntries
 import dev.fiend.feature.settings.LogsKey
+import dev.fiend.feature.settings.RoutingKey
+import dev.fiend.feature.settings.RuleEditorKey
 import dev.fiend.feature.settings.SettingsKey
 import dev.fiend.feature.settings.SplitTunnelKey
 import dev.fiend.feature.settings.settingsEntries
@@ -52,6 +54,8 @@ private val navConfig = SavedStateConfiguration {
             subclass(ProfileEditKey::class, ProfileEditKey.serializer())
             subclass(SettingsKey::class, SettingsKey.serializer())
             subclass(SplitTunnelKey::class, SplitTunnelKey.serializer())
+            subclass(RoutingKey::class, RoutingKey.serializer())
+            subclass(RuleEditorKey::class, RuleEditorKey.serializer())
             subclass(LogsKey::class, LogsKey.serializer())
         }
     }
@@ -135,6 +139,8 @@ fun FiendApp(versionName: String) {
                 )
                 settingsEntries(
                     onOpenSplitTunnel = { backStack.push(SplitTunnelKey) },
+                    onOpenRouting = { backStack.push(RoutingKey) },
+                    onOpenRuleEditor = { backStack.push(RuleEditorKey(it)) },
                     onOpenLogs = { backStack.push(LogsKey) },
                     onBack = { if (backStack.size > 1) backStack.removeAt(backStack.lastIndex) },
                     versionName = versionName,

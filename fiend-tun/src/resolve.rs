@@ -11,7 +11,7 @@ use lru::LruCache;
 
 use crate::engine::protected_udp;
 
-pub const DEFAULT_SERVER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(77, 88, 8, 8)), 53);
+pub const DEFAULT_SERVER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const TRIES: usize = 2;
 const EDNS_PAYLOAD: u16 = 1232;

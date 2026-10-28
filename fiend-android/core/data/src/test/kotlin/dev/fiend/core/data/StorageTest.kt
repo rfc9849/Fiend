@@ -12,6 +12,7 @@ import dev.fiend.core.data.storage.ProfileDatabase
 import dev.fiend.core.data.storage.SecretCipher
 import dev.fiend.core.engine.bindings.bundledTemplates
 import dev.fiend.core.model.Profile
+import dev.fiend.core.model.RuleCounts
 import dev.fiend.core.model.ThemeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,13 +88,38 @@ class StorageTest {
             val store = PreferencesStore(context, scope)
             val repository = RealSettingsRepository(store, RealLogRepository(), scope)
             repository.awaitReady()
-            repository.update { it.copy(themeMode = ThemeMode.Dark, dynamicColor = false, connectOnStart = true, ipv6 = false, splitTunnelApps = setOf("dev.fiend.test")) }
+            repository.update { it.copy(themeMode = ThemeMode.Dark, dynamicColor = false, connectOnStart = true, ipv6 = false, splitTunnelApps = setOf("dev.fiend.test"), directRules = "domain:ru\nip:1.2.3.0/24", blockRules = "domain:ads.example", directResolver = "1.1.1.1", directMode = true, mtu = 9999) }
             val settings = withTimeout(5_000) { repository.settings.first { it.themeMode == ThemeMode.Dark } }
+            assertEquals("domain:ru\nip:1.2.3.0/24", settings.directRules)
+            assertEquals("domain:ads.example", settings.blockRules)
+            assertEquals("1.1.1.1", settings.directResolver)
+            assertTrue(settings.directMode)
+            assertEquals(9000, settings.mtu)
             assertFalse(settings.dynamicColor)
             assertTrue(settings.connectOnStart)
             assertFalse(settings.ipv6)
             assertEquals(setOf("dev.fiend.test"), settings.splitTunnelApps)
         } finally { scope.cancel() }
+    }
+
+    @Test
+    fun rulesAreValidatedByRustAndImportIsLimited() = runBlocking {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val repository = RealRulesRepository(context)
+        val counts = repository.validate("domain:a.ru\nfull:b.ru\nkeyword:x\nip:10.0.0.0/8", true).getOrThrow()
+        assertEquals(RuleCounts(1, 1, 1, 1), counts)
+        assertEquals(4, counts.total)
+        assertTrue(repository.validate("ip:10.0.0.0/8", false).isFailure)
+        assertTrue(repository.validate("bogus:x", true).isFailure)
+        assertTrue(repository.validateResolver("").isSuccess)
+        assertTrue(repository.validateResolver("9.9.9.9:53").isSuccess)
+        assertTrue(repository.validateResolver("dns.example").isFailure)
+        val small = java.io.File(context.cacheDir, "small.txt").apply { writeText("domain:example.ru\n") }
+        assertEquals("domain:example.ru\n", repository.read(android.net.Uri.fromFile(small).toString()).getOrThrow())
+        val large = java.io.File(context.cacheDir, "large.txt").apply { writeBytes(ByteArray(RulesRepository.MAX_IMPORT_BYTES + 1) { 'a'.code.toByte() }) }
+        assertTrue(repository.read(android.net.Uri.fromFile(large).toString()).isFailure)
+        val binary = java.io.File(context.cacheDir, "binary.txt").apply { writeBytes(byteArrayOf(0xff.toByte(), 0xfe.toByte(), 0x00)) }
+        assertTrue(repository.read(android.net.Uri.fromFile(binary).toString()).isFailure)
     }
 
     @Test

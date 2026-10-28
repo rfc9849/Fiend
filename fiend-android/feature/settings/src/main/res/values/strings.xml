@@ -39,6 +39,45 @@
     <string name="settings_licenses_unavailable">License screen is not part of the preview build</string>
     <string name="settings_cancel">Cancel</string>
 
+    <string name="settings_rules">Routing rules</string>
+    <string name="settings_rules_body">Direct sites, blocked domains, resolver and MTU</string>
+
+    <string name="routing_title">Routing rules</string>
+    <string name="routing_group_rules">Rules</string>
+    <string name="routing_group_network">Network</string>
+    <string name="routing_direct_rules">Direct list</string>
+    <string name="routing_block_rules">Blocked domains</string>
+    <string name="routing_rules_none">No rules</string>
+    <plurals name="routing_rules">
+        <item quantity="one">%1$d rule</item>
+        <item quantity="other">%1$d rules</item>
+    </plurals>
+    <string name="routing_privacy">Direct sites skip the tunnel and see your own network address. Blocked domains do not resolve.</string>
+    <string name="routing_resolver">Direct DNS server</string>
+    <string name="routing_resolver_default">Default (1.1.1.1)</string>
+    <string name="routing_resolver_body">IP address with an optional port. Leave empty for the default.</string>
+    <string name="routing_error_resolver">Enter an IP address, for example 9.9.9.9 or 9.9.9.9:53</string>
+    <string name="routing_mtu">MTU</string>
+    <string name="routing_mtu_body">From %1$d to %2$d</string>
+    <string name="routing_error_mtu">Enter a number from %1$d to %2$d</string>
+    <string name="routing_direct_mode">Direct mode</string>
+    <string name="routing_direct_mode_body">Send all traffic outside the tunnel. For tests only.</string>
+    <string name="routing_save">Save</string>
+    <string name="routing_restart">Reconnect to apply changes.</string>
+
+    <string name="rules_close">Close</string>
+    <string name="rules_import">Import file</string>
+    <string name="rules_imported">File added. Save to keep it.</string>
+    <string name="rules_counts">%1$d rules: %2$d domain, %3$d address</string>
+    <string name="rules_example_direct">domain:example.com\nfull:www.example.org\nkeyword:example\nip:203.0.113.0/24</string>
+    <string name="rules_example_block">domain:ads.example.com\nfull:tracker.example.org\nkeyword:adserver</string>
+    <string name="rules_syntax_direct">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. ip: matches an address range. # starts a comment.</string>
+    <string name="rules_syntax_block">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. # starts a comment.</string>
+    <string name="rules_discard_title">Discard changes?</string>
+    <string name="rules_discard_body">Your changes to this list will be lost.</string>
+    <string name="rules_discard">Discard</string>
+    <string name="rules_keep">Keep editing</string>
+
     <string name="split_title">Split tunneling</string>
     <string name="split_back">Back</string>
     <string name="split_mode_all">All apps</string>

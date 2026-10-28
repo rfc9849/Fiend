@@ -4,6 +4,7 @@ import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.FingerprintTemplate
 import dev.fiend.core.model.InstalledApp
 import dev.fiend.core.model.LogLine
+import dev.fiend.core.model.RuleCounts
 import dev.fiend.core.model.Profile
 import dev.fiend.core.model.TunnelState
 import dev.fiend.core.model.TunnelStats
@@ -56,6 +57,18 @@ interface SettingsRepository {
     val settings: StateFlow<AppSettings>
 
     suspend fun update(transform: (AppSettings) -> AppSettings)
+}
+
+interface RulesRepository {
+    fun validate(text: String, allowIp: Boolean): Result<RuleCounts>
+
+    fun validateResolver(value: String): Result<Unit>
+
+    suspend fun read(uri: String): Result<String>
+
+    companion object {
+        const val MAX_IMPORT_BYTES = 1 shl 20
+    }
 }
 
 interface AppsRepository {

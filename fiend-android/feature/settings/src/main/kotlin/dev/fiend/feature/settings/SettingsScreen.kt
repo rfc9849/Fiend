@@ -59,6 +59,7 @@ internal fun SettingsScreen(
     onUpdate: ((AppSettings) -> AppSettings) -> Unit,
     onTheme: (ThemeMode) -> Unit,
     onOpenSplitTunnel: () -> Unit,
+    onOpenRouting: () -> Unit,
     onOpenLogs: () -> Unit,
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -139,6 +140,16 @@ internal fun SettingsScreen(
                             icon = FiendIcons.AltRoute,
                             trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
                             onClick = onOpenSplitTunnel,
+                        )
+                    }
+                    item {
+                        ActionItem(
+                            shapes = it,
+                            headline = stringResource(R.string.settings_rules),
+                            supporting = stringResource(R.string.settings_rules_body),
+                            icon = FiendIcons.Block,
+                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
+                            onClick = onOpenRouting,
                         )
                     }
                     item {
