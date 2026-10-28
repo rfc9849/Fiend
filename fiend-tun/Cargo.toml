@@ -8,3 +8,14 @@ fiend-core = { path = "../fiend-core" }
 hickory-proto = "0.26.3"
 lru = "0.19"
 thiserror = "2"
+etherparse = "=0.20.3"
+futures = "0.3"
+netstack-smoltcp = "=0.2.4"
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tun-rs = { version = "=2.8.15", default-features = false, features = ["async_tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
