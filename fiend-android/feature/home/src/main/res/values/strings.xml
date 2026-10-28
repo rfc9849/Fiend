@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="home_brand">fiend</string>
+    <string name="home_logs">Logs</string>
+    <string name="home_status_off">Not connected</string>
+    <string name="home_status_connecting">Connecting</string>
+    <string name="home_status_on">Connected</string>
+    <string name="home_status_stopping">Disconnecting</string>
+    <string name="home_status_failed">Couldn\'t connect</string>
+    <string name="home_hint_off">Tap to connect to %1$s</string>
+    <string name="home_hint_no_profile">Add a server to get started</string>
+    <string name="home_step_dialing">Reaching server</string>
+    <string name="home_step_handshake">Securing the handshake</string>
+    <string name="home_step_routing">Setting up routes</string>
+    <string name="home_via">via %1$s</string>
+    <string name="home_action_connect">Connect</string>
+    <string name="home_action_disconnect">Disconnect</string>
+    <string name="home_server">Server</string>
+    <string name="home_change_server">Change server</string>
+    <string name="home_no_server">No server selected</string>
+    <string name="home_stat_download">Download</string>
+    <string name="home_stat_upload">Upload</string>
+    <string name="home_stat_latency">Latency</string>
+    <string name="home_stat_session">This session</string>
+    <string name="home_stat_empty">—</string>
+    <string name="home_unit_ms">ms</string>
+    <string name="home_picker_title">Choose a server</string>
+    <string name="home_picker_manage">Manage profiles</string>
+    <string name="home_latency">%1$d ms</string>
+</resources>

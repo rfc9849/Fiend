@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#4A45B0</color>
+    <color name="splash_background">#FCF8FE</color>
+    <style name="Theme.Fiend" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.Fiend.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="windowSplashScreenIconBackgroundColor">@color/brand</item>
+        <item name="postSplashScreenTheme">@style/Theme.Fiend</item>
+    </style>
+</resources>

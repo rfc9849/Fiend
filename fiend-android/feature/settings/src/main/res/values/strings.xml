@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_title">Settings</string>
+    <string name="settings_group_connection">Connection</string>
+    <string name="settings_connect_on_start">Connect on app start</string>
+    <string name="settings_connect_on_start_body">Use the active profile when you open fiend</string>
+    <string name="settings_always_on">Always-on VPN</string>
+    <string name="settings_always_on_body">Keep fiend on and block traffic outside the tunnel. Managed by Android.</string>
+    <string name="settings_group_routing">Routing</string>
+    <string name="settings_split">Split tunneling</string>
+    <string name="settings_split_all">All apps use the tunnel</string>
+    <plurals name="settings_split_only">
+        <item quantity="one">%1$d app uses the tunnel</item>
+        <item quantity="other">%1$d apps use the tunnel</item>
+    </plurals>
+    <plurals name="settings_split_except">
+        <item quantity="one">%1$d app bypasses the tunnel</item>
+        <item quantity="other">%1$d apps bypass the tunnel</item>
+    </plurals>
+    <string name="settings_bypass_lan">Bypass local network</string>
+    <string name="settings_bypass_lan_body">Printers, casting and devices on your Wi‑Fi stay reachable</string>
+    <string name="settings_ipv6">Route IPv6</string>
+    <string name="settings_ipv6_body">Send IPv6 traffic through the tunnel to prevent leaks</string>
+    <string name="settings_remote_dns">Resolve names on the server</string>
+    <string name="settings_remote_dns_body">Your network never sees DNS queries</string>
+    <string name="settings_group_appearance">Appearance</string>
+    <string name="settings_theme">Theme</string>
+    <string name="settings_theme_system">System default</string>
+    <string name="settings_theme_light">Light</string>
+    <string name="settings_theme_dark">Dark</string>
+    <string name="settings_dynamic_color">Dynamic color</string>
+    <string name="settings_dynamic_color_body">Use colors from your wallpaper</string>
+    <string name="settings_dynamic_color_unsupported">Needs Android 12 or later</string>
+    <string name="settings_group_about">About</string>
+    <string name="settings_logs">Logs</string>
+    <string name="settings_logs_body">Engine events from this session</string>
+    <string name="settings_version">Version</string>
+    <string name="settings_licenses">Open-source licenses</string>
+    <string name="settings_licenses_unavailable">License screen is not part of the preview build</string>
+    <string name="settings_cancel">Cancel</string>
+
+    <string name="split_title">Split tunneling</string>
+    <string name="split_back">Back</string>
+    <string name="split_mode_all">All apps</string>
+    <string name="split_mode_only">Selected</string>
+    <string name="split_mode_except">Bypass</string>
+    <string name="split_body_all">Every app sends its traffic through fiend.</string>
+    <string name="split_body_only">Only the apps that you select use the tunnel. Other apps use your normal connection.</string>
+    <string name="split_body_except">The apps that you select use your normal connection. All other apps use the tunnel.</string>
+    <string name="split_search">Search apps</string>
+    <string name="split_system">System app</string>
+
+    <string name="logs_title">Logs</string>
+    <string name="logs_back">Back</string>
+    <string name="logs_copy">Copy logs</string>
+    <string name="logs_clear">Clear logs</string>
+    <string name="logs_copied">Logs copied</string>
+    <string name="logs_empty">No events yet</string>
+</resources>
