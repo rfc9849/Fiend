@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -60,31 +61,35 @@ struct ServerInner {
     config: ServerConfig,
     replay: FreshnessCheck,
     connections: Arc<Semaphore>,
+    origin: RwLock<OriginProfile>,
+}
+
+impl ServerInner {
+    fn origin(&self) -> OriginProfile {
+        self.origin
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
         let replay = FreshnessCheck::new(config.replay_ttl.max(transport::AUTH_WINDOW));
         let connections = Arc::new(Semaphore::new(config.max_connections.max(1)));
-        let mut config = config;
-        if config.origin.record_sizes.is_empty() {
-            let suite = if config.origin.cipher_suite == 0 {
-                0x1301
-            } else {
-                config.origin.cipher_suite
-            };
-            config.origin.record_sizes = transport::default_flight_sizes(suite);
-        }
+        let origin = RwLock::new(config.origin.clone());
         Self {
             inner: Arc::new(ServerInner {
                 config,
                 replay,
                 connections,
+                origin,
             }),
         }
     }
 
     pub async fn serve(&self, listener: TcpListener) -> io::Result<()> {
+        self.start_origin_probe();
         loop {
             let permit = self
                 .inner
@@ -115,13 +120,54 @@ impl Server {
         }
     }
 
+    fn start_origin_probe(&self) {
+        if !self.inner.config.origin.record_sizes.is_empty() {
+            return;
+        }
+        let server = self.clone();
+        tokio::spawn(async move {
+            server.probe_origin().await;
+        });
+    }
+
+    async fn probe_origin(&self) {
+        if !self.inner.config.origin.record_sizes.is_empty() {
+            return;
+        }
+        let host = &self.inner.config.origin_host;
+        let hello = transport::build_probe_hello(host);
+        match transport::probe_origin_at(host, self.inner.config.origin_port, &hello).await {
+            Ok(profile) => {
+                let mut origin = self
+                    .inner
+                    .origin
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if origin.cipher_suite == 0 {
+                    origin.cipher_suite = profile.cipher_suite;
+                }
+                if origin.key_share_group == 0 {
+                    origin.key_share_group = profile.key_share_group;
+                }
+                if origin.extension_order.is_empty() {
+                    origin.extension_order = profile.extension_order;
+                }
+                if origin.record_sizes.is_empty() && profile.record_sizes.len() >= 2 {
+                    origin.record_sizes = profile.record_sizes;
+                }
+            }
+            Err(error) => tracing::debug!(%error, "origin probe failed"),
+        }
+    }
+
     async fn handle(&self, stream: TcpStream) -> mux::Result<()> {
         let config = &self.inner.config;
+        let origin = self.inner.origin();
         let outcome = transport::serve_connection(
             stream,
             &config.secret,
             &self.inner.replay,
-            &config.origin,
+            &origin,
             &config.origin_host,
             config.origin_port,
         )
@@ -279,4 +325,65 @@ fn millis(duration: Duration) -> u64 {
 
 fn touch(activity: &AtomicU64, epoch: Instant) {
     activity.store(elapsed_ms(epoch), Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn origin_probe_records_the_server_flight_shape() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind origin");
+        let port = listener.local_addr().expect("origin address").port();
+        let origin = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept probe");
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.expect("probe header");
+            let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).await.expect("probe body");
+
+            let mut reply = transport::build_server_hello(
+                [9u8; 32],
+                &[3u8; 32],
+                0x1301,
+                0x001d,
+                &[7u8; 32],
+                &[0x002b, 0x0033],
+            )
+            .expect("build ServerHello");
+            reply.extend_from_slice(&[0x14, 0x03, 0x03, 0, 1, 1]);
+            for size in [111usize, 222, 333] {
+                reply.extend_from_slice(&[0x17, 0x03, 0x03]);
+                reply.extend_from_slice(&(size as u16).to_be_bytes());
+                reply.resize(reply.len() + size, 0x5a);
+            }
+            stream.write_all(&reply).await.expect("origin write");
+            stream.shutdown().await.expect("origin shutdown");
+        });
+
+        let config = ServerConfig::new(vec![0x42u8; 32], "127.0.0.1", port);
+        let server = Server::new(config);
+        server.probe_origin().await;
+
+        let profile = server.inner.origin();
+        assert_eq!(profile.cipher_suite, 0x1301);
+        assert_eq!(profile.key_share_group, 0x001d);
+        assert_eq!(profile.extension_order, vec![0x002b, 0x0033]);
+        assert_eq!(profile.record_sizes, vec![116, 227, 338]);
+        origin.await.expect("origin task");
+    }
+
+    #[tokio::test]
+    async fn explicit_record_sizes_skip_the_origin_probe() {
+        let config = ServerConfig::new(vec![0x42u8; 32], "192.0.2.1", 443);
+        let mut config = config;
+        config.origin.record_sizes = vec![35, 4000, 300];
+        let server = Server::new(config);
+        server.probe_origin().await;
+        assert_eq!(server.inner.origin().record_sizes, vec![35, 4000, 300]);
+    }
 }

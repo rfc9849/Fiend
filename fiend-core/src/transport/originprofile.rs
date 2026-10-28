@@ -1,8 +1,10 @@
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 use super::error::{Error, Result};
 use super::serverhello::{
@@ -109,6 +111,88 @@ impl OriginProfileCache {
     }
 }
 
+pub fn build_probe_hello(domain: &str) -> Vec<u8> {
+    let mut random = [0u8; 32];
+    rand::fill(&mut random);
+    let mut session_id = [0u8; 32];
+    rand::fill(&mut session_id);
+    let secret = EphemeralSecret::random_from_rng(&mut rand::rng());
+    let public = X25519PublicKey::from(&secret);
+
+    let mut extensions = Vec::with_capacity(256);
+    if domain.parse::<IpAddr>().is_err() {
+        let name = domain.as_bytes();
+        add_extension(&mut extensions, 0x0000, |data| {
+            data.extend_from_slice(&((name.len() + 3) as u16).to_be_bytes());
+            data.push(0);
+            data.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            data.extend_from_slice(name);
+        });
+    }
+    add_extension(&mut extensions, 0x0005, |data| {
+        data.extend_from_slice(&[1, 0, 0, 0, 0]);
+    });
+    add_extension(&mut extensions, 0x000a, |data| {
+        data.extend_from_slice(&4u16.to_be_bytes());
+        data.extend_from_slice(&0x001du16.to_be_bytes());
+        data.extend_from_slice(&0x0017u16.to_be_bytes());
+    });
+    add_extension(&mut extensions, 0x000d, |data| {
+        let algorithms = [0x0403u16, 0x0804, 0x0401, 0x0503, 0x0805, 0x0806];
+        data.extend_from_slice(&((algorithms.len() * 2) as u16).to_be_bytes());
+        for algorithm in algorithms {
+            data.extend_from_slice(&algorithm.to_be_bytes());
+        }
+    });
+    add_extension(&mut extensions, 0x0010, |data| {
+        data.extend_from_slice(&12u16.to_be_bytes());
+        data.extend_from_slice(&[2, b'h', b'2', 8]);
+        data.extend_from_slice(b"http/1.1");
+    });
+    add_extension(&mut extensions, 0x0012, |_| {});
+    add_extension(&mut extensions, 0x002b, |data| {
+        data.extend_from_slice(&[2, 0x03, 0x04]);
+    });
+    add_extension(&mut extensions, 0x0033, |data| {
+        data.extend_from_slice(&36u16.to_be_bytes());
+        data.extend_from_slice(&0x001du16.to_be_bytes());
+        data.extend_from_slice(&32u16.to_be_bytes());
+        data.extend_from_slice(public.as_bytes());
+    });
+
+    let cipher_suites = [0x1301u16, 0x1302, 0x1303];
+    let mut body = Vec::with_capacity(128 + extensions.len());
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&random);
+    body.push(session_id.len() as u8);
+    body.extend_from_slice(&session_id);
+    body.extend_from_slice(&((cipher_suites.len() * 2) as u16).to_be_bytes());
+    for suite in cipher_suites {
+        body.extend_from_slice(&suite.to_be_bytes());
+    }
+    body.extend_from_slice(&[1, 0]);
+    body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+    body.extend_from_slice(&extensions);
+
+    let mut record = Vec::with_capacity(9 + body.len());
+    record.extend_from_slice(&[REC_HANDSHAKE, 0x03, 0x01]);
+    record.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
+    record.push(0x01);
+    record.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    record.extend_from_slice(&body);
+    record
+}
+
+fn add_extension(output: &mut Vec<u8>, kind: u16, fill: impl FnOnce(&mut Vec<u8>)) {
+    output.extend_from_slice(&kind.to_be_bytes());
+    let length_at = output.len();
+    output.extend_from_slice(&[0, 0]);
+    let start = output.len();
+    fill(output);
+    let length = (output.len() - start) as u16;
+    output[length_at..length_at + 2].copy_from_slice(&length.to_be_bytes());
+}
+
 pub async fn probe_origin(domain: &str, client_hello: &[u8]) -> Result<OriginProfile> {
     probe_origin_at(domain, 443, client_hello).await
 }
@@ -188,4 +272,29 @@ async fn read_exact_with_timeout(
         .await
         .map_err(|_| Error::Timeout)??;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fingerprint::parse_client_hello;
+
+    #[test]
+    fn probe_hello_parses_as_a_tls13_client_hello() {
+        let hello = build_probe_hello("www.example.com");
+        let template = parse_client_hello(&hello).expect("parse probe hello");
+        assert_eq!(template.domain, "www.example.com");
+        assert!(template.cipher_suites.contains(&0x1301));
+        assert_eq!(template.key_shares.len(), 1);
+        assert_eq!(template.key_shares[0].group, 0x001d);
+        assert_eq!(template.key_shares[0].size, 32);
+        assert!(!template.early_data);
+        assert!(template.psk_identity.is_none());
+    }
+
+    #[test]
+    fn probe_hello_omits_server_name_for_ip_targets() {
+        let hello = build_probe_hello("127.0.0.1");
+        assert!(parse_client_hello(&hello).is_err());
+    }
 }
