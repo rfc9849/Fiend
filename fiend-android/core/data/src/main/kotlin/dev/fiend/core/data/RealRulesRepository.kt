@@ -3,9 +3,12 @@ package dev.fiend.core.data
 import android.content.Context
 import android.net.Uri
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dev.fiend.core.engine.bindings.inspectRuleFile
 import dev.fiend.core.engine.bindings.validateResolver as nativeValidateResolver
 import dev.fiend.core.engine.bindings.validateRules
+import dev.fiend.core.engine.bindings.RuleKind as NativeRuleKind
 import dev.fiend.core.model.RuleCounts
+import dev.fiend.core.model.RuleKind
 import java.io.ByteArrayOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -24,6 +27,18 @@ internal class RealRulesRepository @Inject constructor(
     override fun validateResolver(value: String): Result<Unit> = runCatching {
         nativeValidateResolver(value.trim())
     }.recoverCatching { throw IllegalArgumentException(it.message ?: "Resolver is not valid") }
+
+    override fun inspectFile(path: String, kind: RuleKind): Result<RuleCounts> = runCatching {
+        val stats = inspectRuleFile(
+            path,
+            when (kind) {
+                RuleKind.Direct -> NativeRuleKind.DIRECT
+                RuleKind.Block -> NativeRuleKind.BLOCK
+                RuleKind.Proxy -> NativeRuleKind.PROXY
+            },
+        )
+        RuleCounts(stats.domains.toInt(), stats.exact.toInt(), stats.keywords.toInt(), stats.cidrs.toInt())
+    }.recoverCatching { throw IllegalArgumentException(it.message ?: "Rule file is not valid") }
 
     override suspend fun read(uri: String): Result<String> = withContext(Dispatchers.IO) {
         runCatching {

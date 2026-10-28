@@ -30,6 +30,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.fiend.android.ui.FiendApp
 import dev.fiend.core.data.SettingsRepository
 import dev.fiend.core.data.ProfileRepository
+import dev.fiend.core.data.SubscriptionRepository
 import dev.fiend.core.data.TunnelController
 import dev.fiend.core.model.TunnelState
 import dev.fiend.core.designsystem.theme.FiendTheme
@@ -43,7 +44,12 @@ import kotlinx.coroutines.launch
 import androidx.lifecycle.viewModelScope
 
 @HiltViewModel
-class MainViewModel @Inject constructor(settings: SettingsRepository, private val profiles: ProfileRepository, tunnel: TunnelController) : ViewModel() {
+class MainViewModel @Inject constructor(
+    settings: SettingsRepository,
+    private val profiles: ProfileRepository,
+    tunnel: TunnelController,
+    private val subscriptions: SubscriptionRepository,
+) : ViewModel() {
     val settings: StateFlow<AppSettings> = settings.settings
     private val messages = Channel<String>(Channel.BUFFERED)
     val importMessages = messages.receiveAsFlow()
@@ -56,6 +62,7 @@ class MainViewModel @Inject constructor(settings: SettingsRepository, private va
         }
     }
     init {
+        viewModelScope.launch { runCatching { subscriptions.refreshStale() } }
         viewModelScope.launch {
             settings.settings.filter { it.connectOnStart }.first()
             val list = profiles.profiles.first { it.isNotEmpty() }

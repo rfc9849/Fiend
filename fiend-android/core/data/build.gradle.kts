@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.fiend.android.library)
     alias(libs.plugins.fiend.hilt)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -20,6 +21,7 @@ dependencies {
     implementation(project(":core:engine"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.tink.android)

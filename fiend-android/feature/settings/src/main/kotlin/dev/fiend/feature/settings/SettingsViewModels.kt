@@ -10,10 +10,12 @@ import dev.fiend.core.data.AppsRepository
 import dev.fiend.core.data.LogRepository
 import dev.fiend.core.data.RulesRepository
 import dev.fiend.core.data.SettingsRepository
+import dev.fiend.core.data.SubscriptionRepository
 import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.InstalledApp
 import dev.fiend.core.model.LogLine
 import dev.fiend.core.model.RuleCounts
+import dev.fiend.core.model.RuleKind
 import dev.fiend.core.model.SplitTunnelMode
 import dev.fiend.core.model.ThemeMode
 import javax.inject.Inject
@@ -94,36 +96,62 @@ class LogsViewModel @Inject constructor(
     fun clear() = repository.clear()
 }
 
+data class SubscriptionUi(
+    val id: String,
+    val url: String,
+    val kind: RuleKind,
+    val entries: Int,
+    val updatedAtMs: Long,
+    val error: String?,
+)
+
 data class RoutingUiState(
     val loaded: Boolean = false,
     val directRules: Int = 0,
     val blockRules: Int = 0,
+    val proxyRules: Int = 0,
+    val subscriptions: List<SubscriptionUi> = emptyList(),
     val directResolver: String = "",
     val mtu: Int = AppSettings.DEFAULT_MTU,
     val directMode: Boolean = false,
+    val busy: Boolean = false,
+    val message: String? = null,
 )
 
-enum class RoutingInputError { Resolver, Mtu }
+enum class RoutingInputError { Resolver, Mtu, Link }
 
 @HiltViewModel
 class RoutingViewModel @Inject constructor(
     private val settings: SettingsRepository,
     private val rules: RulesRepository,
+    private val subscriptions: SubscriptionRepository,
 ) : ViewModel() {
     private val loaded = MutableStateFlow(false)
+    private val busy = MutableStateFlow(false)
+    private val message = MutableStateFlow<String?>(null)
 
     init {
-        viewModelScope.launch { settings.awaitReady(); loaded.value = true }
+        viewModelScope.launch {
+            settings.awaitReady()
+            loaded.value = true
+        }
+        viewModelScope.launch { runCatching { subscriptions.refreshStale() } }
     }
 
-    val uiState: StateFlow<RoutingUiState> = combine(settings.settings, loaded) { s, ready ->
+    val uiState: StateFlow<RoutingUiState> = combine(settings.settings, loaded, busy, message) { s, ready, working, notice ->
         RoutingUiState(
             loaded = ready,
             directRules = countOf(s.directRules, true),
             blockRules = countOf(s.blockRules, false),
+            proxyRules = countOf(s.proxyRules, true),
+            subscriptions = s.subscriptions.map {
+                SubscriptionUi(it.id, it.url, it.kind, it.entries, it.updatedAtMs, it.error)
+            },
             directResolver = s.directResolver,
             mtu = s.mtu,
             directMode = s.directMode,
+            busy = working,
+            message = notice,
         )
     }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), RoutingUiState())
 
@@ -146,6 +174,43 @@ class RoutingViewModel @Inject constructor(
         viewModelScope.launch { settings.update { it.copy(mtu = mtu) } }
         return null
     }
+
+    fun addSubscription(url: String, kind: RuleKind): RoutingInputError? {
+        val link = url.trim()
+        if (link.length !in 1..2048 || !(link.startsWith("https://") || link.startsWith("http://"))) {
+            return RoutingInputError.Link
+        }
+        work {
+            subscriptions.add(link, kind).onFailure { message.value = it.message ?: "Cannot add the subscription" }
+        }
+        return null
+    }
+
+    fun refreshSubscription(id: String) = work {
+        subscriptions.refresh(id).onFailure { message.value = it.message ?: "Cannot update the list" }
+    }
+
+    fun refreshAll() = work {
+        subscriptions.refreshAll().onFailure { message.value = it.message ?: "Cannot update the lists" }
+    }
+
+    fun removeSubscription(id: String) = work { subscriptions.remove(id) }
+
+    fun consumeMessage() {
+        message.value = null
+    }
+
+    private fun work(block: suspend () -> Unit) {
+        viewModelScope.launch {
+            if (busy.value) return@launch
+            busy.value = true
+            try {
+                block()
+            } finally {
+                busy.value = false
+            }
+        }
+    }
 }
 
 data class RuleEditorUiState(
@@ -160,13 +225,13 @@ data class RuleEditorUiState(
 
 @HiltViewModel(assistedFactory = RuleEditorViewModel.Factory::class)
 class RuleEditorViewModel @AssistedInject constructor(
-    @Assisted private val block: Boolean,
+    @Assisted private val kind: RuleKind,
     private val settings: SettingsRepository,
     private val rules: RulesRepository,
 ) : ViewModel() {
     @AssistedFactory
     interface Factory {
-        fun create(block: Boolean): RuleEditorViewModel
+        fun create(kind: RuleKind): RuleEditorViewModel
     }
 
     private val mutableState = MutableStateFlow(RuleEditorUiState())
@@ -174,12 +239,25 @@ class RuleEditorViewModel @AssistedInject constructor(
     private val closed = Channel<Unit>(Channel.BUFFERED)
     val closeEvents = closed.receiveAsFlow()
 
+    private val allowIp get() = kind != RuleKind.Block
+
+    private fun saved(settings: AppSettings): String = when (kind) {
+        RuleKind.Direct -> settings.directRules
+        RuleKind.Block -> settings.blockRules
+        RuleKind.Proxy -> settings.proxyRules
+    }
+
+    private fun store(settings: AppSettings, text: String): AppSettings = when (kind) {
+        RuleKind.Direct -> settings.copy(directRules = text)
+        RuleKind.Block -> settings.copy(blockRules = text)
+        RuleKind.Proxy -> settings.copy(proxyRules = text)
+    }
+
     init {
         viewModelScope.launch {
             settings.awaitReady()
-            val saved = settings.settings.value
-            val text = if (block) saved.blockRules else saved.directRules
-            val counts = withContext(Dispatchers.Default) { rules.validate(text, !block).getOrDefault(RuleCounts()) }
+            val text = saved(settings.settings.value)
+            val counts = withContext(Dispatchers.Default) { rules.validate(text, allowIp).getOrDefault(RuleCounts()) }
             mutableState.update { it.copy(loaded = true, text = text, counts = counts) }
         }
     }
@@ -195,9 +273,9 @@ class RuleEditorViewModel @AssistedInject constructor(
         if (state.saving) return
         mutableState.update { it.copy(saving = true) }
         viewModelScope.launch {
-            val checked = withContext(Dispatchers.Default) { rules.validate(state.text, !block) }
+            val checked = withContext(Dispatchers.Default) { rules.validate(state.text, allowIp) }
             checked.onSuccess { counts ->
-                settings.update { if (block) it.copy(blockRules = state.text) else it.copy(directRules = state.text) }
+                settings.update { store(it, state.text) }
                 mutableState.update { it.copy(saving = false, counts = counts, dirty = false) }
                 closed.send(Unit)
             }.onFailure { error ->
@@ -214,7 +292,7 @@ class RuleEditorViewModel @AssistedInject constructor(
             }
             val existing = mutableState.value.text
             val joined = if (existing.isBlank()) text else existing.trimEnd() + "\n" + text
-            val checked = withContext(Dispatchers.Default) { rules.validate(joined, !block) }
+            val checked = withContext(Dispatchers.Default) { rules.validate(joined, allowIp) }
             checked.onSuccess { counts ->
                 mutableState.update { it.copy(text = joined, counts = counts, dirty = true, error = null, imported = true) }
             }.onFailure { error ->

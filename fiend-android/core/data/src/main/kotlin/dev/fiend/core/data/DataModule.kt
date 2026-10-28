@@ -36,6 +36,9 @@ internal interface DataModule {
     fun rules(impl: RealRulesRepository): RulesRepository
 
     @Binds
+    fun subscriptions(impl: RealSubscriptionRepository): SubscriptionRepository
+
+    @Binds
     fun apps(impl: RealAppsRepository): AppsRepository
 
     @Binds

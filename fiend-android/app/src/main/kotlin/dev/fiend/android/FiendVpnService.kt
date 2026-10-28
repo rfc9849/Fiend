@@ -21,12 +21,14 @@ import androidx.core.app.NotificationCompat
 import dagger.hilt.android.AndroidEntryPoint
 import dev.fiend.core.data.ProfileRepository
 import dev.fiend.core.data.SettingsRepository
+import dev.fiend.core.data.SubscriptionRepository
 import dev.fiend.core.designsystem.R as DesignR
 import dev.fiend.core.engine.EngineServiceContract
 import dev.fiend.core.engine.EngineState
 import dev.fiend.core.engine.engineConfig
 import dev.fiend.core.engine.bindings.LogLine as NativeLog
 import dev.fiend.core.engine.bindings.Platform
+import dev.fiend.core.engine.bindings.RuleFile
 import dev.fiend.core.engine.bindings.TunOptions
 import dev.fiend.core.engine.bindings.Tunnel
 import dev.fiend.core.engine.bindings.TunnelState as NativeState
@@ -49,6 +51,7 @@ import kotlinx.coroutines.withContext
 class FiendVpnService : VpnService() {
     @Inject lateinit var profiles: ProfileRepository
     @Inject lateinit var settings: SettingsRepository
+    @Inject lateinit var subscriptions: SubscriptionRepository
     @Inject lateinit var engine: EngineState
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val nativeLock = Any()
@@ -148,6 +151,17 @@ class FiendVpnService : VpnService() {
                 directAll = appSettings.directMode,
                 directRules = appSettings.directRules,
                 blockRules = appSettings.blockRules,
+                proxyRules = appSettings.proxyRules,
+                ruleFiles = subscriptions.ruleFiles().map { spec ->
+                    RuleFile(
+                        path = spec.path,
+                        kind = when (spec.kind) {
+                            dev.fiend.core.model.RuleKind.Direct -> dev.fiend.core.engine.bindings.RuleKind.DIRECT
+                            dev.fiend.core.model.RuleKind.Block -> dev.fiend.core.engine.bindings.RuleKind.BLOCK
+                            dev.fiend.core.model.RuleKind.Proxy -> dev.fiend.core.engine.bindings.RuleKind.PROXY
+                        },
+                    )
+                },
                 directResolver = appSettings.directResolver,
                 handshakeTimeoutMs = profile.tuning.handshakeTimeoutMs.toULong(),
                 maxConnections = profile.tuning.maxConnections.toUInt(),

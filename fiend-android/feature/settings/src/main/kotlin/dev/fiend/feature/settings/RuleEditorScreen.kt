@@ -34,10 +34,11 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import dev.fiend.core.designsystem.icon.FiendIcons
+import dev.fiend.core.model.RuleKind
 
 @Composable
 internal fun RuleEditorScreen(
-    block: Boolean,
+    kind: RuleKind,
     state: RuleEditorUiState,
     onText: (String) -> Unit,
     onImport: (String) -> Unit,
@@ -63,7 +64,7 @@ internal fun RuleEditorScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(if (block) R.string.routing_block_rules else R.string.routing_direct_rules)) },
+                title = { Text(stringResource(kind.title())) },
                 navigationIcon = {
                     IconButton(onClick = requestClose) {
                         Icon(FiendIcons.Close, contentDescription = stringResource(R.string.rules_close))
@@ -94,7 +95,7 @@ internal fun RuleEditorScreen(
             OutlinedTextField(
                 value = state.text,
                 onValueChange = onText,
-                placeholder = { Text(stringResource(if (block) R.string.rules_example_block else R.string.rules_example_direct)) },
+                placeholder = { Text(stringResource(kind.example())) },
                 supportingText = {
                     Text(
                         state.error
@@ -110,7 +111,7 @@ internal fun RuleEditorScreen(
                     .weight(1f),
             )
             Text(
-                text = stringResource(if (block) R.string.rules_syntax_block else R.string.rules_syntax_direct),
+                text = stringResource(kind.syntax()),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
@@ -134,4 +135,22 @@ internal fun RuleEditorScreen(
             },
         )
     }
+}
+
+private fun RuleKind.title() = when (this) {
+    RuleKind.Direct -> R.string.routing_direct_rules
+    RuleKind.Block -> R.string.routing_block_rules
+    RuleKind.Proxy -> R.string.routing_proxy_rules
+}
+
+private fun RuleKind.example() = when (this) {
+    RuleKind.Direct -> R.string.rules_example_direct
+    RuleKind.Block -> R.string.rules_example_block
+    RuleKind.Proxy -> R.string.rules_example_proxy
+}
+
+private fun RuleKind.syntax() = when (this) {
+    RuleKind.Direct -> R.string.rules_syntax_direct
+    RuleKind.Block -> R.string.rules_syntax_block
+    RuleKind.Proxy -> R.string.rules_syntax_proxy
 }

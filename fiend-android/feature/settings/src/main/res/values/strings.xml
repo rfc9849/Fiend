@@ -40,19 +40,23 @@
     <string name="settings_cancel">Cancel</string>
 
     <string name="settings_rules">Routing rules</string>
-    <string name="settings_rules_body">Direct sites, blocked domains, resolver and MTU</string>
+    <string name="settings_rules_body">Rule lists, subscriptions, resolver and MTU</string>
 
     <string name="routing_title">Routing rules</string>
     <string name="routing_group_rules">Rules</string>
     <string name="routing_group_network">Network</string>
     <string name="routing_direct_rules">Direct list</string>
     <string name="routing_block_rules">Blocked domains</string>
+    <string name="routing_proxy_rules">Always through proxy</string>
+    <string name="routing_kind_direct">Direct</string>
+    <string name="routing_kind_block">Block</string>
+    <string name="routing_kind_proxy">Proxy</string>
     <string name="routing_rules_none">No rules</string>
     <plurals name="routing_rules">
         <item quantity="one">%1$d rule</item>
         <item quantity="other">%1$d rules</item>
     </plurals>
-    <string name="routing_privacy">Direct sites skip the tunnel and see your own network address. Blocked domains do not resolve.</string>
+    <string name="routing_privacy">Blocked domains do not resolve. The proxy list is checked before the direct list, so a domain in both lists uses the tunnel. Direct sites skip the tunnel and see your own network address.</string>
     <string name="routing_resolver">Direct DNS server</string>
     <string name="routing_resolver_default">Default (1.1.1.1)</string>
     <string name="routing_resolver_body">IP address with an optional port. Leave empty for the default.</string>
@@ -62,6 +66,20 @@
     <string name="routing_error_mtu">Enter a number from %1$d to %2$d</string>
     <string name="routing_direct_mode">Direct mode</string>
     <string name="routing_direct_mode_body">Send all traffic outside the tunnel. For tests only.</string>
+    <string name="routing_group_subscriptions">List subscriptions</string>
+    <string name="routing_subscription_summary">%1$s · %2$s · updated %3$s</string>
+    <string name="routing_subscription_failed">Update failed: %1$s</string>
+    <string name="routing_subscription_never">not updated</string>
+    <string name="routing_subscription_add">Add subscription</string>
+    <string name="routing_subscription_add_body">Download a sing-box rule set and update it every 24 hours</string>
+    <string name="routing_subscription_add_action">Add</string>
+    <string name="routing_subscription_refresh">Update now</string>
+    <string name="routing_subscription_refresh_all">Update all lists</string>
+    <string name="routing_subscription_remove">Remove</string>
+    <string name="routing_subscription_url">List URL</string>
+    <string name="routing_subscription_url_body">A .srs or text list with an HTTP or HTTPS link</string>
+    <string name="routing_subscription_kind">List type</string>
+    <string name="routing_error_link">Enter an HTTP or HTTPS link</string>
     <string name="routing_save">Save</string>
     <string name="routing_restart">Reconnect to apply changes.</string>
 
@@ -73,6 +91,8 @@
     <string name="rules_example_block">domain:ads.example.com\nfull:tracker.example.org\nkeyword:adserver</string>
     <string name="rules_syntax_direct">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. ip: matches an address range. # starts a comment.</string>
     <string name="rules_syntax_block">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. # starts a comment.</string>
+    <string name="rules_example_proxy">domain:example.com\nfull:www.example.org\nkeyword:example\nip:203.0.113.0/24</string>
+    <string name="rules_syntax_proxy">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. ip: matches an address range. A proxy rule wins over a direct rule. # starts a comment.</string>
     <string name="rules_discard_title">Discard changes?</string>
     <string name="rules_discard_body">Your changes to this list will be lost.</string>
     <string name="rules_discard">Discard</string>

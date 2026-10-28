@@ -2,8 +2,12 @@ package dev.fiend.feature.settings
 
 import dev.fiend.core.data.RulesRepository
 import dev.fiend.core.data.SettingsRepository
+import dev.fiend.core.data.SubscriptionRepository
 import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.RuleCounts
+import dev.fiend.core.model.RuleFileSpec
+import dev.fiend.core.model.RuleKind
+import dev.fiend.core.model.RuleSubscription
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -36,9 +40,28 @@ class RoutingViewModelTest {
             if (!allowIp && lines.any { it.startsWith("ip:") }) return Result.failure(IllegalArgumentException("ip entries are not allowed"))
             return Result.success(RuleCounts(domains = lines.count { !it.startsWith("ip:") }, cidrs = lines.count { it.startsWith("ip:") }))
         }
+        override fun inspectFile(path: String, kind: RuleKind): Result<RuleCounts> =
+            if (path.startsWith("bad")) Result.failure(IllegalArgumentException("Cannot read the list")) else Result.success(RuleCounts(domains = 3))
         override fun validateResolver(value: String) =
             if (value.isBlank() || value.trim().first().isDigit()) Result.success(Unit) else Result.failure(IllegalArgumentException("resolver"))
         override suspend fun read(uri: String) = imported
+    }
+
+    private class FakeSubscriptions(private val settings: SettingsRepository? = null) : SubscriptionRepository {
+        var stale = 0
+        val added = mutableListOf<RuleSubscription>()
+        var failWith: Throwable? = null
+        override suspend fun refreshStale() { stale += 1 }
+        override suspend fun refresh(id: String): Result<Unit> = failWith?.let { Result.failure(it) } ?: Result.success(Unit)
+        override suspend fun refreshAll(): Result<Unit> = failWith?.let { Result.failure(it) } ?: Result.success(Unit)
+        override suspend fun add(url: String, kind: RuleKind): Result<RuleSubscription> {
+            val subscription = RuleSubscription("id-${added.size}", url, kind, updatedAtMs = 1, entries = 3)
+            added += subscription
+            settings?.update { it.copy(subscriptions = it.subscriptions + subscription) }
+            return Result.success(subscription)
+        }
+        override suspend fun remove(id: String) { added.removeAll { it.id == id } }
+        override suspend fun ruleFiles(): List<RuleFileSpec> = emptyList()
     }
 
     private suspend fun routing(model: RoutingViewModel, predicate: (RoutingUiState) -> Boolean = { it.loaded }) =
@@ -49,7 +72,7 @@ class RoutingViewModelTest {
     @Test
     fun routingScreenShowsSavedCountsAndValues() = runBlocking {
         val settings = FakeSettings(AppSettings(directRules = "a.example\nip:1.0.0.0/8", blockRules = "ads.example", mtu = 1400, directResolver = "9.9.9.9", directMode = true))
-        val state = routing(RoutingViewModel(settings, FakeRules())) { it.loaded && it.directRules == 2 }
+        val state = routing(RoutingViewModel(settings, FakeRules(), FakeSubscriptions())) { it.loaded && it.directRules == 2 }
         assertEquals(2, state.directRules)
         assertEquals(1, state.blockRules)
         assertEquals(1400, state.mtu)
@@ -60,7 +83,7 @@ class RoutingViewModelTest {
     @Test
     fun resolverAndMtuAreValidatedBeforeTheyAreSaved() = runBlocking {
         val settings = FakeSettings()
-        val model = RoutingViewModel(settings, FakeRules())
+        val model = RoutingViewModel(settings, FakeRules(), FakeSubscriptions())
         routing(model)
         assertEquals(RoutingInputError.Resolver, model.setResolver("dns.example"))
         assertEquals(RoutingInputError.Mtu, model.setMtu("1279"))
@@ -79,7 +102,7 @@ class RoutingViewModelTest {
     @Test
     fun editorSavesValidListsAndKeepsBadOnes() = runBlocking {
         val settings = FakeSettings(AppSettings(directRules = "a.example"))
-        val model = RuleEditorViewModel(false, settings, FakeRules())
+        val model = RuleEditorViewModel(RuleKind.Direct, settings, FakeRules())
         assertEquals("a.example", editor(model).text)
         model.onText("bad:x")
         assertTrue(model.uiState.value.dirty)
@@ -98,7 +121,7 @@ class RoutingViewModelTest {
     @Test
     fun blockEditorRejectsAddressRules() = runBlocking {
         val settings = FakeSettings()
-        val model = RuleEditorViewModel(true, settings, FakeRules())
+        val model = RuleEditorViewModel(RuleKind.Block, settings, FakeRules())
         editor(model)
         model.onText("ip:1.0.0.0/8")
         model.save()
@@ -107,9 +130,33 @@ class RoutingViewModelTest {
     }
 
     @Test
+    fun subscriptionsRefreshOnStartAndRejectBadLinks() = runBlocking {
+        val settings = FakeSettings()
+        val subscriptions = FakeSubscriptions(settings)
+        val model = RoutingViewModel(settings, FakeRules(), subscriptions)
+        routing(model)
+        assertEquals(1, subscriptions.stale)
+        assertEquals(RoutingInputError.Link, model.addSubscription("", RuleKind.Direct))
+        assertEquals(RoutingInputError.Link, model.addSubscription("ftp://example.com/list.srs", RuleKind.Proxy))
+        assertTrue(subscriptions.added.isEmpty())
+        assertNull(model.addSubscription(" https://example.com/list.srs ", RuleKind.Proxy))
+        withTimeout(5_000) { model.uiState.first { it.subscriptions.isNotEmpty() } }
+        assertEquals("https://example.com/list.srs", subscriptions.added.single().url)
+        assertEquals(RuleKind.Proxy, subscriptions.added.single().kind)
+        assertEquals(3, model.uiState.value.subscriptions.single().entries)
+        subscriptions.failWith = IllegalArgumentException("HTTP 404")
+        model.refreshSubscription("id-0")
+        val notice = withTimeout(5_000) { model.uiState.first { it.message != null } }
+        assertEquals("HTTP 404", notice.message)
+        model.consumeMessage()
+        withTimeout(5_000) { model.uiState.first { it.message == null && !it.busy } }
+        Unit
+    }
+
+    @Test
     fun importAppendsValidatedTextAndReportsFailures() = runBlocking {
         val rules = FakeRules(Result.success("b.example\nc.example"))
-        val model = RuleEditorViewModel(false, FakeSettings(AppSettings(directRules = "a.example")), rules)
+        val model = RuleEditorViewModel(RuleKind.Direct, FakeSettings(AppSettings(directRules = "a.example")), rules)
         editor(model)
         model.import("content://list")
         val state = withTimeout(5_000) { model.uiState.first { it.imported } }

@@ -12,6 +12,7 @@ import dev.fiend.core.model.ThemeMode
 import dev.fiend.core.model.SplitTunnelMode
 import dev.fiend.core.model.LogLevel
 import dev.fiend.core.model.LogLine
+import dev.fiend.core.model.RuleSubscription
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CompletableDeferred
@@ -19,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
 
 @Singleton
 internal class RealSettingsRepository @Inject constructor(
@@ -56,6 +58,8 @@ internal class RealSettingsRepository @Inject constructor(
             values[SPLIT_APPS] = next.splitTunnelApps
             values[DIRECT_RULES] = next.directRules
             values[BLOCK_RULES] = next.blockRules
+            values[PROXY_RULES] = next.proxyRules
+            values[SUBSCRIPTIONS] = encodeSubscriptions(next.subscriptions)
             values[DIRECT_RESOLVER] = next.directResolver
             values[DIRECT_MODE] = next.directMode
             values[MTU] = next.mtu.coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU)
@@ -73,12 +77,24 @@ internal class RealSettingsRepository @Inject constructor(
         splitTunnelApps = values[SPLIT_APPS] ?: emptySet(),
         directRules = values[DIRECT_RULES] ?: "",
         blockRules = values[BLOCK_RULES] ?: "",
+        proxyRules = values[PROXY_RULES] ?: "",
+        subscriptions = decodeSubscriptions(values[SUBSCRIPTIONS]),
         directResolver = values[DIRECT_RESOLVER] ?: "",
         directMode = values[DIRECT_MODE] ?: false,
         mtu = (values[MTU] ?: AppSettings.DEFAULT_MTU).coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU),
     )
 
+    private fun encodeSubscriptions(subscriptions: List<RuleSubscription>): String =
+        runCatching { json.encodeToString(subscriptions) }.getOrDefault("")
+
+    private fun decodeSubscriptions(value: String?): List<RuleSubscription> {
+        if (value.isNullOrBlank()) return emptyList()
+        return runCatching { json.decodeFromString<List<RuleSubscription>>(value) }.getOrDefault(emptyList())
+    }
+
     private companion object {
+        val json = Json { ignoreUnknownKeys = true }
+
         val THEME = stringPreferencesKey("theme_mode")
         val DYNAMIC = booleanPreferencesKey("dynamic_color")
         val CONNECT = booleanPreferencesKey("connect_on_start")
@@ -89,6 +105,8 @@ internal class RealSettingsRepository @Inject constructor(
         val SPLIT_APPS = stringSetPreferencesKey("split_apps")
         val DIRECT_RULES = stringPreferencesKey("direct_rules")
         val BLOCK_RULES = stringPreferencesKey("block_rules")
+        val PROXY_RULES = stringPreferencesKey("proxy_rules")
+        val SUBSCRIPTIONS = stringPreferencesKey("subscriptions")
         val DIRECT_RESOLVER = stringPreferencesKey("direct_resolver")
         val DIRECT_MODE = booleanPreferencesKey("direct_mode")
         val MTU = intPreferencesKey("mtu")

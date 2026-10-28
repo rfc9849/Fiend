@@ -1,8 +1,25 @@
 package dev.fiend.core.model
 
+import kotlinx.serialization.Serializable
+
 enum class ThemeMode { System, Light, Dark }
 
 enum class SplitTunnelMode { AllApps, OnlySelected, ExceptSelected }
+
+@Serializable
+enum class RuleKind { Direct, Block, Proxy }
+
+@Serializable
+data class RuleSubscription(
+    val id: String,
+    val url: String,
+    val kind: RuleKind,
+    val updatedAtMs: Long = 0,
+    val entries: Int = 0,
+    val error: String? = null,
+)
+
+data class RuleFileSpec(val path: String, val kind: RuleKind)
 
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.System,
@@ -15,6 +32,8 @@ data class AppSettings(
     val splitTunnelApps: Set<String> = emptySet(),
     val directRules: String = "",
     val blockRules: String = "",
+    val proxyRules: String = "",
+    val subscriptions: List<RuleSubscription> = emptyList(),
     val directResolver: String = "",
     val directMode: Boolean = false,
     val mtu: Int = DEFAULT_MTU,

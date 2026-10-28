@@ -7,6 +7,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.EntryProviderScope
 import androidx.navigation3.runtime.NavKey
+import dev.fiend.core.model.RuleKind
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -19,7 +20,7 @@ data object SplitTunnelKey : NavKey
 data object RoutingKey : NavKey
 
 @Serializable
-data class RuleEditorKey(val block: Boolean) : NavKey
+data class RuleEditorKey(val kind: RuleKind) : NavKey
 
 @Serializable
 data object LogsKey : NavKey
@@ -27,7 +28,7 @@ data object LogsKey : NavKey
 fun EntryProviderScope<NavKey>.settingsEntries(
     onOpenSplitTunnel: () -> Unit,
     onOpenRouting: () -> Unit,
-    onOpenRuleEditor: (Boolean) -> Unit,
+    onOpenRuleEditor: (RuleKind) -> Unit,
     onOpenLogs: () -> Unit,
     onBack: () -> Unit,
     versionName: String,
@@ -84,30 +85,36 @@ private fun SplitTunnelRoute(onBack: () -> Unit, viewModel: SplitTunnelViewModel
 @Composable
 private fun RoutingRoute(
     onBack: () -> Unit,
-    onOpenRuleEditor: (Boolean) -> Unit,
+    onOpenRuleEditor: (RuleKind) -> Unit,
     viewModel: RoutingViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     RoutingScreen(
         state = state,
         onBack = onBack,
-        onOpenDirect = { onOpenRuleEditor(false) },
-        onOpenBlock = { onOpenRuleEditor(true) },
+        onOpenDirect = { onOpenRuleEditor(RuleKind.Direct) },
+        onOpenBlock = { onOpenRuleEditor(RuleKind.Block) },
+        onOpenProxy = { onOpenRuleEditor(RuleKind.Proxy) },
         onDirectMode = viewModel::setDirectMode,
         onResolver = viewModel::setResolver,
         onMtu = viewModel::setMtu,
+        onAddSubscription = viewModel::addSubscription,
+        onRefreshSubscription = viewModel::refreshSubscription,
+        onRemoveSubscription = viewModel::removeSubscription,
+        onRefreshAll = viewModel::refreshAll,
+        onMessageShown = viewModel::consumeMessage,
     )
 }
 
 @Composable
 private fun RuleEditorEntry(key: RuleEditorKey, onBack: () -> Unit) {
     val viewModel = hiltViewModel<RuleEditorViewModel, RuleEditorViewModel.Factory>(
-        creationCallback = { it.create(key.block) },
+        creationCallback = { it.create(key.kind) },
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     LaunchedEffect(viewModel) { viewModel.closeEvents.collect { onBack() } }
     RuleEditorScreen(
-        block = key.block,
+        kind = key.kind,
         state = state,
         onText = viewModel::onText,
         onImport = viewModel::import,

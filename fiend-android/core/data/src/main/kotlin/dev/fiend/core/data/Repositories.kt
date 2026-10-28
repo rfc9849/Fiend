@@ -5,6 +5,9 @@ import dev.fiend.core.model.FingerprintTemplate
 import dev.fiend.core.model.InstalledApp
 import dev.fiend.core.model.LogLine
 import dev.fiend.core.model.RuleCounts
+import dev.fiend.core.model.RuleFileSpec
+import dev.fiend.core.model.RuleKind
+import dev.fiend.core.model.RuleSubscription
 import dev.fiend.core.model.Profile
 import dev.fiend.core.model.TunnelState
 import dev.fiend.core.model.TunnelStats
@@ -62,12 +65,33 @@ interface SettingsRepository {
 interface RulesRepository {
     fun validate(text: String, allowIp: Boolean): Result<RuleCounts>
 
+    fun inspectFile(path: String, kind: RuleKind): Result<RuleCounts>
+
     fun validateResolver(value: String): Result<Unit>
 
     suspend fun read(uri: String): Result<String>
 
     companion object {
         const val MAX_IMPORT_BYTES = 1 shl 20
+    }
+}
+
+interface SubscriptionRepository {
+    suspend fun refreshStale()
+
+    suspend fun refresh(id: String): Result<Unit>
+
+    suspend fun refreshAll(): Result<Unit>
+
+    suspend fun add(url: String, kind: RuleKind): Result<RuleSubscription>
+
+    suspend fun remove(id: String)
+
+    suspend fun ruleFiles(): List<RuleFileSpec>
+
+    companion object {
+        const val MAX_DOWNLOAD_BYTES = 32 shl 20
+        const val REFRESH_INTERVAL_MS = 24L * 60 * 60 * 1000
     }
 }
 

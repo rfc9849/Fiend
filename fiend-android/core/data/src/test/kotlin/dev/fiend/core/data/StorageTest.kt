@@ -13,6 +13,9 @@ import dev.fiend.core.data.storage.SecretCipher
 import dev.fiend.core.engine.bindings.bundledTemplates
 import dev.fiend.core.model.Profile
 import dev.fiend.core.model.RuleCounts
+import dev.fiend.core.model.RuleFileSpec
+import dev.fiend.core.model.RuleKind
+import dev.fiend.core.model.RuleSubscription
 import dev.fiend.core.model.ThemeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,9 +24,13 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import com.sun.net.httpserver.HttpServer
+import java.io.File
+import java.net.InetSocketAddress
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -88,10 +95,12 @@ class StorageTest {
             val store = PreferencesStore(context, scope)
             val repository = RealSettingsRepository(store, RealLogRepository(), scope)
             repository.awaitReady()
-            repository.update { it.copy(themeMode = ThemeMode.Dark, dynamicColor = false, connectOnStart = true, ipv6 = false, splitTunnelApps = setOf("dev.fiend.test"), directRules = "domain:ru\nip:1.2.3.0/24", blockRules = "domain:ads.example", directResolver = "1.1.1.1", directMode = true, mtu = 9999) }
+            repository.update { it.copy(themeMode = ThemeMode.Dark, dynamicColor = false, connectOnStart = true, ipv6 = false, splitTunnelApps = setOf("dev.fiend.test"), directRules = "domain:ru\nip:1.2.3.0/24", blockRules = "domain:ads.example", proxyRules = "domain:blocked.ru", subscriptions = listOf(RuleSubscription("one", "https://example.com/list.srs", RuleKind.Proxy, updatedAtMs = 5, entries = 7)), directResolver = "1.1.1.1", directMode = true, mtu = 9999) }
             val settings = withTimeout(5_000) { repository.settings.first { it.themeMode == ThemeMode.Dark } }
             assertEquals("domain:ru\nip:1.2.3.0/24", settings.directRules)
             assertEquals("domain:ads.example", settings.blockRules)
+            assertEquals("domain:blocked.ru", settings.proxyRules)
+            assertEquals(listOf(RuleSubscription("one", "https://example.com/list.srs", RuleKind.Proxy, updatedAtMs = 5, entries = 7)), settings.subscriptions)
             assertEquals("1.1.1.1", settings.directResolver)
             assertTrue(settings.directMode)
             assertEquals(9000, settings.mtu)
@@ -100,6 +109,49 @@ class StorageTest {
             assertFalse(settings.ipv6)
             assertEquals(setOf("dev.fiend.test"), settings.splitTunnelApps)
         } finally { scope.cancel() }
+    }
+
+    @Test
+    fun subscriptionsRejectBadLinksAndHaveNoFilesBeforeTheFirstDownload() = runBlocking {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val settings = RealSettingsRepository(PreferencesStore(context, scope), RealLogRepository(), scope)
+            settings.awaitReady()
+            val repository = RealSubscriptionRepository(context, settings, RealRulesRepository(context))
+            assertTrue(repository.add("ftp://example.com/list.srs", RuleKind.Direct).isFailure)
+            assertTrue(repository.add("", RuleKind.Direct).isFailure)
+            assertTrue(settings.settings.value.subscriptions.isEmpty())
+            assertTrue(repository.ruleFiles().isEmpty())
+        } finally { scope.cancel() }
+    }
+
+    @Test
+    fun subscriptionsDownloadValidateAndReplaceAFile() = runBlocking {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/list.txt") { exchange ->
+            val body = "domain:example.ru\n".toByteArray()
+            exchange.sendResponseHeaders(200, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val settings = RealSettingsRepository(PreferencesStore(context, scope), RealLogRepository(), scope)
+            settings.awaitReady()
+            val repository = RealSubscriptionRepository(context, settings, RealRulesRepository(context))
+            val subscription = repository.add("http://127.0.0.1:${server.address.port}/list.txt", RuleKind.Direct).getOrThrow()
+            assertNull(subscription.error)
+            assertEquals(1, subscription.entries)
+            val file = File(context.filesDir, "rules/${subscription.id}.bin")
+            assertTrue(file.isFile)
+            assertEquals("domain:example.ru\n", file.readText())
+            assertEquals(listOf(RuleFileSpec(file.absolutePath, RuleKind.Direct)), repository.ruleFiles())
+            repository.remove(subscription.id)
+            assertFalse(file.exists())
+            assertTrue(settings.settings.value.subscriptions.isEmpty())
+        } finally { server.stop(0); scope.cancel() }
     }
 
     @Test
