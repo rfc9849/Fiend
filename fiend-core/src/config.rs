@@ -55,7 +55,6 @@ pub fn load_client(path: impl AsRef<Path>) -> Result<ClientSettings, ConfigError
     )?;
     let server = required(file.server, "client server")?;
     let server = server.trim().to_owned();
-    Address::from_authority(&server).map_err(|error| invalid(format!("client server: {error}")))?;
 
     let secret = load_secret(base, file.secret, file.secret_file)?;
     let template_path = required(file.template, "client template")?;
@@ -77,21 +76,11 @@ pub fn load_client(path: impl AsRef<Path>) -> Result<ClientSettings, ConfigError
         Duration::from_secs(20),
         "client udp keepalive_ms",
     )?;
-    if udp_keepalive >= udp_idle {
-        return Err(invalid("client udp keepalive_ms must be less than idle_ms"));
-    }
     let max_udp_flows = file.udp.max_flows.unwrap_or(64);
-    if max_udp_flows == 0 {
-        return Err(invalid("client udp max_flows must be greater than zero"));
-    }
     let max_connections = file.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
-    if max_connections == 0 {
-        return Err(invalid("client max_connections must be greater than zero"));
-    }
 
     let mut mux = mux::Config::default();
     file.mux.apply(&mut mux);
-    validate_mux(&mux, "client")?;
 
     let mut config = ClientConfig::new(server, secret, template);
     config.mux = mux;
@@ -102,7 +91,10 @@ pub fn load_client(path: impl AsRef<Path>) -> Result<ClientSettings, ConfigError
     config.max_connections = max_connections;
     config.tcp_notsent_lowat = socket_size(file.tcp_notsent_lowat, "client", "tcp_notsent_lowat")?;
 
-    Ok(ClientSettings { listen, config })
+    Ok(ClientSettings {
+        listen,
+        config: build_client(config)?,
+    })
 }
 
 pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError> {
@@ -118,25 +110,13 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
 
     let origin_host = required(file.origin_host, "server origin_host")?;
     let origin_host = origin_host.trim().to_owned();
-    if origin_host.is_empty() {
-        return Err(invalid("server origin_host must not be empty"));
-    }
     let origin_port = file.origin_port.unwrap_or(DEFAULT_ORIGIN_PORT);
-    if origin_port == 0 {
-        return Err(invalid("server origin_port must be greater than zero"));
-    }
 
     let replay_ttl = option_duration(
         file.replay_ttl_ms,
         AUTH_WINDOW + Duration::from_secs(300),
         "server replay_ttl_ms",
     )?;
-    if replay_ttl < AUTH_WINDOW {
-        return Err(invalid(format!(
-            "server replay_ttl_ms must be at least {} (the authentication window)",
-            AUTH_WINDOW.as_millis()
-        )));
-    }
     let udp_idle = option_duration(
         file.udp.idle_ms,
         Duration::from_secs(60),
@@ -145,12 +125,8 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
 
     let mut mux = mux::Config::default();
     file.mux.apply(&mut mux);
-    validate_mux(&mux, "server")?;
 
     let max_connections = file.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
-    if max_connections == 0 {
-        return Err(invalid("server max_connections must be greater than zero"));
-    }
 
     let mut config = ServerConfig::new(secret, origin_host, origin_port);
     config.origin = file.origin.into_profile()?;
@@ -161,7 +137,90 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     config.target = file.target.into_policy();
     config.tcp_notsent_lowat = socket_size(file.tcp_notsent_lowat, "server", "tcp_notsent_lowat")?;
 
-    Ok(ServerSettings { listen, config })
+    Ok(ServerSettings {
+        listen,
+        config: build_server(config)?,
+    })
+}
+
+pub fn build_client(mut config: ClientConfig) -> Result<ClientConfig, ConfigError> {
+    config.server = config.server.trim().to_owned();
+    Address::from_authority(&config.server)
+        .map_err(|error| invalid(format!("client server: {error}")))?;
+    validate_secret(&config.secret)?;
+    config
+        .template
+        .validate()
+        .map_err(|error| invalid(format!("client template: {error}")))?;
+    validate_mux(&config.mux, "client")?;
+    validate_duration(config.handshake_timeout, "client handshake_timeout_ms")?;
+    validate_duration(config.udp_idle, "client udp idle_ms")?;
+    validate_duration(config.udp_keepalive, "client udp keepalive_ms")?;
+    if config.udp_keepalive >= config.udp_idle {
+        return Err(invalid("client udp keepalive_ms must be less than idle_ms"));
+    }
+    if config.max_udp_flows == 0 {
+        return Err(invalid("client udp max_flows must be greater than zero"));
+    }
+    if config.max_connections == 0 {
+        return Err(invalid("client max_connections must be greater than zero"));
+    }
+    socket_size(
+        Some(config.tcp_notsent_lowat),
+        "client",
+        "tcp_notsent_lowat",
+    )?;
+    Ok(config)
+}
+
+pub fn build_server(mut config: ServerConfig) -> Result<ServerConfig, ConfigError> {
+    config.origin_host = config.origin_host.trim().to_owned();
+    validate_secret(&config.secret)?;
+    if config.origin_host.is_empty() {
+        return Err(invalid("server origin_host must not be empty"));
+    }
+    if config.origin_port == 0 {
+        return Err(invalid("server origin_port must be greater than zero"));
+    }
+    if config.replay_ttl < AUTH_WINDOW {
+        return Err(invalid(format!(
+            "server replay_ttl_ms must be at least {} (the authentication window)",
+            AUTH_WINDOW.as_millis()
+        )));
+    }
+    validate_duration(config.udp_idle, "server udp idle_ms")?;
+    validate_mux(&config.mux, "server")?;
+    if config.max_connections == 0 {
+        return Err(invalid("server max_connections must be greater than zero"));
+    }
+    if config.origin.record_sizes.contains(&0) {
+        return Err(invalid(
+            "server origin record_sizes must be greater than zero",
+        ));
+    }
+    socket_size(
+        Some(config.tcp_notsent_lowat),
+        "server",
+        "tcp_notsent_lowat",
+    )?;
+    Ok(config)
+}
+
+fn validate_secret(secret: &[u8]) -> Result<(), ConfigError> {
+    if secret.len() != SECRET_LEN {
+        return Err(invalid(format!(
+            "secret must be exactly {SECRET_LEN} bytes ({} hex characters)",
+            SECRET_LEN * 2
+        )));
+    }
+    Ok(())
+}
+
+fn validate_duration(value: Duration, field: &str) -> Result<(), ConfigError> {
+    if value.is_zero() {
+        return Err(invalid(format!("{field} must be greater than zero")));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,11 +309,6 @@ impl OriginFile {
     fn into_profile(self) -> Result<OriginProfile, ConfigError> {
         let default = OriginProfile::default();
         let record_sizes = self.record_sizes.unwrap_or(default.record_sizes);
-        if record_sizes.contains(&0) {
-            return Err(invalid(
-                "server origin record_sizes must be greater than zero",
-            ));
-        }
         Ok(OriginProfile {
             cipher_suite: self.cipher_suite.unwrap_or(default.cipher_suite),
             key_share_group: self.key_share_group.unwrap_or(default.key_share_group),
@@ -462,12 +516,7 @@ fn load_secret(
 fn decode_secret(text: &str) -> Result<Vec<u8>, ConfigError> {
     let secret =
         hex::decode(text).map_err(|error| invalid(format!("secret is not valid hex: {error}")))?;
-    if secret.len() != SECRET_LEN {
-        return Err(invalid(format!(
-            "secret must be exactly {SECRET_LEN} bytes ({} hex characters)",
-            SECRET_LEN * 2
-        )));
-    }
+    validate_secret(&secret)?;
     Ok(secret)
 }
 

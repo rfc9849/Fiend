@@ -80,6 +80,50 @@ async fn settle_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[tokio::test(start_paused = true)]
+async fn network_change_cancels_old_dial_and_keeps_waiters() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dial_calls = calls.clone();
+    let pool = Arc::new(LinkPool::new(Config::default(), move || {
+        let first = dial_calls.fetch_add(1, Ordering::SeqCst) == 0;
+        async move {
+            if first {
+                pending::<()>().await;
+            }
+            Ok(session_pair(Config::default()))
+        }
+    }));
+    let waiter_pool = pool.clone();
+    let waiter = tokio::spawn(async move {
+        waiter_pool
+            .open_lane("example.com:443", LaneKind::Tcp)
+            .await
+    });
+    settle_until(|| calls.load(Ordering::SeqCst) == 1).await;
+    pool.network_changed();
+    let mut lane = waiter.await.unwrap().unwrap();
+    lane.write_all(b"new network").await.unwrap();
+    let mut result = [0; 11];
+    lane.read_exact(&mut result).await.unwrap();
+    assert_eq!(&result, b"new network");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn network_change_discards_a_late_dial_result() {
+    let pool = pool(Config::default());
+    pool.inner.waiters.store(1, Ordering::SeqCst);
+    let generation = pool.inner.state().generation;
+    let dial = pool.inner.maintain_generation(generation).unwrap();
+    let link = dial.await.unwrap();
+    pool.inner.waiters.store(0, Ordering::SeqCst);
+    pool.network_changed();
+    pool.inner.dial_finished_generation(generation, Ok(link));
+    assert_eq!(pool.stats().links, 0);
+    assert!(!pool.stats().dialing);
+    assert_eq!(pool.stats().dial_failures, 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn selection_reserves_before_reaping_and_drop_releases() {
     let pool = pool(Config {
         surplus_idle: Duration::from_secs(5),

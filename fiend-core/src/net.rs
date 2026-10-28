@@ -3,7 +3,30 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, lookup_host};
+
+pub type ProtectSocket = std::sync::Arc<dyn Fn(&Socket) -> io::Result<()> + Send + Sync>;
+
+pub async fn dial(server: &str, protect: &ProtectSocket) -> io::Result<TcpStream> {
+    let mut last = io::Error::new(io::ErrorKind::AddrNotAvailable, "server has no addresses");
+    for address in lookup_host(server).await? {
+        let socket = Socket::new(
+            Domain::for_address(address),
+            Type::STREAM,
+            Some(Protocol::TCP),
+        )?;
+        socket.set_nonblocking(true)?;
+        protect(&socket)?;
+        match TcpSocket::from_std_stream(socket.into())
+            .connect(address)
+            .await
+        {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
+}
 
 pub const DEFAULT_BACKLOG: i32 = 1024;
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);

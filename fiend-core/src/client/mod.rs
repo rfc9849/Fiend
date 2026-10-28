@@ -6,14 +6,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional, split};
+use tokio::io::{AsyncReadExt, copy_bidirectional};
+
+mod flow;
+pub use flow::{UdpFlow, UdpReceiver, UdpSender};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 
 use crate::addr::Address;
-use crate::mux::{self, Lane, LaneKind, LinkPool, PoolStats};
+use crate::mux::{self, H2Lane, Lane, LaneKind, LinkPool, PoolStats};
 use crate::socks5::{self, Command, REP_CMD_NOT_SUPPORTED, REP_GENERAL_FAILURE, REP_SUCCESS};
 use crate::transport;
 use crate::udp;
@@ -30,6 +33,7 @@ pub struct ClientConfig {
     pub handshake_timeout: Duration,
     pub max_connections: usize,
     pub tcp_notsent_lowat: u32,
+    pub protect_socket: crate::net::ProtectSocket,
 }
 
 impl ClientConfig {
@@ -49,6 +53,7 @@ impl ClientConfig {
             handshake_timeout: Duration::from_secs(10),
             max_connections: 1024,
             tcp_notsent_lowat: 0,
+            protect_socket: Arc::new(|_| Ok(())),
         }
     }
 }
@@ -70,12 +75,14 @@ impl Client {
         let secret = Arc::new(config.secret.clone());
         let template = Arc::new(config.template.clone());
         let tcp_notsent_lowat = config.tcp_notsent_lowat;
+        let protect_socket = config.protect_socket.clone();
         let pool = LinkPool::new(config.mux.clone(), move || {
             let server = server.clone();
             let secret = secret.clone();
             let template = template.clone();
+            let protect_socket = protect_socket.clone();
             Box::pin(async move {
-                let stream = TcpStream::connect(server)
+                let stream = crate::net::dial(&server, &protect_socket)
                     .await
                     .map_err(transport::Error::from)?;
                 stream.set_nodelay(true).map_err(transport::Error::from)?;
@@ -101,6 +108,26 @@ impl Client {
 
     pub fn close(&self) {
         self.inner.pool.close();
+    }
+
+    pub fn network_changed(&self) {
+        self.inner.pool.network_changed();
+    }
+
+    pub async fn open_tcp(&self, address: &Address) -> mux::Result<H2Lane> {
+        self.inner
+            .pool
+            .open_lane(&address.to_string(), LaneKind::Tcp)
+            .await
+    }
+
+    pub async fn open_udp(&self, address: &Address) -> mux::Result<UdpFlow> {
+        let lane = self
+            .inner
+            .pool
+            .open_lane(&address.to_string(), LaneKind::Udp)
+            .await?;
+        Ok(UdpFlow::new(lane, address.clone()))
     }
 
     pub async fn serve(&self, listener: TcpListener) -> io::Result<()> {
@@ -140,8 +167,7 @@ impl Client {
     }
 
     async fn connect(&self, mut stream: TcpStream, address: Address) -> io::Result<()> {
-        let authority = address.to_string();
-        match self.inner.pool.open_lane(&authority, LaneKind::Tcp).await {
+        match self.open_tcp(&address).await {
             Ok(mut lane) => {
                 if let Err(error) =
                     socks5::send_reply(&mut stream, REP_SUCCESS, &socks5::zero_address()).await
@@ -389,17 +415,13 @@ async fn open_flow(
     activity: Arc<AtomicU64>,
     initial: Vec<u8>,
 ) {
-    let Ok(lane) = inner
-        .pool
-        .open_lane(&destination.to_string(), LaneKind::Udp)
-        .await
-    else {
+    let Ok(flow) = (Client { inner }).open_udp(&destination).await else {
         let _ = events.send(FlowEvent::Failed {
             address: destination,
         });
         return;
     };
-    let (mut read, mut write) = split(lane);
+    let (mut write, mut read) = flow.into_split();
     let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(16);
     let _ = sender.try_send(initial);
     let closed = Arc::new(AtomicBool::new(false));
@@ -410,7 +432,7 @@ async fn open_flow(
     let writer_activity = activity.clone();
     let writer = tokio::spawn(async move {
         while let Some(frame) = receiver.recv().await {
-            if write.write_all(&frame).await.is_err() {
+            if write.send_encoded(&frame).await.is_err() {
                 break;
             }
             touch(&writer_activity, epoch);
@@ -429,7 +451,7 @@ async fn open_flow(
     let reader_activity = activity.clone();
     let reader = tokio::spawn(async move {
         loop {
-            match udp::read_response(&mut read).await {
+            match read.recv().await {
                 Ok(Some(response)) => {
                     let source = response
                         .source

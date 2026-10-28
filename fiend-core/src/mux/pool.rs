@@ -45,6 +45,7 @@ struct PoolInner<S> {
 
 struct State {
     links: Vec<Arc<ClientLink>>,
+    generation: u64,
     backoff: Backoff,
     next_id: u64,
     dialing: bool,
@@ -119,6 +120,7 @@ where
                 dial,
                 state: Mutex::new(State {
                     links: Vec::new(),
+                    generation: 0,
                     backoff: Backoff::new(),
                     next_id: 1,
                     dialing: false,
@@ -206,6 +208,29 @@ where
 
     pub fn close(&self) {
         self.inner.close();
+    }
+
+    pub fn network_changed(&self) {
+        {
+            let mut worker = self.inner.worker.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.inner.state();
+            state.generation = state.generation.wrapping_add(1);
+            if let Some(worker) = worker.take() {
+                worker.abort();
+            }
+            for link in state.links.drain(..) {
+                link.close();
+            }
+            state.dialing = false;
+            state.backoff.reset();
+            state.pressure_watermark = 0;
+            state.speculative_attempts = 0;
+            state.last_growth = None;
+            state.quiet_since = None;
+        }
+        self.inner.start_worker();
+        self.inner.wake.notify_one();
+        self.inner.ready.notify_waiters();
     }
 }
 
@@ -309,6 +334,7 @@ where
             *worker = Some(tokio::spawn(Self::run(
                 Arc::downgrade(self),
                 self.wake.clone(),
+                self.state().generation,
             )));
         }
     }
@@ -353,9 +379,15 @@ where
         }
     }
 
+    #[cfg(test)]
     fn maintain(&self) -> Option<LinkFuture> {
+        let generation = self.state().generation;
+        self.maintain_generation(generation)
+    }
+
+    fn maintain_generation(&self, generation: u64) -> Option<LinkFuture> {
         let mut state = self.state();
-        if self.closed() {
+        if self.closed() || state.generation != generation {
             return None;
         }
         let before = state.links.len();
@@ -432,8 +464,20 @@ where
         }))
     }
 
+    #[cfg(test)]
     fn dial_finished(&self, result: Result<ClientLink>) {
+        let generation = self.state().generation;
+        self.dial_finished_generation(generation, result);
+    }
+
+    fn dial_finished_generation(&self, generation: u64, result: Result<ClientLink>) {
         let mut state = self.state();
+        if state.generation != generation {
+            if let Ok(link) = result {
+                link.close();
+            }
+            return;
+        }
         state.dialing = false;
         match result {
             Ok(link) if !self.closed() => {
@@ -455,16 +499,16 @@ where
         self.ready.notify_waiters();
     }
 
-    async fn run(weak: Weak<Self>, wake: Arc<Notify>) {
+    async fn run(weak: Weak<Self>, wake: Arc<Notify>, generation: u64) {
         let mut tick = interval(LOAD_INTERVAL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut dial: Option<LinkFuture> = None;
         loop {
             let Some(pool) = weak.upgrade() else { return };
-            if pool.closed() {
+            if pool.closed() || pool.state().generation != generation {
                 return;
             }
-            if let Some(next) = pool.maintain() {
+            if let Some(next) = pool.maintain_generation(generation) {
                 dial = Some(next);
             }
             pool.ready.notify_waiters();
@@ -478,7 +522,7 @@ where
                 } => {
                     dial = None;
                     if let Some(pool) = weak.upgrade() {
-                        pool.dial_finished(result);
+                        pool.dial_finished_generation(generation, result);
                     }
                 }
                 _ = tick.tick() => {}
