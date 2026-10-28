@@ -19,6 +19,7 @@ data class InstalledApp(
     val packageName: String,
     val label: String,
     val isSystem: Boolean = false,
+    val iconPng: ByteArray? = null,
 )
 
 enum class LogLevel { Debug, Info, Warn, Error }

@@ -111,6 +111,7 @@ internal fun ProfileEditScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Column(Modifier.widthIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                state.saveError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
                 GroupHeader(stringResource(R.string.edit_group_general))
                 FormField(
                     value = f.name,

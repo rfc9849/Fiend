@@ -22,7 +22,7 @@
     <string name="settings_ipv6">Route IPv6</string>
     <string name="settings_ipv6_body">Send IPv6 traffic through the tunnel to prevent leaks</string>
     <string name="settings_remote_dns">Resolve names on the server</string>
-    <string name="settings_remote_dns_body">Your network never sees DNS queries</string>
+    <string name="settings_remote_dns_body">Required to prevent DNS leaks</string>
     <string name="settings_group_appearance">Appearance</string>
     <string name="settings_theme">Theme</string>
     <string name="settings_theme_system">System default</string>

@@ -77,6 +77,7 @@ internal fun ProfileDetailRoute(
                     snackbar.showSnackbar(resources.getString(R.string.detail_test_result, event.name, event.ms))
                 is ProfileDetailEvent.Duplicated -> onOpenProfile(event.id)
                 ProfileDetailEvent.Deleted -> onBack()
+                is ProfileDetailEvent.Failed -> snackbar.showSnackbar(event.reason)
             }
         }
     }
@@ -110,7 +111,8 @@ internal fun ProfileDetailScreen(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
-    var shareOpen by rememberSaveable { mutableStateOf(false) }
+    var shareOpen by remember { mutableStateOf(false) }
+    var sharedLink by remember { mutableStateOf("") }
     var secretVisible by rememberSaveable { mutableStateOf(false) }
     val profile = state.profile
 
@@ -172,7 +174,7 @@ internal fun ProfileDetailScreen(
                 ActionRow(
                     state = state,
                     onToggleConnection = onToggleConnection,
-                    onShare = { shareOpen = true },
+                    onShare = { sharedLink = shareLink(); shareOpen = sharedLink.isNotBlank() },
                     onTest = onTest,
                     onEdit = onEdit,
                 )
@@ -224,7 +226,7 @@ internal fun ProfileDetailScreen(
     }
 
     if (shareOpen && profile != null) {
-        ShareSheet(name = profile.name, link = remember(profile) { shareLink() }, onDismiss = { shareOpen = false })
+        ShareSheet(name = profile.name, link = sharedLink, onDismiss = { shareOpen = false })
     }
 }
 

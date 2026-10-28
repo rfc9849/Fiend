@@ -36,6 +36,8 @@ sealed interface ProfileDetailEvent {
     data class Duplicated(val id: String) : ProfileDetailEvent
 
     data object Deleted : ProfileDetailEvent
+
+    data class Failed(val reason: String) : ProfileDetailEvent
 }
 
 @HiltViewModel(assistedFactory = ProfileDetailViewModel.Factory::class)
@@ -73,7 +75,7 @@ class ProfileDetailViewModel @AssistedInject constructor(
 
     fun toggleConnection() {
         val state = uiState.value
-        viewModelScope.launch {
+        operation {
             if (state.isConnected || state.isBusy) {
                 tunnel.disconnect()
             } else {
@@ -85,27 +87,39 @@ class ProfileDetailViewModel @AssistedInject constructor(
 
     fun test() {
         if (testing.value) return
-        viewModelScope.launch {
+        operation {
             testing.value = true
-            val ms = repository.measureLatency(profileId)
-            testing.value = false
-            eventChannel.send(ProfileDetailEvent.LatencyMeasured(uiState.value.profile?.name.orEmpty(), ms))
+            try {
+                val ms = repository.measureLatency(profileId)
+                eventChannel.send(ProfileDetailEvent.LatencyMeasured(uiState.value.profile?.name.orEmpty(), ms))
+            } finally { testing.value = false }
         }
     }
 
     fun duplicate() {
-        viewModelScope.launch {
+        operation {
             repository.duplicate(profileId)?.let { eventChannel.send(ProfileDetailEvent.Duplicated(it.id)) }
         }
     }
 
     fun delete() {
-        viewModelScope.launch {
+        operation {
             if (uiState.value.isConnected) tunnel.disconnect()
             repository.delete(profileId)
             eventChannel.send(ProfileDetailEvent.Deleted)
         }
     }
 
-    fun shareLink(): String = uiState.value.profile?.let(repository::shareLink).orEmpty()
+    fun shareLink(): String = try { uiState.value.profile?.let(repository::shareLink).orEmpty() }
+        catch (error: Exception) { eventChannel.trySend(ProfileDetailEvent.Failed(error.message ?: "Cannot share the profile")); "" }
+
+    private fun operation(block: suspend () -> Unit) {
+        viewModelScope.launch {
+            try { block() }
+            catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                eventChannel.send(ProfileDetailEvent.Failed(error.message ?: "Profile action failed"))
+            }
+        }
+    }
 }

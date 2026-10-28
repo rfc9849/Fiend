@@ -28,7 +28,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -68,7 +67,7 @@ internal fun ShareSheet(name: String, link: String, onDismiss: () -> Unit) {
             Spacer(Modifier.height(24.dp))
             Surface(color = Color.White, shape = MaterialTheme.shapes.extraLarge) {
                 val description = stringResource(R.string.share_qr, name)
-                MockQrCode(
+                QrCode(
                     payload = link,
                     modifier = Modifier
                         .padding(20.dp)
@@ -136,44 +135,18 @@ internal fun ShareSheet(name: String, link: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun MockQrCode(payload: String, modifier: Modifier = Modifier) {
-    val modules = 29
-    val bits = remember(payload) {
-        val random = java.util.Random(payload.hashCode().toLong())
-        BooleanArray(modules * modules) { random.nextInt(100) < 47 }
-    }
-    Box(modifier) {
-        Canvas(Modifier.matchParentSize()) {
-            val cell = size.minDimension / modules
-            val ink = Color(0xFF1B1B1F)
-            fun finder(cx: Int, cy: Int) {
-                drawRoundRect(ink, Offset(cx * cell, cy * cell), Size(7 * cell, 7 * cell), CornerRadius(cell * 2))
-                drawRoundRect(Color.White, Offset((cx + 1) * cell, (cy + 1) * cell), Size(5 * cell, 5 * cell), CornerRadius(cell * 1.4f))
-                drawRoundRect(ink, Offset((cx + 2) * cell, (cy + 2) * cell), Size(3 * cell, 3 * cell), CornerRadius(cell))
-            }
-            fun reserved(x: Int, y: Int) =
-                (x < 8 && y < 8) || (x >= modules - 8 && y < 8) || (x < 8 && y >= modules - 8)
-            for (y in 0 until modules) {
-                for (x in 0 until modules) {
-                    if (reserved(x, y)) continue
-                    val on = when {
-                        y == 6 -> x % 2 == 0
-                        x == 6 -> y % 2 == 0
-                        else -> bits[y * modules + x]
-                    }
-                    if (on) {
-                        drawRoundRect(
-                            color = ink,
-                            topLeft = Offset(x * cell + cell * 0.08f, y * cell + cell * 0.08f),
-                            size = Size(cell * 0.84f, cell * 0.84f),
-                            cornerRadius = CornerRadius(cell * 0.3f),
-                        )
-                    }
+private fun QrCode(payload: String, modifier: Modifier = Modifier) {
+    val matrix = remember(payload) { qrMatrix(payload) }
+    Box(modifier, contentAlignment = Alignment.Center) {
+        if (matrix == null) {
+            Text(stringResource(R.string.share_qr_too_large), color = Color(0xFF1B1B1F), textAlign = TextAlign.Center)
+        } else {
+            Canvas(Modifier.matchParentSize()) {
+                val cell = size.minDimension / matrix.width
+                for (y in 0 until matrix.height) for (x in 0 until matrix.width) {
+                    if (matrix[x, y]) drawRect(Color(0xFF1B1B1F), Offset(x * cell, y * cell), Size(cell, cell))
                 }
             }
-            finder(0, 0)
-            finder(modules - 7, 0)
-            finder(0, modules - 7)
         }
     }
 }

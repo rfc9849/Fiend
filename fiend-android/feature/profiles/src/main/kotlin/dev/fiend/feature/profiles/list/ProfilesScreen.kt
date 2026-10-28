@@ -62,6 +62,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
@@ -135,7 +142,16 @@ internal fun ProfilesScreen(
     val scope = rememberCoroutineScope()
     var fabExpanded by rememberSaveable { mutableStateOf(false) }
     var pasteOpen by rememberSaveable { mutableStateOf(false) }
+    var scanOpen by rememberSaveable { mutableStateOf(false) }
     val resources = LocalResources.current
+    val context = LocalContext.current
+    val openFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            runCatching { withContext(Dispatchers.IO) { readShareFile(context, uri) } }
+                .onSuccess(onImport)
+                .onFailure { snackbar.showSnackbar(resources.getString(R.string.profiles_import_failed)) }
+        }
+    }
 
     LaunchedEffect(textFieldState) {
         snapshotFlow { textFieldState.text.toString() }.collect(onQueryChange)
@@ -208,9 +224,9 @@ internal fun ProfilesScreen(
                     onClick = {
                         fabExpanded = false
                         when (action) {
-                            AddAction.Scan -> scope.launch { snackbar.showSnackbar(resources.getString(R.string.profiles_scan_unavailable)) }
+                            AddAction.Scan -> scanOpen = true
                             AddAction.Paste -> pasteOpen = true
-                            AddAction.File -> scope.launch { snackbar.showSnackbar(resources.getString(R.string.profiles_file_unavailable)) }
+                            AddAction.File -> openFile.launch(arrayOf("*/*"))
                             AddAction.Manual -> onAddManually()
                         }
                     },
@@ -221,6 +237,7 @@ internal fun ProfilesScreen(
         }
     }
 
+    if (scanOpen) QrScanner(onResult = { scanOpen = false; onImport(it) }, onDismiss = { scanOpen = false })
     if (pasteOpen) {
         PasteLinkDialog(
             onDismiss = { pasteOpen = false },
@@ -231,6 +248,18 @@ internal fun ProfilesScreen(
         )
     }
 }
+
+private fun readShareFile(context: Context, uri: Uri): String = context.contentResolver.openInputStream(uri)?.use { input ->
+    val bytes = ByteArray(65537)
+    var used = 0
+    while (used < bytes.size) {
+        val size = input.read(bytes, used, bytes.size - used)
+        if (size < 0) break
+        used += size
+    }
+    require(used <= 65536) { "Share file is too large" }
+    bytes.copyOf(used).toString(Charsets.UTF_8).trim()
+} ?: error("Cannot open the share file")
 
 @Composable
 private fun SearchInput(textFieldState: TextFieldState, searchBarState: SearchBarState) {

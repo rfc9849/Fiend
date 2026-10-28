@@ -95,4 +95,10 @@
     <string name="edit_discard_body">Your changes to this profile will be lost.</string>
     <string name="edit_discard">Discard</string>
     <string name="edit_keep">Keep editing</string>
+    <string name="share_qr_too_large">This link is too large for one QR code. Use Copy or Share.</string>
+    <string name="scan_permission">Camera permission is required to scan a QR code.</string>
+    <string name="scan_allow">Allow camera</string>
+    <string name="scan_settings">Open app settings</string>
+    <string name="scan_close">Close scanner</string>
+    <string name="scan_camera_error">The camera is not available.</string>
 </resources>

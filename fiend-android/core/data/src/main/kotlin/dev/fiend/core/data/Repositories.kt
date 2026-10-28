@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 interface ProfileRepository {
+    suspend fun awaitReady() { }
+
     val profiles: StateFlow<List<Profile>>
     val activeProfileId: StateFlow<String?>
     val templates: List<FingerprintTemplate>
@@ -18,6 +20,8 @@ interface ProfileRepository {
     fun profile(id: String): Flow<Profile?>
 
     suspend fun setActive(id: String)
+
+    suspend fun markConnected(id: String, timeEpochMs: Long) { }
 
     suspend fun upsert(profile: Profile): Profile
 
@@ -45,6 +49,8 @@ interface TunnelController {
 }
 
 interface SettingsRepository {
+    suspend fun awaitReady() { }
+
     val settings: StateFlow<AppSettings>
 
     suspend fun update(transform: (AppSettings) -> AppSettings)

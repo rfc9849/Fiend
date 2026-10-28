@@ -167,8 +167,10 @@ internal fun SettingsScreen(
                             headline = stringResource(R.string.settings_remote_dns),
                             supporting = stringResource(R.string.settings_remote_dns_body),
                             icon = FiendIcons.Dns,
-                            checked = settings.remoteDns,
-                            onCheckedChange = { v -> onUpdate { s -> s.copy(remoteDns = v) } },
+                            checked = true,
+                            enabled = false,
+                            onCheckedChange = {},
+
                         )
                     }
                 }

@@ -6,6 +6,10 @@ import android.app.Activity
 import android.Manifest
 import android.content.pm.PackageManager
 import android.net.VpnService
+import android.content.Intent
+import android.widget.Toast
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
@@ -39,8 +43,18 @@ import kotlinx.coroutines.launch
 import androidx.lifecycle.viewModelScope
 
 @HiltViewModel
-class MainViewModel @Inject constructor(settings: SettingsRepository, profiles: ProfileRepository, tunnel: TunnelController) : ViewModel() {
+class MainViewModel @Inject constructor(settings: SettingsRepository, private val profiles: ProfileRepository, tunnel: TunnelController) : ViewModel() {
     val settings: StateFlow<AppSettings> = settings.settings
+    private val messages = Channel<String>(Channel.BUFFERED)
+    val importMessages = messages.receiveAsFlow()
+    fun importLink(link: String) {
+        viewModelScope.launch {
+            profiles.import(link).fold(
+                onSuccess = { messages.send("Profile imported: ${it.name}") },
+                onFailure = { messages.send(it.message ?: "Cannot import the profile") },
+            )
+        }
+    }
     init {
         viewModelScope.launch {
             settings.settings.filter { it.connectOnStart }.first()
@@ -60,11 +74,19 @@ class MainActivity : ComponentActivity() {
     }
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.data?.takeIf { it.scheme == "fiend" }?.let { viewModel.importLink(it.toString()) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) intent?.data?.takeIf { it.scheme == "fiend" }?.let { viewModel.importLink(it.toString()) }
         setContent {
+            LaunchedEffect(viewModel) { viewModel.importMessages.collect { Toast.makeText(this@MainActivity, it, Toast.LENGTH_LONG).show() } }
             val settings by viewModel.settings.collectAsStateWithLifecycle()
             val permissionRequired by tunnel.permissionRequired.collectAsStateWithLifecycle()
             val tunnelState by tunnel.state.collectAsStateWithLifecycle()

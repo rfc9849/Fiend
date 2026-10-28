@@ -83,7 +83,10 @@ class FiendVpnService : VpnService() {
         }
         connecting?.cancel()
         connecting = scope.launch {
-            val list = profiles.profiles.first { it.isNotEmpty() || profiles.activeProfileId.value == null }
+            try {
+            profiles.awaitReady()
+            settings.awaitReady()
+            val list = profiles.profiles.value
             val id = intent?.getStringExtra(EngineServiceContract.PROFILE_ID)
                 ?: profiles.activeProfileId.value ?: list.firstOrNull()?.id
             if (id == null) {
@@ -92,6 +95,11 @@ class FiendVpnService : VpnService() {
                 return@launch
             }
             connect(id)
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                engine.fail("", error.message ?: "Cannot read the VPN settings")
+                disconnect(keepFailure = true)
+            }
         }
         return START_STICKY
     }
@@ -202,6 +210,7 @@ class FiendVpnService : VpnService() {
         engine.update(session, state)
         scope.launch {
             if (!engine.isCurrent(session)) return@launch
+            if (state == NativeState.Connected) currentProfileId?.let { id -> runCatching { profiles.markConnected(id, System.currentTimeMillis()) } }
             showForeground(when (state) {
                 NativeState.Connected -> "Connected"
                 NativeState.Connecting -> "Connecting"

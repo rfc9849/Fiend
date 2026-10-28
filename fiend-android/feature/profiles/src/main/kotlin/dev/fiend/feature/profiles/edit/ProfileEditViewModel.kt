@@ -43,6 +43,7 @@ data class ProfileEditUiState(
     val errors: Map<Field, FieldError> = emptyMap(),
     val templates: List<FingerprintTemplate> = emptyList(),
     val saving: Boolean = false,
+    val saveError: String? = null,
 ) {
     val dirty: Boolean get() = form != initial
 }
@@ -89,10 +90,11 @@ class ProfileEditViewModel @AssistedInject constructor(
             state.update { it.copy(errors = errors) }
             return
         }
-        state.update { it.copy(saving = true) }
+        state.update { it.copy(saving = true, saveError = null) }
         viewModelScope.launch {
             val f = current.form
             val base = original ?: Profile(id = "", name = "", host = "", port = 443, secret = "", templateId = "")
+            try {
             repository.upsert(
                 base.copy(
                     name = f.name.trim(),
@@ -110,6 +112,10 @@ class ProfileEditViewModel @AssistedInject constructor(
                 ),
             )
             savedChannel.send(Unit)
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                state.update { it.copy(saveError = error.message ?: "Cannot save the profile") }
+            } finally { state.update { it.copy(saving = false) } }
         }
     }
 

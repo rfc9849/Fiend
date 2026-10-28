@@ -57,10 +57,8 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.fiend.core.data.mock.MockData
 import dev.fiend.core.designsystem.component.FiendListDefaults
 import dev.fiend.core.designsystem.component.ShapeAvatar
 import dev.fiend.core.designsystem.component.StatTile
@@ -70,7 +68,6 @@ import dev.fiend.core.designsystem.component.formatBytes
 import dev.fiend.core.designsystem.component.formatElapsed
 import dev.fiend.core.designsystem.component.latencyColor
 import dev.fiend.core.designsystem.icon.FiendIcons
-import dev.fiend.core.designsystem.theme.FiendTheme
 import dev.fiend.core.designsystem.theme.googleSansFlex
 import dev.fiend.core.model.ConnectStep
 import dev.fiend.core.model.Profile
@@ -414,41 +411,5 @@ private fun StatsGrid(stats: TunnelStats, connected: Boolean) {
                 modifier = Modifier.weight(1f),
             )
         }
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-private fun HomeConnectedPreview() {
-    val profiles = MockData.profiles(0)
-    FiendTheme(dynamicColor = false) {
-        HomeScreen(
-            state = HomeUiState(
-                tunnel = TunnelState.Connected(profiles.first().id, System.currentTimeMillis() - 754_000),
-                stats = TunnelStats(12_400_000, 1_800_000, 224_000_000, 18_000_000, 38, 21),
-                activeProfile = profiles.first(),
-                activeTemplate = MockData.templates.first(),
-                profiles = profiles,
-            ),
-            onToggle = {},
-            onSelectProfile = {},
-            onManageProfiles = {},
-            onOpenLogs = {},
-        )
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-private fun HomeIdlePreview() {
-    val profiles = MockData.profiles(0)
-    FiendTheme(dynamicColor = false) {
-        HomeScreen(
-            state = HomeUiState(activeProfile = profiles.first(), activeTemplate = MockData.templates.first(), profiles = profiles),
-            onToggle = {},
-            onSelectProfile = {},
-            onManageProfiles = {},
-            onOpenLogs = {},
-        )
     }
 }

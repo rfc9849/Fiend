@@ -1,5 +1,9 @@
 package dev.fiend.feature.settings
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -183,6 +187,11 @@ private fun AppRow(app: InstalledApp, index: Int, count: Int, checked: Boolean, 
 
 @Composable
 private fun AppIcon(app: InstalledApp) {
+    val icon = remember(app.iconPng) { app.iconPng?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() } }
+    if (icon != null) {
+        Image(icon, contentDescription = null, modifier = Modifier.size(40.dp).clip(MaterialTheme.shapes.medium))
+        return
+    }
     val c = MaterialTheme.colorScheme
     val palette = listOf(
         c.primary to c.onPrimary,
