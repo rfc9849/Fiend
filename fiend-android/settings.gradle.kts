@@ -20,6 +20,7 @@ rootProject.name = "fiend-android"
 include(":app")
 include(":core:model")
 include(":core:data")
+include(":core:engine")
 include(":core:designsystem")
 include(":feature:home")
 include(":feature:profiles")

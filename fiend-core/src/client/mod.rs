@@ -102,6 +102,10 @@ impl Client {
         }
     }
 
+    pub async fn ready(&self) -> mux::Result<()> {
+        self.inner.pool.ready().await
+    }
+
     pub fn stats(&self) -> PoolStats {
         self.inner.pool.stats()
     }

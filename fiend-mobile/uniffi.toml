@@ -1,0 +1,4 @@
+[bindings.kotlin]
+package_name = "dev.fiend.core.engine.bindings"
+cdylib_name = "fiend_mobile"
+android = true

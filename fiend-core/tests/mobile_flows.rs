@@ -86,6 +86,8 @@ async fn tcp_flow_matches_socks_and_recovers_after_network_change() {
     timeout(LIMIT, async {
         let target = Address::Ip(echo_tcp().await);
         let (client, socks, calls) = stack().await;
+        client.ready().await.unwrap();
+        assert_eq!(client.stats().lanes, 0);
         let mut direct = client.open_tcp(&target).await.unwrap();
         let (mut proxy, _) = socks_request(socks, 1, &target).await;
         let payload = vec![0xa5; 32 << 10];
@@ -109,6 +111,7 @@ async fn tcp_flow_matches_socks_and_recovers_after_network_change() {
         client.close();
         client.network_changed();
         assert!(client.open_tcp(&target).await.is_err());
+        assert!(client.ready().await.is_err());
     })
     .await
     .unwrap();

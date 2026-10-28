@@ -202,6 +202,12 @@ where
         Err(last)
     }
 
+    pub async fn ready(&self) -> Result<()> {
+        self.inner.start_worker();
+        let deadline = Instant::now() + self.inner.config.open_timeout;
+        self.inner.acquire(deadline).await.map(drop)
+    }
+
     pub fn stats(&self) -> PoolStats {
         self.inner.stats()
     }
