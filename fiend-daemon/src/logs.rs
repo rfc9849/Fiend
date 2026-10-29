@@ -7,6 +7,7 @@ use fiend_ipc::{LogEntry, LogLevel};
 use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::{Layer, Registry};
 
@@ -137,8 +138,12 @@ impl Visit for Fields {
 
 pub fn install_logging() -> Arc<LogBuffer> {
     let buffer = Arc::new(LogBuffer::new());
+    let filter = std::env::var("FIEND_LOG")
+        .ok()
+        .and_then(|value| value.parse::<Targets>().ok())
+        .unwrap_or_else(|| Targets::new().with_default(Level::INFO));
     let subscriber = Registry::default()
-        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .with(BufferLayer {
             buffer: buffer.clone(),

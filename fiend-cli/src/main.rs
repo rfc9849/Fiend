@@ -11,6 +11,23 @@ use fiend_ipc::{
 };
 use tokio::io::AsyncReadExt;
 
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(error) = writeln!(std::io::stdout(), $($arg)*) {
+            stdout_failed(&error);
+        }
+    }};
+}
+
+fn stdout_failed(error: &std::io::Error) -> ! {
+    if error.kind() == std::io::ErrorKind::BrokenPipe {
+        std::process::exit(0);
+    }
+    eprintln!("fiend: cannot write the output: {error}");
+    std::process::exit(1);
+}
+
 #[derive(Parser)]
 #[command(name = "fiend", version, about = "Control the Fiend daemon")]
 struct Cli {
