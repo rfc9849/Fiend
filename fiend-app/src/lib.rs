@@ -10,7 +10,7 @@ pub mod subscription;
 pub use error::AppError;
 pub use latency::measure_latency;
 pub use profile::{
-    ProfileConfig, TemplateInfo, bundled_templates, client_config, make_share_link,
-    parse_share_link, validate_profile,
+    LoadedTemplate, ProfileConfig, TemplateInfo, bundled_templates, client_config, load_template,
+    make_share_link, parse_share_link, template_domain, validate_profile,
 };
 pub use rules::{RuleKind, RuleStats, inspect_rule_file, validate_resolver, validate_rules};

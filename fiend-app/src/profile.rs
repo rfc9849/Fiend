@@ -28,6 +28,13 @@ pub struct TemplateInfo {
     pub id: String,
     pub name: String,
     pub platform: String,
+    pub domain: String,
+    pub template_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadedTemplate {
+    pub domain: String,
     pub template_json: String,
 }
 
@@ -53,11 +60,17 @@ pub fn client_config(profile: &ProfileConfig) -> Result<ClientConfig, AppError> 
         return Err(invalid("Secret must contain 64 hex characters"));
     }
     let secret = hex::decode(&profile.secret).map_err(|_| invalid("Secret is not valid hex"))?;
-    if profile.template_json.len() > MAX_TEMPLATE {
+    let template = check_template(&profile.template_json)?;
+    fiend_core::config::build_client(ClientConfig::new(&profile.server, secret, template))
+        .map_err(|error| invalid(error.to_string()))
+}
+
+fn check_template(template_json: &str) -> Result<Template, AppError> {
+    if template_json.len() > MAX_TEMPLATE {
         return Err(invalid("Template is too large"));
     }
-    let template = Template::from_json(&profile.template_json)
-        .map_err(|_| invalid("Template is not valid"))?;
+    let template =
+        Template::from_json(template_json).map_err(|_| invalid("Template is not valid"))?;
     let captured = parse_client_hello(template.raw_bytes())
         .map_err(|_| invalid("Template capture is not valid"))?;
     if template.domain != captured.domain
@@ -70,8 +83,42 @@ pub fn client_config(profile: &ProfileConfig) -> Result<ClientConfig, AppError> 
     {
         return Err(invalid("Template fields do not match its capture"));
     }
-    fiend_core::config::build_client(ClientConfig::new(&profile.server, secret, template))
-        .map_err(|error| invalid(error.to_string()))
+    Ok(template)
+}
+
+pub fn load_template(data: &[u8]) -> Result<LoadedTemplate, AppError> {
+    if data.len() > MAX_TEMPLATE {
+        return Err(invalid("Template file is too large"));
+    }
+    let json = if data.trim_ascii_start().starts_with(b"{") {
+        let text = std::str::from_utf8(data).map_err(|_| invalid("Template is not valid"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(text).map_err(|_| invalid("Template is not valid"))?;
+        value.to_string()
+    } else {
+        let template = parse_client_hello(data).map_err(|_| {
+            invalid("The file is not a TLS template or a ClientHello capture")
+        })?;
+        template
+            .verify(data)
+            .map_err(|_| invalid("The ClientHello capture cannot be used as a template"))?;
+        serde_json::to_string(&template).map_err(|_| invalid("Template is not valid"))?
+    };
+    let template = check_template(&json)?;
+    Ok(LoadedTemplate {
+        domain: template.domain,
+        template_json: json,
+    })
+}
+
+pub fn template_domain(template_json: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Domain {
+        domain: String,
+    }
+    serde_json::from_str::<Domain>(template_json)
+        .ok()
+        .map(|value| value.domain)
 }
 
 pub fn validate_profile(profile: ProfileConfig) -> Result<(), AppError> {
@@ -135,8 +182,9 @@ pub fn parse_share_link(uri: String) -> Result<ProfileConfig, AppError> {
 pub fn bundled_templates() -> Vec<TemplateInfo> {
     vec![TemplateInfo {
         id: "captured-wikipedia-v1".into(),
-        name: "Captured TLS template".into(),
+        name: "Built-in".into(),
         platform: "TLS".into(),
+        domain: template_domain(BUNDLED).unwrap_or_default(),
         template_json: BUNDLED.into(),
     }]
 }
@@ -201,6 +249,48 @@ pub(crate) mod tests {
             URL_SAFE_NO_PAD.encode(compressed.finish().unwrap())
         );
         assert!(parse_share_link(link).is_err());
+    }
+
+    #[test]
+    fn templates_load_from_json_or_a_raw_capture() {
+        let from_json = load_template(BUNDLED.as_bytes()).unwrap();
+        assert_eq!(from_json.domain, "www.wikipedia.org");
+        assert_eq!(template_domain(&from_json.template_json).as_deref(), Some("www.wikipedia.org"));
+        assert!(from_json.template_json.len() < BUNDLED.len());
+
+        let raw = Template::from_json(BUNDLED).unwrap().raw;
+        let from_capture = load_template(&raw).unwrap();
+        assert_eq!(from_capture.domain, "www.wikipedia.org");
+        assert_eq!(
+            Template::from_json(&from_capture.template_json).unwrap().raw,
+            raw
+        );
+
+        let mut profile = profile();
+        profile.template_json = from_capture.template_json;
+        let link = make_share_link(profile).unwrap();
+        assert_eq!(
+            template_domain(&parse_share_link(link).unwrap().template_json).as_deref(),
+            Some("www.wikipedia.org")
+        );
+    }
+
+    #[test]
+    fn bad_template_files_are_rejected() {
+        let raw = Template::from_json(BUNDLED).unwrap().raw;
+        let mut wrong_domain: serde_json::Value = serde_json::from_str(BUNDLED).unwrap();
+        wrong_domain["domain"] = "other.example".into();
+        for data in [
+            Vec::new(),
+            b"not a template".to_vec(),
+            b"{\"domain\": 1}".to_vec(),
+            wrong_domain.to_string().into_bytes(),
+            raw[..raw.len() / 2].to_vec(),
+            vec![b' '; MAX_TEMPLATE + 1],
+        ] {
+            assert!(load_template(&data).is_err());
+        }
+        assert_eq!(template_domain("{}"), None);
     }
 
     #[test]

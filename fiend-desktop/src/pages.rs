@@ -438,11 +438,7 @@ impl AppView {
                 format!("•••• •••• •••• {}", &profile.secret[profile.secret.len().saturating_sub(4)..])
             };
             let secret_copy = profile.secret.clone();
-            let template_name = crate::dialogs::template_options()
-                .into_iter()
-                .find(|template| template.2 == profile.template_json)
-                .map(|template| template.1)
-                .unwrap_or_else(|| "Custom template".into());
+            let template_name = crate::dialogs::template_label(&profile.template_json);
             let t = profile.tuning;
             let ids = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
             div()

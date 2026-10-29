@@ -162,11 +162,31 @@ fn parse_port(value: &str) -> Option<u16> {
     value.trim().parse::<u16>().ok().filter(|port| *port > 0)
 }
 
+pub const TEMPLATE_CURRENT: &str = "current";
+pub const TEMPLATE_FILE: &str = "file";
+
 pub fn template_options() -> Vec<(String, String, String)> {
     fiend_app::bundled_templates()
         .into_iter()
-        .map(|template| (template.id, template.name, template.template_json))
+        .map(|template| {
+            (
+                template.id,
+                format!("{} · {}", template.name, template.domain),
+                template.template_json,
+            )
+        })
         .collect()
+}
+
+pub fn template_label(template_json: &str) -> String {
+    template_options()
+        .into_iter()
+        .find(|template| template.2 == template_json)
+        .map(|template| template.1)
+        .unwrap_or_else(|| match fiend_app::template_domain(template_json) {
+            Some(domain) => format!("Imported · {domain}"),
+            None => "Imported template".to_owned(),
+        })
 }
 
 impl AppView {
@@ -255,7 +275,7 @@ impl AppView {
             form.host.read(cx).value().to_string(),
             form.port.read(cx).value().to_string(),
             form.secret.read(cx).value().to_string(),
-            form.template.clone(),
+            form.template_json.clone(),
         ];
         values.extend(
             form.tuning
@@ -481,7 +501,7 @@ impl AppView {
             .iter()
             .find(|template| template.2 == template_json)
             .map(|template| template.0.clone())
-            .unwrap_or_else(|| "current".to_owned());
+            .unwrap_or_else(|| TEMPLATE_CURRENT.to_owned());
         let form = ProfileForm {
             id,
             name: self.new_input(&name, "Home server", false, window, cx),
@@ -637,14 +657,18 @@ impl AppView {
         &mut self,
         id: MenuId,
         value: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match (id, self.dialog.as_mut()) {
+            (MenuId::Template, Some(Dialog::Profile(_))) if value == TEMPLATE_FILE => {
+                self.load_template_file(window, cx);
+            }
             (MenuId::Template, Some(Dialog::Profile(form))) => {
                 if let Some(template) = template_options().into_iter().find(|t| t.0 == value) {
                     form.template = template.0;
                     form.template_json = template.2;
+                    form.errors.remove("template");
                 }
             }
             (MenuId::SubscriptionKind, Some(Dialog::Subscription(form))) => {
@@ -726,7 +750,7 @@ impl AppView {
         }
         form.errors.clear();
         form.saving = true;
-        let template_json = if form.template == "current" {
+        let template_json = if form.template == TEMPLATE_CURRENT {
             form.template_json.clone()
         } else {
             template_options()
@@ -933,6 +957,39 @@ impl AppView {
                     }
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    pub fn load_template_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Load a TLS template")
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            let bytes = file.read().await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(Dialog::Profile(form)) = this.dialog.as_mut() {
+                    match fiend_app::load_template(&bytes) {
+                        Ok(loaded) => {
+                            form.template = template_options()
+                                .into_iter()
+                                .find(|template| template.2 == loaded.template_json)
+                                .map(|template| template.0)
+                                .unwrap_or_else(|| TEMPLATE_CURRENT.to_owned());
+                            form.template_json = loaded.template_json;
+                            form.errors.remove("template");
+                        }
+                        Err(error) => {
+                            form.errors.insert("template", error.to_string());
+                        }
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -1224,11 +1281,15 @@ impl AppView {
                 let templates = template_options();
                 let mut options: Vec<MenuOption> = templates
                     .iter()
-                    .map(|t| MenuOption::new(t.0.clone(), format!("{} · TLS", t.1)))
+                    .map(|t| MenuOption::new(t.0.clone(), t.1.clone()))
                     .collect();
-                if form.template == "current" {
-                    options.insert(0, MenuOption::new("current", "Current template"));
+                if form.template == TEMPLATE_CURRENT {
+                    options.insert(
+                        0,
+                        MenuOption::new(TEMPLATE_CURRENT, template_label(&form.template_json)),
+                    );
                 }
+                options.push(MenuOption::new(TEMPLATE_FILE, "Load from file…"));
                 let label = options
                     .iter()
                     .find(|option| option.value == form.template)
@@ -1320,7 +1381,13 @@ impl AppView {
                             Some("64 hexadecimal characters."),
                         ),
                     )
-                    .child(self.field(ui, "TLS fingerprint", template, None, None))
+                    .child(self.field(
+                        ui,
+                        "TLS fingerprint",
+                        template,
+                        err("template"),
+                        Some("A template JSON or a ClientHello capture of a real site."),
+                    ))
                     .child(
                         div()
                             .mt(px(6.))

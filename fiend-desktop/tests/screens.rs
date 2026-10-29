@@ -271,6 +271,12 @@ fn main() {
             let id = v.model.profiles[0].id.clone();
             v.open_profile_form(Some(id), w, cx)
         });
+        shot(n("profile-imported"), theme, connected_updates(), |v, w, cx| {
+            let template = fiend_core::fingerprint::Template::from_json(TEMPLATE).unwrap();
+            v.model.profiles[1].template_json = serde_json::to_string(&template).unwrap();
+            let id = v.model.profiles[1].id.clone();
+            v.open_profile_form(Some(id), w, cx)
+        });
         shot(n("import"), theme, connected_updates(), |v, w, cx| {
             v.open_import(None, w, cx)
         });
