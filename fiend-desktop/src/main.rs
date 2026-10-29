@@ -3,8 +3,11 @@ use fiend_desktop::{AppView, Assets, Prefs, spawn_backend};
 use futures::StreamExt;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
+    Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowDecorations,
+    WindowOptions, point, px, size,
 };
+
+gpui_kit::actions!([Quit]);
 
 fn main() {
     let first = std::env::args()
@@ -30,6 +33,12 @@ fn main() {
     application.run(move |cx| {
         gpui_kit::init(cx);
         cx.register_url_scheme("fiend").detach();
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("ctrl-q", Quit, None),
+        ]);
+        cx.set_menus([Menu::new("Fiend").items([MenuItem::action("Quit Fiend", Quit)])]);
         let (backend, updates) = spawn_backend(socket);
         let bounds = Bounds::centered(None, size(px(1000.), px(690.)), cx);
         let options = WindowOptions {
