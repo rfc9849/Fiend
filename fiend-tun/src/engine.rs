@@ -189,6 +189,15 @@ impl TunEngine {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
+    pub fn answer_dns(&self, query: &[u8]) -> Option<Vec<u8>> {
+        self.context
+            .dns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .answer(query, Instant::now())
+            .ok()
+    }
+
     pub async fn run<D: PacketIo>(&self, device: D) -> io::Result<()> {
         if self.running.swap(true, Ordering::AcqRel) {
             return Err(io::Error::new(

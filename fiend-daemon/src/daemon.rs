@@ -248,6 +248,10 @@ impl<P: Platform> Inner<P> {
             mtu: engine.mtu,
             ipv6: engine.ipv6,
             bypass_lan: engine.bypass_lan,
+            dns: {
+                let tun = tun.clone();
+                Arc::new(move |query: &[u8]| tun.answer_dns(query))
+            },
         };
         let opened = {
             let platform = self.platform.clone();

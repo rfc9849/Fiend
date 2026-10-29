@@ -7,18 +7,23 @@ pub mod commands;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
+pub mod local_dns;
+#[cfg(target_os = "macos")]
 pub mod macos;
 
 use fiend_core::net::ProtectSocket;
 use fiend_ipc::ConnectStep;
 use fiend_tun::PacketIo;
 
-#[derive(Clone, Debug)]
+pub type DnsAnswer = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
+
+#[derive(Clone)]
 pub struct NetworkRequest {
     pub server: SocketAddr,
     pub mtu: u16,
     pub ipv6: bool,
     pub bypass_lan: bool,
+    pub dns: DnsAnswer,
 }
 
 pub trait Platform: Send + Sync + 'static {

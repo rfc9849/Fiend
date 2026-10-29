@@ -283,6 +283,9 @@ async fn dns_is_local_and_fake_ip_opens_a_domain_lane() {
         panic!("A record required")
     };
     let target = SocketAddr::new(ip.0.into(), port);
+    let local = Message::from_vec(&engine.answer_dns(&query.to_vec().unwrap()).unwrap()).unwrap();
+    assert!(matches!(local.answers[0].data, RData::A(same) if same == ip));
+    assert!(engine.answer_dns(&[1]).is_none());
     let source = "10.0.0.2:30001".parse().unwrap();
     let next = tcp_handshake(&mut peer, source, target).await;
     peer.send(tcp_packet(

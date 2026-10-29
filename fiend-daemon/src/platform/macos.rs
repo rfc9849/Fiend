@@ -2,7 +2,7 @@
 //! socket protection, and DNS override through SCDynamicStore.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -21,12 +21,14 @@ use route_manager::{Route, RouteManager};
 use system_configuration::dynamic_store::{SCDynamicStore, SCDynamicStoreBuilder};
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
+use super::commands::{Step, SystemRunner, apply_steps, undo_all};
+use super::local_dns::LocalDns;
 use super::{NetworkRequest, Platform};
 use crate::journal::{Journal, JournalFile, RouteEntry};
 
 const TUN_V4: Ipv4Addr = Ipv4Addr::new(10, 42, 0, 2);
 const TUN_V6: Ipv6Addr = Ipv6Addr::new(0xfd42, 0x6669, 0x656e, 0x6400, 0, 0, 0, 2);
-const DNS_ADDRESS: &str = "198.18.0.1";
+const LOCAL_DNS: Ipv4Addr = Ipv4Addr::new(127, 42, 0, 53);
 const DNS_PATTERN: &str = "(State|Setup):/Network/Service/[^/]+/DNS";
 const MONITOR_PERIOD: Duration = Duration::from_secs(2);
 
@@ -44,10 +46,6 @@ impl MacPlatform {
     }
 }
 
-/// Routes that cover the address space without a route at `0.0.0.0` or `::`.
-/// A socket bound with `IP_BOUND_IF` to the primary interface has no scoped
-/// route, so the kernel looks up the default route by that key. A tunnel
-/// route at that key makes protected dials and scoped DNS queries fail.
 fn split_routes() -> Vec<(IpAddr, u8)> {
     let mut routes = Vec::with_capacity(16);
     for prefix in 1..=8u8 {
@@ -136,7 +134,7 @@ struct Dns {
 }
 
 fn ours() -> CFDictionary {
-    let servers = CFArray::from_CFTypes(&[CFString::new(DNS_ADDRESS)]);
+    let servers = CFArray::from_CFTypes(&[CFString::new(&LOCAL_DNS.to_string())]);
     CFDictionary::from_CFType_pairs(&[(CFString::new("ServerAddresses"), servers.as_CFType())])
         .to_untyped()
 }
@@ -218,6 +216,20 @@ fn delete_routes(journal: &Journal) {
     }
 }
 
+fn loopback_alias() -> Step {
+    let address = LOCAL_DNS.to_string();
+    Step {
+        apply: ["/sbin/ifconfig", "lo0", "alias", &address, "netmask", "255.255.255.255"]
+            .map(str::to_owned)
+            .to_vec(),
+        undo: Some(
+            ["/sbin/ifconfig", "lo0", "-alias", &address]
+                .map(str::to_owned)
+                .to_vec(),
+        ),
+    }
+}
+
 fn undo(journal: &Journal) {
     delete_routes(journal);
     if !journal.dns.is_empty() {
@@ -226,6 +238,7 @@ fn undo(journal: &Journal) {
             Err(error) => tracing::warn!(%error, "cannot restore the DNS servers"),
         }
     }
+    undo_all(journal, &mut SystemRunner);
 }
 
 pub struct MacGuard {
@@ -233,6 +246,7 @@ pub struct MacGuard {
     state: Arc<Mutex<Journal>>,
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
+    local_dns: Option<LocalDns>,
 }
 
 impl Drop for MacGuard {
@@ -241,6 +255,7 @@ impl Drop for MacGuard {
         if let Some(monitor) = self.monitor.take() {
             let _ = monitor.join();
         }
+        drop(self.local_dns.take());
         let journal = self
             .state
             .lock()
@@ -303,6 +318,7 @@ impl Platform for MacPlatform {
             state: state.clone(),
             stop: stop.clone(),
             monitor: None,
+            local_dns: None,
         };
 
         progress(ConnectStep::Routes);
@@ -321,6 +337,20 @@ impl Platform for MacPlatform {
         }
 
         progress(ConnectStep::Dns);
+        {
+            let mut journal = state.lock().unwrap_or_else(|error| error.into_inner());
+            apply_steps(
+                &[loopback_alias()],
+                &mut journal,
+                &self.journal,
+                &mut SystemRunner,
+            )?;
+        }
+        guard.local_dns = Some(LocalDns::start(
+            SocketAddr::new(LOCAL_DNS.into(), 53),
+            request.dns.clone(),
+            &tokio::runtime::Handle::try_current().map_err(io::Error::other)?,
+        )?);
         Dns::open()?.apply(&self.journal, &state)?;
 
         let journal_file = self.journal.clone();
