@@ -8,8 +8,8 @@ use fiend_daemon::peer::{PeerPolicy, SystemDirectory};
 use fiend_daemon::platform::NullPlatform;
 use fiend_daemon::{Daemon, LogBuffer, Store, bind_socket, serve};
 use fiend_ipc::{
-    Client, ClientError, ConnectStep, ErrorCode, Event, ProfileInput, Request, RuleKind, Settings,
-    TunnelState,
+    BackupData, Client, ClientError, ConnectStep, ErrorCode, Event, Profile, ProfileInput, Request,
+    RuleKind, Settings, TunnelState,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -278,6 +278,78 @@ async fn settings_change_marks_the_session_as_stale() {
         .unwrap();
     client.disconnect().await.unwrap();
     assert!(!client.status().await.unwrap().restart_required);
+}
+
+#[tokio::test]
+async fn backup_restore_replaces_profiles_and_settings() {
+    let fixture = Fixture::allowed("restore").await;
+    let client = fixture.client().await;
+    let old = client
+        .save_profile(input("Old", "127.0.0.1:1"))
+        .await
+        .unwrap();
+    let id = "ab".repeat(16);
+    let replacement = Profile {
+        id: id.clone(),
+        name: "Restored".into(),
+        server: "127.0.0.1:8443".into(),
+        secret: "cd".repeat(32),
+        template_json: TEMPLATE.into(),
+        tuning: Default::default(),
+    };
+    let settings = Settings {
+        active_profile: Some(id.clone()),
+        direct_rules: "domain:example.com\n".into(),
+        mtu: 1400,
+        ..Settings::default()
+    };
+    client
+        .request(Request::RestoreBackup {
+            data: BackupData {
+                profiles: vec![replacement.clone()],
+                settings: settings.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        client.list_profiles().await.unwrap(),
+        vec![replacement.clone()]
+    );
+    assert_eq!(client.settings().await.unwrap(), settings);
+    assert_ne!(old.id, replacement.id);
+}
+
+#[tokio::test]
+async fn backup_restore_refuses_invalid_ids_and_keeps_the_old_data() {
+    let fixture = Fixture::allowed("restore-bad").await;
+    let client = fixture.client().await;
+    let old = client
+        .save_profile(input("Old", "127.0.0.1:1"))
+        .await
+        .unwrap();
+    let bad = Profile {
+        id: "not-a-profile-id".into(),
+        name: "Bad".into(),
+        server: "127.0.0.1:8443".into(),
+        secret: "cd".repeat(32),
+        template_json: TEMPLATE.into(),
+        tuning: Default::default(),
+    };
+    assert_eq!(
+        code(
+            client
+                .request(Request::RestoreBackup {
+                    data: BackupData {
+                        profiles: vec![bad],
+                        settings: Settings::default(),
+                    },
+                })
+                .await
+        ),
+        ErrorCode::InvalidProfile
+    );
+    assert_eq!(client.list_profiles().await.unwrap(), vec![old]);
 }
 
 fn code<T>(result: Result<T, ClientError>) -> ErrorCode {

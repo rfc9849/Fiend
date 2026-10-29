@@ -1,5 +1,6 @@
 mod app;
 mod assets;
+mod backup;
 #[cfg(not(target_os = "macos"))]
 mod chrome;
 mod client;

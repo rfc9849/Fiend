@@ -105,6 +105,12 @@ pub const MAX_MTU: u16 = 9000;
 pub const DEFAULT_MTU: u16 = 1500;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupData {
+    pub profiles: Vec<Profile>,
+    pub settings: Settings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub active_profile: Option<String>,

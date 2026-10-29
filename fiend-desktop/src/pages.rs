@@ -1278,6 +1278,28 @@ impl AppView {
                     .text_color(p.muted)
                     .child("Your directly connected local network stays reachable. Reconnect to apply network changes."),
             )
+            .child(ui.group_title("Backup"))
+            .child(
+                ui.group().child(ui.setting_row(
+                    "Backup and restore",
+                    Some("Move profiles, settings, and rule lists to another computer. The file is encrypted with a password."),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            ui.compact_button("backup-start", "Back up", Some("data"), ButtonKind::Default)
+                                .disabled(!service_ready)
+                                .on_click(cx.listener(|this, _, window, cx| this.open_backup(window, cx))),
+                        )
+                        .child(
+                            ui.compact_button("restore-start", "Restore", Some("down"), ButtonKind::Ghost)
+                                .disabled(!service_ready)
+                                .on_click(cx.listener(|this, _, window, cx| this.open_restore(window, cx))),
+                        ),
+                    true,
+                )),
+            )
             .child(ui.group_title("Service"))
             .child(ui.group().child(ui.setting_row("Fiend system service", Some(&status), service_control, true)))
     }

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    IpcError, LogEntry, Profile, ProfileInput, RuleKind, RuleStats, Settings, Stats, Status,
-    Subscription,
+    BackupData, IpcError, LogEntry, Profile, ProfileInput, RuleKind, RuleStats, Settings, Stats,
+    Status, Subscription,
 };
 
 pub const PROTOCOL_MAJOR: u16 = 1;
@@ -47,6 +47,7 @@ pub enum Request {
     ShareLink { id: String },
     GetSettings,
     SetSettings { settings: Settings },
+    RestoreBackup { data: BackupData },
     SetRuleText { kind: RuleKind, text: String },
     AddSubscription { url: String, kind: RuleKind },
     RemoveSubscription { id: String },

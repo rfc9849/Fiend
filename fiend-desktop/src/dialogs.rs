@@ -28,6 +28,22 @@ pub enum ConfirmAction {
     UninstallService,
     DiscardProfile,
     DiscardRules,
+    RestoreBackup,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackupMode {
+    Backup,
+    Restore,
+}
+
+pub struct BackupForm {
+    pub mode: BackupMode,
+    pub password: Entity<InputState>,
+    pub confirm: Option<Entity<InputState>>,
+    pub bytes: Option<Vec<u8>>,
+    pub error: Option<String>,
+    pub busy: bool,
 }
 
 pub struct ProfileForm {
@@ -114,6 +130,7 @@ pub enum Dialog {
     Value(ValueForm),
     Confirm(ConfirmDialog),
     Service(ServiceDialog),
+    Backup(Box<BackupForm>),
 }
 
 pub fn kind_label(kind: RuleKind) -> &'static str {
@@ -345,6 +362,10 @@ impl AppView {
                     self.close_dialog(window, cx);
                 }
             }
+            ConfirmAction::RestoreBackup => {
+                self.pending_restore = None;
+                self.close_dialog(window, cx);
+            }
             _ => self.close_dialog(window, cx),
         }
     }
@@ -422,6 +443,45 @@ impl AppView {
             ConfirmAction::UninstallService => {
                 confirm.busy = true;
                 self.run_service_task(false, cx);
+            }
+            ConfirmAction::RestoreBackup => {
+                let Some(file) = self.pending_restore.take() else {
+                    confirm.busy = false;
+                    return;
+                };
+                confirm.busy = true;
+                let crate::backup::BackupFile { data, prefs, .. } = file;
+                self.call(
+                    Request::RestoreBackup { data },
+                    cx,
+                    move |this, result, cx| match result {
+                        Ok(_) => {
+                            this.prefs = prefs;
+                            this.prefs.save();
+                            let launch =
+                                crate::system::set_launch_at_login(this.prefs.launch_at_login);
+                            this.dialog = None;
+                            match launch {
+                                Ok(()) => this.show_toast(
+                                    "Backup restored. Rule lists refresh in the background.",
+                                    false,
+                                    cx,
+                                ),
+                                Err(error) => this.show_toast(
+                                    format!(
+                                        "Backup restored. Launch at login was not changed: {error}"
+                                    ),
+                                    true,
+                                    cx,
+                                ),
+                            }
+                        }
+                        Err(error) => {
+                            this.dialog = None;
+                            this.show_toast(error, true, cx);
+                        }
+                    },
+                );
             }
         }
     }
@@ -713,6 +773,7 @@ impl AppView {
             Some(Dialog::Value(_)) => self.submit_value(window, cx),
             Some(Dialog::Confirm(_)) => self.run_confirm(window, cx),
             Some(Dialog::Service(_)) => self.run_service_task(true, cx),
+            Some(Dialog::Backup(_)) => self.submit_backup(window, cx),
             _ => {}
         }
     }
@@ -968,6 +1029,212 @@ impl AppView {
                 }
             },
         );
+    }
+
+    pub fn open_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            return;
+        }
+        if !self.is_ready() {
+            self.show_toast("Start the Fiend service before you back up.", true, cx);
+            return;
+        }
+        let password = self.new_input("", "At least 8 characters", true, window, cx);
+        let confirm = self.new_input("", "Repeat the password", true, window, cx);
+        let focus = password.read(cx).focus_handle(cx);
+        self.menu = None;
+        self.dialog = Some(Dialog::Backup(Box::new(BackupForm {
+            mode: BackupMode::Backup,
+            password,
+            confirm: Some(confirm),
+            bytes: None,
+            error: None,
+            busy: false,
+        })));
+        window.defer(cx, move |window, cx| window.focus(&focus, cx));
+        cx.notify();
+    }
+
+    pub fn open_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog.is_some() {
+            return;
+        }
+        if !self.is_ready() {
+            self.show_toast("Start the Fiend service before you restore.", true, cx);
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Open Fiend backup")
+                .add_filter("Fiend backup", &["fiendbackup"])
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            let path = file.path().to_path_buf();
+            let bytes = cx
+                .background_spawn(async move { std::fs::read(path) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let bytes = match bytes {
+                    Ok(bytes) if bytes.len() <= crate::backup::MAX_FILE_BYTES => bytes,
+                    Ok(_) => {
+                        this.show_toast("The backup file is too large.", true, cx);
+                        return;
+                    }
+                    Err(error) => {
+                        this.show_toast(format!("Cannot read the backup: {error}"), true, cx);
+                        return;
+                    }
+                };
+                this.menu = None;
+                let password = this.new_input("", "Backup password", true, window, cx);
+                let focus = password.read(cx).focus_handle(cx);
+                this.dialog = Some(Dialog::Backup(Box::new(BackupForm {
+                    mode: BackupMode::Restore,
+                    password,
+                    confirm: None,
+                    bytes: Some(bytes),
+                    error: None,
+                    busy: false,
+                })));
+                window.defer(cx, move |window, cx| window.focus(&focus, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn submit_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Dialog::Backup(form)) = self.dialog.as_ref() else {
+            return;
+        };
+        if form.busy {
+            return;
+        }
+        let mode = form.mode;
+        let password = form.password.read(cx).value().to_string();
+        let confirm = form
+            .confirm
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string());
+        let bytes = form.bytes.clone();
+        if let Err(error) = crate::backup::check_password(&password) {
+            if let Some(Dialog::Backup(form)) = self.dialog.as_mut() {
+                form.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+        if mode == BackupMode::Backup && confirm.as_deref() != Some(password.as_str()) {
+            if let Some(Dialog::Backup(form)) = self.dialog.as_mut() {
+                form.error = Some("The passwords do not match.".to_owned());
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(Dialog::Backup(form)) = self.dialog.as_mut() {
+            form.busy = true;
+            form.error = None;
+        }
+        if mode == BackupMode::Backup {
+            let file = crate::backup::new_backup(
+                fiend_ipc::BackupData {
+                    profiles: self.model.profiles.clone(),
+                    settings: self.model.settings.clone(),
+                },
+                self.prefs.clone(),
+            );
+            self.save_backup(file, password, window, cx);
+        } else if let Some(bytes) = bytes {
+            self.restore_from_bytes(bytes, password, window, cx);
+        }
+    }
+
+    fn save_backup(
+        &mut self,
+        file: crate::backup::BackupFile,
+        password: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(target) = rfd::AsyncFileDialog::new()
+                .set_title("Save Fiend backup")
+                .set_file_name("fiend-backup.fiendbackup")
+                .add_filter("Fiend backup", &["fiendbackup"])
+                .save_file()
+                .await
+            else {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(Dialog::Backup(form)) = this.dialog.as_mut() {
+                        form.busy = false;
+                    }
+                    cx.notify();
+                });
+                return;
+            };
+            let path = target.path().to_path_buf();
+            let result = cx
+                .background_spawn(async move {
+                    let bytes = crate::backup::encode(&file, &password)?;
+                    crate::backup::write_file(&path, &bytes)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => {
+                    this.dialog = None;
+                    this.show_toast("Backup saved", false, cx);
+                }
+                Err(error) => {
+                    if let Some(Dialog::Backup(form)) = this.dialog.as_mut() {
+                        form.busy = false;
+                        form.error = Some(error);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn restore_from_bytes(
+        &mut self,
+        bytes: Vec<u8>,
+        password: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { crate::backup::decode(&bytes, &password) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(file) => {
+                    this.pending_restore = Some(file);
+                    this.dialog = None;
+                    this.open_confirm(
+                        "Restore this backup?",
+                        "This replaces all profiles, settings, and rule lists. The tunnel stops. Downloaded rule lists refresh after the restore.",
+                        "Restore",
+                        "Cancel",
+                        true,
+                        ConfirmAction::RestoreBackup,
+                        window,
+                        cx,
+                    );
+                }
+                Err(error) => {
+                    if let Some(Dialog::Backup(form)) = this.dialog.as_mut() {
+                        form.busy = false;
+                        form.error = Some(error);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn scan_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1822,6 +2089,56 @@ impl AppView {
                     } else {
                         "Reconnect to apply this setting."
                     }),
+                    content.into_any_element(),
+                    actions,
+                    false,
+                    cx,
+                )
+            }
+            Dialog::Backup(form) => {
+                let password =
+                    self.input_box(ui, &form.password, window, cx, form.error.is_some(), false);
+                let mut content = div().child(self.field(
+                    ui,
+                    "Password",
+                    password,
+                    None,
+                    Some(if form.mode == BackupMode::Backup {
+                        "At least 8 characters. You need this password to restore."
+                    } else {
+                        "The password that you used when you made the backup."
+                    }),
+                ));
+                if let Some(confirm) = form.confirm.as_ref() {
+                    let confirm = self.input_box(ui, confirm, window, cx, false, false);
+                    content = content.child(self.field(ui, "Repeat password", confirm, None, None));
+                }
+                content = content.when_some(form.error.clone(), |this, error| {
+                    this.child(div().text_size(px(11.)).text_color(p.danger).child(error))
+                });
+                let (title, description, primary) = match form.mode {
+                    BackupMode::Backup => (
+                        "Back up Fiend",
+                        "Save profiles, settings, and rule lists in one file. The file contains server secrets and is encrypted with your password.",
+                        "Choose file…",
+                    ),
+                    BackupMode::Restore => (
+                        "Restore Fiend",
+                        "The backup replaces all profiles, settings, and rule lists on this computer.",
+                        "Continue",
+                    ),
+                };
+                let actions = self.actions(
+                    ui,
+                    None,
+                    "Cancel",
+                    Some((primary, ButtonKind::Primary, form.busy)),
+                    cx,
+                );
+                self.modal(
+                    ui,
+                    title,
+                    Some(description),
                     content.into_any_element(),
                     actions,
                     false,

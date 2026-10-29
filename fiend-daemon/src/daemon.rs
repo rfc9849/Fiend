@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use fiend_ipc::{
-    ConnectStep, DEFAULT_MTU, ErrorCode, Event, IpcError, MAX_MTU, MIN_MTU, Profile, ProfileInput,
-    Reply, Request, RuleKind, RuleStats, Settings, Stats, Status, Subscription,
+    BackupData, ConnectStep, DEFAULT_MTU, ErrorCode, Event, IpcError, MAX_MTU, MIN_MTU, Profile,
+    ProfileInput, Reply, Request, RuleKind, RuleStats, Settings, Stats, Status, Subscription,
 };
 use fiend_tun::TunEngine;
 use tokio::sync::broadcast;
@@ -84,6 +85,24 @@ fn from_app(error: fiend_app::AppError) -> IpcError {
 fn internal(error: impl std::fmt::Display) -> IpcError {
     tracing::error!(%error, "internal error");
     IpcError::new(ErrorCode::Internal, error.to_string())
+}
+
+fn validate_settings(settings: &Settings) -> Result<()> {
+    if !(MIN_MTU..=MAX_MTU).contains(&settings.mtu) {
+        return Err(error(
+            ErrorCode::InvalidRequest,
+            format!("MTU must be from {MIN_MTU} to {MAX_MTU} (default {DEFAULT_MTU})"),
+        ));
+    }
+    fiend_app::validate_rules(&settings.direct_rules, true).map_err(from_app)?;
+    fiend_app::validate_rules(&settings.block_rules, false).map_err(from_app)?;
+    fiend_app::validate_rules(&settings.proxy_rules, true).map_err(from_app)?;
+    fiend_app::validate_resolver(&settings.direct_resolver).map_err(from_app)?;
+    Ok(())
+}
+
+fn is_backup_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn app_kind(kind: RuleKind) -> fiend_app::RuleKind {
@@ -402,6 +421,7 @@ impl<P: Platform> Daemon<P> {
             Request::ShareLink { id } => self.share_link(&id),
             Request::GetSettings => Ok(Reply::Settings(lock(&self.inner.store).settings().clone())),
             Request::SetSettings { settings } => self.set_settings(settings),
+            Request::RestoreBackup { data } => self.restore_backup(data).await,
             Request::SetRuleText { kind, text } => self.set_rule_text(kind, text),
             Request::AddSubscription { url, kind } => self.add_subscription(url, kind).await,
             Request::RemoveSubscription { id } => self.remove_subscription(&id).await,
@@ -599,16 +619,7 @@ impl<P: Platform> Daemon<P> {
     }
 
     fn set_settings(&self, mut settings: Settings) -> Result<Reply> {
-        if !(MIN_MTU..=MAX_MTU).contains(&settings.mtu) {
-            return Err(error(
-                ErrorCode::InvalidRequest,
-                format!("MTU must be from {MIN_MTU} to {MAX_MTU} (default {DEFAULT_MTU})"),
-            ));
-        }
-        fiend_app::validate_rules(&settings.direct_rules, true).map_err(from_app)?;
-        fiend_app::validate_rules(&settings.block_rules, false).map_err(from_app)?;
-        fiend_app::validate_rules(&settings.proxy_rules, true).map_err(from_app)?;
-        fiend_app::validate_resolver(&settings.direct_resolver).map_err(from_app)?;
+        validate_settings(&settings)?;
         let stored = {
             let mut store = lock(&self.inner.store);
             if let Some(id) = &settings.active_profile
@@ -625,6 +636,110 @@ impl<P: Platform> Daemon<P> {
         self.inner.emit(Event::Settings(stored.clone()));
         self.inner.emit_state();
         Ok(Reply::Settings(stored))
+    }
+
+    async fn restore_backup(&self, mut data: BackupData) -> Result<Reply> {
+        if data.profiles.len() > MAX_PROFILES {
+            return Err(error(
+                ErrorCode::InvalidRequest,
+                format!("The backup has more than {MAX_PROFILES} profiles"),
+            ));
+        }
+        let mut profile_ids = HashSet::new();
+        for profile in &data.profiles {
+            if !is_backup_id(&profile.id) {
+                return Err(error(
+                    ErrorCode::InvalidProfile,
+                    "The backup contains an invalid profile ID",
+                ));
+            }
+            if !profile_ids.insert(profile.id.clone()) {
+                return Err(error(
+                    ErrorCode::InvalidProfile,
+                    "The backup contains duplicate profiles",
+                ));
+            }
+            profile.tuning.validate().map_err(|reason| {
+                error(
+                    ErrorCode::InvalidProfile,
+                    format!("{}: {reason}", profile.name),
+                )
+            })?;
+            fiend_app::validate_profile(app_profile(profile)).map_err(from_app)?;
+        }
+        if data.settings.subscriptions.len() > MAX_SUBSCRIPTIONS {
+            return Err(error(
+                ErrorCode::InvalidRequest,
+                format!("The backup has more than {MAX_SUBSCRIPTIONS} subscriptions"),
+            ));
+        }
+        let mut subscription_ids = HashSet::new();
+        for subscription in &mut data.settings.subscriptions {
+            if !is_backup_id(&subscription.id) {
+                return Err(error(
+                    ErrorCode::InvalidRequest,
+                    "The backup contains an invalid subscription ID",
+                ));
+            }
+            if !subscription_ids.insert(subscription.id.clone()) {
+                return Err(error(
+                    ErrorCode::InvalidRequest,
+                    "The backup contains duplicate subscriptions",
+                ));
+            }
+            subscription.url =
+                fiend_app::subscription::validate_url(&subscription.url).map_err(from_app)?;
+            if !self
+                .inner
+                .allow_local_urls
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                check_subscription_host(&subscription.url)
+                    .map_err(|reason| error(ErrorCode::InvalidRules, reason))?;
+            }
+            subscription.updated_at_ms = 0;
+            subscription.entries = 0;
+            subscription.error = None;
+        }
+        validate_settings(&data.settings)?;
+        if let Some(id) = &data.settings.active_profile
+            && !profile_ids.contains(id)
+        {
+            return Err(error(
+                ErrorCode::NotFound,
+                "The backup points at a missing active profile",
+            ));
+        }
+        self.disconnect().await?;
+        let subscriptions = self.inner.subscriptions.lock().await;
+        let old_rule_paths = {
+            let store = lock(&self.inner.store);
+            store
+                .settings()
+                .subscriptions
+                .iter()
+                .map(|subscription| store.rule_path(&subscription.id))
+                .collect::<Vec<_>>()
+        };
+        {
+            let mut store = lock(&self.inner.store);
+            store
+                .replace(data.profiles, data.settings)
+                .map_err(internal)?;
+        }
+        for path in old_rule_paths {
+            if let Err(error) = tokio::fs::remove_file(&path).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(%error, path = %path.display(), "cannot remove an old rule list");
+            }
+        }
+        drop(subscriptions);
+        self.inner.emit(Event::ProfilesChanged);
+        self.inner.emit_settings();
+        self.inner.emit_state();
+        self.spawn_refresh_stale();
+        Ok(Reply::Ok)
     }
 
     fn set_rule_text(&self, kind: RuleKind, text: String) -> Result<Reply> {

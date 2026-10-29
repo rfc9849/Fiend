@@ -156,6 +156,17 @@ impl Store {
         }
         Ok(result)
     }
+
+    pub fn replace(&mut self, profiles: Vec<Profile>, settings: Settings) -> io::Result<()> {
+        let previous_profiles = std::mem::replace(&mut self.profiles, profiles);
+        let previous_settings = std::mem::replace(&mut self.settings, settings);
+        if let Err(error) = self.save_profiles().and_then(|_| self.save_settings()) {
+            self.profiles = previous_profiles;
+            self.settings = previous_settings;
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -226,6 +237,34 @@ mod tests {
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&dir.join("profiles.json")), 0o600);
         assert_eq!(mode(&dir.join("settings.json")), 0o600);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_rewrites_profiles_and_settings() {
+        let dir = directory("replace");
+        let mut store = Store::open(&dir).unwrap();
+        let old = store.upsert_profile(input("Old")).unwrap().unwrap();
+        let replacement = Profile {
+            id: "ab".repeat(16),
+            name: "Restored".into(),
+            server: "127.0.0.1:8443".into(),
+            secret: "cd".repeat(32),
+            template_json: "{}".into(),
+            tuning: Default::default(),
+        };
+        let settings = Settings {
+            active_profile: Some(replacement.id.clone()),
+            direct_rules: "domain:example.com\n".into(),
+            ..Settings::default()
+        };
+        store
+            .replace(vec![replacement.clone()], settings.clone())
+            .unwrap();
+        let reopened = Store::open(&dir).unwrap();
+        assert_eq!(reopened.profiles(), std::slice::from_ref(&replacement));
+        assert_eq!(reopened.settings(), &settings);
+        assert_ne!(old.id, replacement.id);
         fs::remove_dir_all(dir).unwrap();
     }
 

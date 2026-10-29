@@ -16,6 +16,7 @@ pub use message::{
     ServerMessage,
 };
 pub use types::{
-    ConnectStep, DEFAULT_MTU, ErrorCode, IpcError, LogEntry, LogLevel, MAX_MTU, MIN_MTU, Profile,
-    ProfileInput, RuleKind, RuleStats, Settings, Stats, Status, Subscription, Tuning, TunnelState,
+    BackupData, ConnectStep, DEFAULT_MTU, ErrorCode, IpcError, LogEntry, LogLevel, MAX_MTU,
+    MIN_MTU, Profile, ProfileInput, RuleKind, RuleStats, Settings, Stats, Status, Subscription,
+    Tuning, TunnelState,
 };

@@ -106,6 +106,7 @@ pub struct AppView {
     pub dialog_focus: FocusHandle,
     pub now_ms: u64,
     pub service_outdated: bool,
+    pub pending_restore: Option<crate::backup::BackupFile>,
 }
 
 impl AppView {
@@ -171,6 +172,7 @@ impl AppView {
             dialog_focus: cx.focus_handle(),
             now_ms: format::now_ms(),
             service_outdated: crate::service::needs_update(),
+            pending_restore: None,
         }
     }
 
