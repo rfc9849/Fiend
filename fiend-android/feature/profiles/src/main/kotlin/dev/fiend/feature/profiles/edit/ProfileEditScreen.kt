@@ -1,6 +1,10 @@
 package dev.fiend.feature.profiles.edit
 
+import android.content.Context
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +40,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -44,6 +49,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
@@ -54,13 +61,25 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.fiend.core.designsystem.component.FiendListDefaults
 import dev.fiend.core.designsystem.component.GroupHeader
 import dev.fiend.core.designsystem.icon.FiendIcons
+import dev.fiend.core.model.FingerprintTemplate
 import dev.fiend.feature.profiles.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 internal fun ProfileEditRoute(viewModel: ProfileEditViewModel, onBack: () -> Unit) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     LaunchedEffect(viewModel) { viewModel.saved.collect { onBack() } }
-    ProfileEditScreen(state = state, onChange = viewModel::update, onSave = viewModel::save, onClose = onBack)
+    ProfileEditScreen(
+        state = state,
+        onChange = viewModel::update,
+        onSave = viewModel::save,
+        onClose = onBack,
+        onSelectTemplate = viewModel::selectTemplate,
+        onTemplateFile = viewModel::loadTemplate,
+        onTemplateFileFailed = viewModel::templateFileFailed,
+    )
 }
 
 @Composable
@@ -69,6 +88,9 @@ internal fun ProfileEditScreen(
     onChange: ((ProfileForm) -> ProfileForm) -> Unit,
     onSave: () -> Unit,
     onClose: () -> Unit,
+    onSelectTemplate: (FingerprintTemplate) -> Unit,
+    onTemplateFile: (ByteArray) -> Unit,
+    onTemplateFileFailed: (String) -> Unit,
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var confirmDiscard by rememberSaveable { mutableStateOf(false) }
@@ -157,7 +179,7 @@ internal fun ProfileEditScreen(
                     },
                 )
                 GroupHeader(stringResource(R.string.edit_group_fingerprint))
-                TemplatePicker(state, onChange)
+                TemplatePicker(state, onSelectTemplate, onTemplateFile, onTemplateFileFailed)
 
                 AdvancedHeader(open = advancedOpen, onToggle = { advancedOpen = !advancedOpen })
                 AnimatedVisibility(visible = advancedOpen) {
@@ -254,18 +276,34 @@ private fun NumberField(value: String, onValueChange: (String) -> Unit, label: I
 }
 
 @Composable
-private fun TemplatePicker(state: ProfileEditUiState, onChange: ((ProfileForm) -> ProfileForm) -> Unit) {
+private fun TemplatePicker(
+    state: ProfileEditUiState,
+    onSelect: (FingerprintTemplate) -> Unit,
+    onFile: (ByteArray) -> Unit,
+    onFileFailed: (String) -> Unit,
+) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val selected = state.templates.firstOrNull { it.id == state.form.templateId }
+    val context = LocalContext.current
+    val resources = LocalResources.current
+    val scope = rememberCoroutineScope()
+    val openFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            runCatching { withContext(Dispatchers.IO) { readTemplateFile(context, uri) } }
+                .onSuccess(onFile)
+                .onFailure { onFileFailed(resources.getString(R.string.edit_template_read_failed)) }
+        }
+    }
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
         OutlinedTextField(
-            value = selected?.let { "${it.name} · ${it.platform}" }.orEmpty(),
+            value = selected?.label.orEmpty(),
             onValueChange = {},
             readOnly = true,
             label = { Text(stringResource(R.string.edit_template)) },
             leadingIcon = { Icon(FiendIcons.Fingerprint, contentDescription = null) },
             trailingIcon = { Icon(FiendIcons.ExpandMore, contentDescription = null, modifier = Modifier.rotate(if (expanded) 180f else 0f)) },
-            supportingText = { Text(stringResource(R.string.edit_template_hint)) },
+            isError = state.templateError != null,
+            supportingText = { Text(state.templateError ?: stringResource(R.string.edit_template_hint)) },
             singleLine = true,
             shape = MaterialTheme.shapes.large,
             modifier = Modifier
@@ -275,7 +313,7 @@ private fun TemplatePicker(state: ProfileEditUiState, onChange: ((ProfileForm) -
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             state.templates.forEach { template ->
                 DropdownMenuItem(
-                    text = { Text("${template.name} · ${template.platform}") },
+                    text = { Text(template.label) },
                     leadingIcon = if (template.id == state.form.templateId) {
                         { Icon(FiendIcons.Check, contentDescription = null) }
                     } else {
@@ -283,13 +321,35 @@ private fun TemplatePicker(state: ProfileEditUiState, onChange: ((ProfileForm) -
                     },
                     onClick = {
                         expanded = false
-                        onChange { it.copy(templateId = template.id) }
+                        onSelect(template)
                     },
                 )
             }
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.edit_template_file)) },
+                leadingIcon = { Icon(FiendIcons.UploadFile, contentDescription = null) },
+                onClick = {
+                    expanded = false
+                    openFile.launch(arrayOf("*/*"))
+                },
+            )
         }
     }
 }
+
+private fun readTemplateFile(context: Context, uri: Uri): ByteArray = context.contentResolver.openInputStream(uri)?.use { input ->
+    val bytes = ByteArray(MAX_TEMPLATE_FILE + 1)
+    var used = 0
+    while (used < bytes.size) {
+        val size = input.read(bytes, used, bytes.size - used)
+        if (size < 0) break
+        used += size
+    }
+    require(used <= MAX_TEMPLATE_FILE) { "Template file is too large" }
+    bytes.copyOf(used)
+} ?: error("Cannot open the template file")
+
+private const val MAX_TEMPLATE_FILE = 131072
 
 @Composable
 private fun AdvancedHeader(open: Boolean, onToggle: () -> Unit) {

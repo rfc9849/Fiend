@@ -181,7 +181,7 @@ internal fun ProfileDetailScreen(
                 Spacer(Modifier.height(24.dp))
                 ServerGroup(
                     profile = profile,
-                    templateLabel = state.template?.let { "${it.name} · ${it.platform}" } ?: profile.templateId,
+                    templateLabel = state.template?.label ?: profile.templateId,
                     secretVisible = secretVisible,
                     onToggleSecret = { secretVisible = !secretVisible },
                 )

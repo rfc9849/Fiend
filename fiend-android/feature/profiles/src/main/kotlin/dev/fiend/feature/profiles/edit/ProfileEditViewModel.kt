@@ -10,6 +10,7 @@ import dev.fiend.core.data.ProfileRepository
 import dev.fiend.core.model.FingerprintTemplate
 import dev.fiend.core.model.Profile
 import dev.fiend.core.model.Tuning
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class Field { Name, Host, Port, Secret, Handshake, Connections, UdpIdle, UdpKeepalive }
 
@@ -29,6 +31,7 @@ data class ProfileForm(
     val port: String = "443",
     val secret: String = "",
     val templateId: String = "",
+    val templateJson: String? = null,
     val handshake: String = Tuning().handshakeTimeoutMs.toString(),
     val connections: String = Tuning().maxConnections.toString(),
     val udpIdle: String = Tuning().udpIdleMs.toString(),
@@ -44,6 +47,7 @@ data class ProfileEditUiState(
     val templates: List<FingerprintTemplate> = emptyList(),
     val saving: Boolean = false,
     val saveError: String? = null,
+    val templateError: String? = null,
 ) {
     val dirty: Boolean get() = form != initial
 }
@@ -71,7 +75,7 @@ class ProfileEditViewModel @AssistedInject constructor(
         viewModelScope.launch {
             val profile = profileId?.let { repository.profile(it).first() }
             original = profile
-            val form = profile?.toForm() ?: ProfileForm(templateId = repository.templates.first().id)
+            val form = profile?.toForm() ?: repository.templates.first().let { ProfileForm(templateId = it.id, templateJson = it.templateJson) }
             state.update { it.copy(loaded = true, form = form, initial = form) }
         }
     }
@@ -81,6 +85,33 @@ class ProfileEditViewModel @AssistedInject constructor(
             val form = transform(current.form)
             current.copy(form = form, errors = if (current.errors.isEmpty()) emptyMap() else validate(form))
         }
+    }
+
+    fun selectTemplate(template: FingerprintTemplate) {
+        state.update { it.copy(form = it.form.copy(templateId = template.id, templateJson = template.templateJson), templateError = null) }
+    }
+
+    fun loadTemplate(data: ByteArray) {
+        viewModelScope.launch {
+            try {
+                val template = withContext(Dispatchers.Default) { repository.loadTemplate(data) }
+                state.update { current ->
+                    val templates = if (current.templates.any { it.id == template.id }) current.templates else current.templates + template
+                    current.copy(
+                        templates = templates,
+                        form = current.form.copy(templateId = template.id, templateJson = template.templateJson),
+                        templateError = null,
+                    )
+                }
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                templateFileFailed(error.message ?: "The file is not a TLS template")
+            }
+        }
+    }
+
+    fun templateFileFailed(message: String) {
+        state.update { it.copy(templateError = message) }
     }
 
     fun save() {
@@ -102,6 +133,7 @@ class ProfileEditViewModel @AssistedInject constructor(
                     port = f.port.toInt(),
                     secret = f.secret.trim().lowercase(),
                     templateId = f.templateId,
+                    templateJson = f.templateJson ?: base.templateJson,
                     tuning = Tuning(
                         handshakeTimeoutMs = f.handshake.toInt(),
                         maxConnections = f.connections.toInt(),
@@ -145,6 +177,7 @@ class ProfileEditViewModel @AssistedInject constructor(
         port = port.toString(),
         secret = secret,
         templateId = templateId,
+        templateJson = templateJson,
         handshake = tuning.handshakeTimeoutMs.toString(),
         connections = tuning.maxConnections.toString(),
         udpIdle = tuning.udpIdleMs.toString(),

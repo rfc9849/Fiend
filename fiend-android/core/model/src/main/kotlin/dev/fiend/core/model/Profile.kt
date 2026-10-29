@@ -30,4 +30,8 @@ data class FingerprintTemplate(
     val id: String,
     val name: String,
     val platform: String,
-)
+    val domain: String = "",
+    val templateJson: String? = null,
+) {
+    val label: String get() = "$name · ${domain.ifBlank { platform }}"
+}

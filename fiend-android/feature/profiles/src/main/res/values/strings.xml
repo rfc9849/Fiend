@@ -82,6 +82,8 @@
     <string name="edit_secret_hint">64 hexadecimal characters</string>
     <string name="edit_template">Browser template</string>
     <string name="edit_template_hint">The server sees a TLS handshake that looks like this browser</string>
+    <string name="edit_template_file">Load from file…</string>
+    <string name="edit_template_read_failed">Cannot read the file</string>
     <string name="edit_handshake">Handshake timeout, ms</string>
     <string name="edit_connections">Connection limit</string>
     <string name="edit_udp_idle">UDP idle, ms</string>

@@ -38,6 +38,8 @@ interface ProfileRepository {
     suspend fun measureLatency(id: String): Int
 
     fun shareLink(profile: Profile): String
+
+    fun loadTemplate(data: ByteArray): FingerprintTemplate = error("Template files are not supported")
 }
 
 interface TunnelController {

@@ -5,10 +5,13 @@ import dev.fiend.core.data.storage.PreferencesStore
 import dev.fiend.core.data.storage.ProfileDatabase
 import dev.fiend.core.data.storage.ProfileEntity
 import dev.fiend.core.data.storage.SecretCipher
+import dev.fiend.core.engine.bindings.FiendException
 import dev.fiend.core.engine.bindings.bundledTemplates
+import dev.fiend.core.engine.bindings.loadTemplate as nativeLoadTemplate
 import dev.fiend.core.engine.bindings.makeShareLink
 import dev.fiend.core.engine.bindings.measureLatency as nativeLatency
 import dev.fiend.core.engine.bindings.parseShareLink
+import dev.fiend.core.engine.bindings.templateDomain
 import dev.fiend.core.engine.bindings.validateProfile
 import dev.fiend.core.engine.engineConfig
 import dev.fiend.core.model.FingerprintTemplate
@@ -48,8 +51,10 @@ internal class RoomProfileRepository @Inject constructor(
     override val profiles = mutableProfiles.asStateFlow()
     override val activeProfileId = active.asStateFlow()
     private val bundled = bundledTemplates()
-    override val templates: List<FingerprintTemplate> get() = bundled.map { FingerprintTemplate(it.id, it.name, it.platform) } +
-        profiles.value.filter { it.templateId.startsWith("custom-") }.distinctBy { it.templateId }.map { FingerprintTemplate(it.templateId, "Imported template", "TLS") }
+    override val templates: List<FingerprintTemplate> get() = bundled.map { FingerprintTemplate(it.id, it.name, it.platform, it.domain, it.templateJson) } +
+        profiles.value.filter { it.templateId.startsWith(CUSTOM) }.distinctBy { it.templateId }.map {
+            FingerprintTemplate(it.templateId, IMPORTED, "TLS", it.templateJson?.let(::templateDomain).orEmpty(), it.templateJson)
+        }
     private val profilesReady = CompletableDeferred<Unit>()
     private val activeReady = CompletableDeferred<Unit>()
     private val writes = Mutex()
@@ -118,11 +123,7 @@ internal class RoomProfileRepository @Inject constructor(
             val native = parseShareLink(link.trim())
             val address = URI("tcp://${native.server}")
             require(address.userInfo == null && address.host != null && address.port in 1..65535) { "Server address is not valid" }
-            val capture = JSONObject(native.templateJson)
-            val templateId = bundled.firstOrNull {
-                val value = JSONObject(it.templateJson)
-                value.getString("raw") == capture.getString("raw") && value.optInt("record_max", 16384) == capture.optInt("record_max", 16384)
-            }?.id ?: "custom-" + MessageDigest.getInstance("SHA-256").digest(native.templateJson.toByteArray()).joinToString("") { "%02x".format(it) }
+            val templateId = templateId(native.templateJson)
             upsert(Profile("", native.name, address.host.removeSurrounding("[", "]"), address.port, native.secret, templateId, templateJson = native.templateJson))
         }
     }
@@ -136,9 +137,29 @@ internal class RoomProfileRepository @Inject constructor(
 
     override fun shareLink(profile: Profile): String = makeShareLink(profile.engineConfig())
 
+    override fun loadTemplate(data: ByteArray): FingerprintTemplate {
+        val loaded = try { nativeLoadTemplate(data) } catch (error: FiendException.InvalidProfile) { throw IllegalArgumentException(error.reason, error) }
+        val id = templateId(loaded.templateJson)
+        return bundled.firstOrNull { it.id == id }?.let { FingerprintTemplate(it.id, it.name, it.platform, it.domain, it.templateJson) }
+            ?: FingerprintTemplate(id, IMPORTED, "TLS", loaded.domain, loaded.templateJson)
+    }
+
+    private fun templateId(templateJson: String): String {
+        val capture = JSONObject(templateJson)
+        return bundled.firstOrNull {
+            val value = JSONObject(it.templateJson)
+            value.getString("raw") == capture.getString("raw") && value.optInt("record_max", 16384) == capture.optInt("record_max", 16384)
+        }?.id ?: CUSTOM + MessageDigest.getInstance("SHA-256").digest(templateJson.toByteArray()).joinToString("") { "%02x".format(it) }
+    }
+
     private fun Profile.entity() = ProfileEntity(id, name, host, port, cipher.encrypt(id, secret), templateId, templateJson,
         countryCode, latencyMs, lastConnectedAt, tuning.handshakeTimeoutMs, tuning.maxConnections, tuning.udpIdleMs, tuning.udpKeepaliveMs, tuning.maxUdpFlows)
     private fun ProfileEntity.model() = Profile(id, name, host, port, cipher.decrypt(id, encryptedSecret), templateId,
         templateJson = templateJson, countryCode = countryCode, latencyMs = latencyMs, lastConnectedAt = lastConnectedAt,
         tuning = Tuning(handshakeTimeoutMs, maxConnections, udpIdleMs, udpKeepaliveMs, maxUdpFlows))
+
+    private companion object {
+        const val CUSTOM = "custom-"
+        const val IMPORTED = "Imported"
+    }
 }
