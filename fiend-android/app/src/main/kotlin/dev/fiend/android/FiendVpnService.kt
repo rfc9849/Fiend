@@ -59,7 +59,7 @@ class FiendVpnService : VpnService() {
     private var connecting: Job? = null
     @Volatile private var destroyed = false
     private var currentProfileId: String? = null
-    private var profileName = "fiend"
+    private var profileName = "Fiend"
     @Volatile private var underlying: Network? = null
     private var watchingNetwork = false
     private val networks = linkedSetOf<Network>()

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">fiend</string>
+    <string name="app_name">Fiend</string>
     <string name="nav_home">Home</string>
     <string name="nav_profiles">Profiles</string>
     <string name="nav_settings">Settings</string>
