@@ -82,14 +82,12 @@ fn bound_interface(bound: &AtomicU32) -> io::Result<NonZeroU32> {
     if let Some(index) = NonZeroU32::new(bound.load(Ordering::Acquire)) {
         return Ok(index);
     }
-    let index = NonZeroU32::new(default_interface(None)?).ok_or_else(|| {
+    NonZeroU32::new(default_interface(None)?).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotConnected,
             "There is no network connection",
         )
-    })?;
-    bound.store(index.get(), Ordering::Release);
-    Ok(index)
+    })
 }
 
 fn protect(bound: Arc<AtomicU32>) -> ProtectSocket {
@@ -247,6 +245,7 @@ pub struct MacGuard {
     stop: Arc<AtomicBool>,
     monitor: Option<JoinHandle<()>>,
     local_dns: Option<LocalDns>,
+    bound: Arc<AtomicU32>,
 }
 
 impl Drop for MacGuard {
@@ -265,6 +264,7 @@ impl Drop for MacGuard {
         if let Err(error) = self.file.clear() {
             tracing::warn!(%error, "cannot remove the network journal");
         }
+        self.bound.store(0, Ordering::Release);
         tracing::info!("network settings restored");
     }
 }
@@ -302,7 +302,6 @@ impl Platform for MacPlatform {
     ) -> io::Result<(AsyncDevice, MacGuard)> {
         self.recover()?;
         let primary = default_interface(None)?;
-        self.bound_interface.store(primary, Ordering::Release);
 
         let device = DeviceBuilder::new()
             .ipv4(TUN_V4, 32, None)
@@ -319,7 +318,9 @@ impl Platform for MacPlatform {
             stop: stop.clone(),
             monitor: None,
             local_dns: None,
+            bound: self.bound_interface.clone(),
         };
+        self.bound_interface.store(primary, Ordering::Release);
 
         progress(ConnectStep::Routes);
         let mut manager = RouteManager::new()?;
@@ -458,9 +459,9 @@ mod tests {
         )
         .unwrap();
         match default_interface(None) {
-            Ok(index) => {
+            Ok(_) => {
                 hook(&socket).unwrap();
-                assert_eq!(bound.load(Ordering::Acquire), index);
+                assert_eq!(bound.load(Ordering::Acquire), 0);
             }
             Err(_) => assert!(hook(&socket).is_err()),
         }
