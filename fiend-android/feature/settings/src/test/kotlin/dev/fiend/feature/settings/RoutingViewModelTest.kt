@@ -71,13 +71,12 @@ class RoutingViewModelTest {
 
     @Test
     fun routingScreenShowsSavedCountsAndValues() = runBlocking {
-        val settings = FakeSettings(AppSettings(directRules = "a.example\nip:1.0.0.0/8", blockRules = "ads.example", mtu = 1400, directResolver = "9.9.9.9", directMode = true))
+        val settings = FakeSettings(AppSettings(directRules = "a.example\nip:1.0.0.0/8", blockRules = "ads.example", mtu = 1400, directResolver = "9.9.9.9"))
         val state = routing(RoutingViewModel(settings, FakeRules(), FakeSubscriptions())) { it.loaded && it.directRules == 2 }
         assertEquals(2, state.directRules)
         assertEquals(1, state.blockRules)
         assertEquals(1400, state.mtu)
         assertEquals("9.9.9.9", state.directResolver)
-        assertTrue(state.directMode)
     }
 
     @Test
@@ -93,10 +92,8 @@ class RoutingViewModelTest {
         assertEquals(AppSettings.DEFAULT_MTU, settings.settings.value.mtu)
         assertNull(model.setResolver(" 9.9.9.9 "))
         assertNull(model.setMtu("1280"))
-        model.setDirectMode(true)
         assertEquals("9.9.9.9", settings.settings.value.directResolver)
         assertEquals(1280, settings.settings.value.mtu)
-        assertTrue(settings.settings.value.directMode)
     }
 
     @Test

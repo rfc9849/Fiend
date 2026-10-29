@@ -27,7 +27,6 @@ data class AppSettings(
     val connectOnStart: Boolean = false,
     val bypassLan: Boolean = true,
     val ipv6: Boolean = true,
-    val remoteDns: Boolean = true,
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.AllApps,
     val splitTunnelApps: Set<String> = emptySet(),
     val directRules: String = "",
@@ -35,7 +34,6 @@ data class AppSettings(
     val proxyRules: String = "",
     val subscriptions: List<RuleSubscription> = emptyList(),
     val directResolver: String = "",
-    val directMode: Boolean = false,
     val mtu: Int = DEFAULT_MTU,
 ) {
     companion object {

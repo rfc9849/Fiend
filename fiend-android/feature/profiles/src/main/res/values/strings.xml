@@ -15,8 +15,6 @@
     <string name="profiles_add_paste">Paste link</string>
     <string name="profiles_add_file">Import from file</string>
     <string name="profiles_add_manual">Enter manually</string>
-    <string name="profiles_scan_unavailable">Camera scanner is not part of the preview build</string>
-    <string name="profiles_file_unavailable">File import is not part of the preview build</string>
     <string name="profiles_paste_title">Paste a link</string>
     <string name="profiles_paste_body">Paste the fiend:// link that you got from your server owner.</string>
     <string name="profiles_paste_label">Link</string>

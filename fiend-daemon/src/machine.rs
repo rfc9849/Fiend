@@ -4,7 +4,6 @@ use fiend_ipc::{ConnectStep, Profile, RuleKind, Stats, TunnelState};
 pub struct EngineSettings {
     pub bypass_lan: bool,
     pub ipv6: bool,
-    pub direct_mode: bool,
     pub mtu: u16,
     pub direct_resolver: String,
     pub direct_rules: String,
@@ -170,7 +169,6 @@ mod tests {
             engine: EngineSettings {
                 bypass_lan: true,
                 ipv6: true,
-                direct_mode: false,
                 mtu: 1500,
                 direct_resolver: String::new(),
                 direct_rules: String::new(),

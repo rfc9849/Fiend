@@ -53,7 +53,6 @@ internal class RealSettingsRepository @Inject constructor(
             values[CONNECT] = next.connectOnStart
             values[LAN] = next.bypassLan
             values[IPV6] = next.ipv6
-            values[REMOTE_DNS] = true
             values[SPLIT_MODE] = next.splitTunnelMode.name
             values[SPLIT_APPS] = next.splitTunnelApps
             values[DIRECT_RULES] = next.directRules
@@ -61,7 +60,6 @@ internal class RealSettingsRepository @Inject constructor(
             values[PROXY_RULES] = next.proxyRules
             values[SUBSCRIPTIONS] = encodeSubscriptions(next.subscriptions)
             values[DIRECT_RESOLVER] = next.directResolver
-            values[DIRECT_MODE] = next.directMode
             values[MTU] = next.mtu.coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU)
         }
     }
@@ -72,7 +70,6 @@ internal class RealSettingsRepository @Inject constructor(
         connectOnStart = values[CONNECT] ?: false,
         bypassLan = values[LAN] ?: true,
         ipv6 = values[IPV6] ?: true,
-        remoteDns = true,
         splitTunnelMode = SplitTunnelMode.entries.firstOrNull { it.name == values[SPLIT_MODE] } ?: SplitTunnelMode.AllApps,
         splitTunnelApps = values[SPLIT_APPS] ?: emptySet(),
         directRules = values[DIRECT_RULES] ?: "",
@@ -80,7 +77,6 @@ internal class RealSettingsRepository @Inject constructor(
         proxyRules = values[PROXY_RULES] ?: "",
         subscriptions = decodeSubscriptions(values[SUBSCRIPTIONS]),
         directResolver = values[DIRECT_RESOLVER] ?: "",
-        directMode = values[DIRECT_MODE] ?: false,
         mtu = (values[MTU] ?: AppSettings.DEFAULT_MTU).coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU),
     )
 
@@ -100,7 +96,6 @@ internal class RealSettingsRepository @Inject constructor(
         val CONNECT = booleanPreferencesKey("connect_on_start")
         val LAN = booleanPreferencesKey("bypass_lan")
         val IPV6 = booleanPreferencesKey("ipv6")
-        val REMOTE_DNS = booleanPreferencesKey("remote_dns")
         val SPLIT_MODE = stringPreferencesKey("split_mode")
         val SPLIT_APPS = stringSetPreferencesKey("split_apps")
         val DIRECT_RULES = stringPreferencesKey("direct_rules")
@@ -108,7 +103,6 @@ internal class RealSettingsRepository @Inject constructor(
         val PROXY_RULES = stringPreferencesKey("proxy_rules")
         val SUBSCRIPTIONS = stringPreferencesKey("subscriptions")
         val DIRECT_RESOLVER = stringPreferencesKey("direct_resolver")
-        val DIRECT_MODE = booleanPreferencesKey("direct_mode")
         val MTU = intPreferencesKey("mtu")
     }
 }

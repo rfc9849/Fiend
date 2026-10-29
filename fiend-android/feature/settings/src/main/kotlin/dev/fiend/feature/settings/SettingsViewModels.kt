@@ -113,7 +113,6 @@ data class RoutingUiState(
     val subscriptions: List<SubscriptionUi> = emptyList(),
     val directResolver: String = "",
     val mtu: Int = AppSettings.DEFAULT_MTU,
-    val directMode: Boolean = false,
     val busy: Boolean = false,
     val message: String? = null,
 )
@@ -149,7 +148,6 @@ class RoutingViewModel @Inject constructor(
             },
             directResolver = s.directResolver,
             mtu = s.mtu,
-            directMode = s.directMode,
             busy = working,
             message = notice,
         )
@@ -157,10 +155,6 @@ class RoutingViewModel @Inject constructor(
 
     private fun countOf(text: String, allowIp: Boolean) =
         if (text.isBlank()) 0 else rules.validate(text, allowIp).getOrDefault(RuleCounts()).total
-
-    fun setDirectMode(value: Boolean) {
-        viewModelScope.launch { settings.update { it.copy(directMode = value) } }
-    }
 
     fun setResolver(value: String): RoutingInputError? {
         if (rules.validateResolver(value).isFailure) return RoutingInputError.Resolver

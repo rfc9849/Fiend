@@ -1859,13 +1859,6 @@ impl AppView {
                 )
             }
             Dialog::Service(service) => {
-                let name = if cfg!(target_os = "macos") {
-                    "macOS LaunchDaemon"
-                } else if cfg!(target_os = "windows") {
-                    "Windows service"
-                } else {
-                    "Linux systemd service"
-                };
                 let (title, notice, button, working) = match service.mode {
                     ServiceMode::Install => (
                         "Install system service",
@@ -1888,7 +1881,6 @@ impl AppView {
                 };
                 let content = div()
                     .child(ui.notice("info", notice, false))
-                    .child(ui.group().child(ui.setting_row(name, Some("Runs in the background."), div(), true)))
                     .when_some(service.error.clone(), |this, error| {
                         this.child(div().mt(px(12.)).text_size(px(11.)).text_color(p.danger).child(error))
                     });

@@ -233,7 +233,7 @@ impl AppView {
                 .items_center()
                 .gap(px(14.))
                 .px(px(8.))
-                .py(px(18.))
+                .py(px(12.))
                 .mb(px(16.))
                 .child(ui.avatar(&format::initials(&profile.name), 42., 12.))
                 .child(
@@ -241,16 +241,10 @@ impl AppView {
                         .flex()
                         .flex_col()
                         .items_start()
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(p.muted)
-                                .child("Profile"),
-                        )
                         .child(select)
                         .child(
                             div()
-                                .mt(px(3.))
+                                .mt(px(2.))
                                 .font_family(MONO)
                                 .text_size(px(10.))
                                 .text_color(p.muted)
@@ -830,7 +824,6 @@ impl AppView {
             settings.direct_resolver.clone()
         };
         let mtu = settings.mtu.to_string();
-        let direct = settings.direct_mode;
         let restart = self.model.status.restart_required;
         div()
             .child(self.page_header(ui, "Routing", actions))
@@ -906,18 +899,7 @@ impl AppView {
                                 })),
                             false,
                         ),
-                    )
-                    .child(self.switch_row(
-                        ui,
-                        "Direct mode",
-                        "Send all traffic outside the tunnel. For tests only.",
-                        direct,
-                        false,
-                        |this, checked, cx| {
-                            this.set_daemon_setting(cx, |s| s.direct_mode = checked)
-                        },
-                        cx,
-                    )),
+                    ),
             )
     }
 
@@ -1285,12 +1267,6 @@ impl AppView {
                         false,
                         |this, checked, cx| this.set_daemon_setting(cx, |s| s.ipv6 = checked),
                         cx,
-                    ))
-                    .child(ui.setting_row(
-                        "DNS through tunnel",
-                        Some("On for tunneled traffic. This setting cannot be changed."),
-                        ui.tag("Always on", false),
-                        false,
                     )),
             )
             .child(
@@ -1392,12 +1368,6 @@ impl AppView {
                     .mb(px(20.))
                     .children(choices),
             )
-            .child(ui.group().child(ui.setting_row(
-                "Reduced motion",
-                None,
-                ui.tag("System", false),
-                true,
-            )))
     }
 
     fn settings_about(&mut self, ui: &Ui) -> gpui_kit::Div {
@@ -1426,16 +1396,6 @@ impl AppView {
                                 if self.model.status.daemon_version.is_empty() { "not connected".to_owned() } else { self.model.status.daemon_version.clone() }
                             ))),
                     ),
-            )
-            .child(
-                ui.group()
-                    .child(ui.setting_row("License", Some("Fiend is open source software."), div(), true))
-                    .child(ui.setting_row(
-                        "Open-source licenses",
-                        Some("GPUI, Tokio, and other Rust crates under Apache-2.0, MIT, and similar licenses."),
-                        div(),
-                        false,
-                    )),
             )
     }
 }

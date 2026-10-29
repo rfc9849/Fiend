@@ -95,7 +95,6 @@ private fun RoutingRoute(
         onOpenDirect = { onOpenRuleEditor(RuleKind.Direct) },
         onOpenBlock = { onOpenRuleEditor(RuleKind.Block) },
         onOpenProxy = { onOpenRuleEditor(RuleKind.Proxy) },
-        onDirectMode = viewModel::setDirectMode,
         onResolver = viewModel::setResolver,
         onMtu = viewModel::setMtu,
         onAddSubscription = viewModel::addSubscription,

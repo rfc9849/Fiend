@@ -108,7 +108,6 @@ fn engine_settings(store: &Store) -> EngineSettings {
     EngineSettings {
         bypass_lan: settings.bypass_lan,
         ipv6: settings.ipv6,
-        direct_mode: settings.direct_mode,
         mtu: settings.mtu,
         direct_resolver: settings.direct_resolver.clone(),
         direct_rules: settings.direct_rules.clone(),

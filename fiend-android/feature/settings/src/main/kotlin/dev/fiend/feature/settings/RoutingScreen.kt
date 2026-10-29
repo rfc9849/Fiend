@@ -40,7 +40,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import dev.fiend.core.designsystem.component.ActionItem
 import dev.fiend.core.designsystem.component.SegmentedGroup
-import dev.fiend.core.designsystem.component.SwitchItem
 import dev.fiend.core.designsystem.icon.FiendIcons
 import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.RuleKind
@@ -55,7 +54,6 @@ internal fun RoutingScreen(
     onOpenDirect: () -> Unit,
     onOpenBlock: () -> Unit,
     onOpenProxy: () -> Unit,
-    onDirectMode: (Boolean) -> Unit,
     onResolver: (String) -> RoutingInputError?,
     onMtu: (String) -> RoutingInputError?,
     onAddSubscription: (String, RuleKind) -> RoutingInputError?,
@@ -233,17 +231,6 @@ internal fun RoutingScreen(
                             icon = FiendIcons.Speed,
                             enabled = state.loaded,
                             onClick = { dialog = RoutingDialog.Mtu },
-                        )
-                    }
-                    item {
-                        SwitchItem(
-                            shapes = it,
-                            headline = stringResource(R.string.routing_direct_mode),
-                            supporting = stringResource(R.string.routing_direct_mode_body),
-                            icon = FiendIcons.Public,
-                            checked = state.directMode,
-                            enabled = state.loaded,
-                            onCheckedChange = onDirectMode,
                         )
                     }
                 }

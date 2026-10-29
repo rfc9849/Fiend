@@ -61,7 +61,7 @@ pub(crate) fn tun_options(
         mtu: engine.mtu,
         ipv6: engine.ipv6,
         bypass_lan: engine.bypass_lan,
-        direct_all: engine.direct_mode,
+        direct_all: false,
         direct_rules: engine.direct_rules.clone(),
         block_rules: engine.block_rules.clone(),
         proxy_rules: engine.proxy_rules.clone(),

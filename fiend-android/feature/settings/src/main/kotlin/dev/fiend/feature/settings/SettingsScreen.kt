@@ -20,23 +20,18 @@ import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -50,7 +45,6 @@ import dev.fiend.core.designsystem.theme.supportsDynamicColor
 import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.SplitTunnelMode
 import dev.fiend.core.model.ThemeMode
-import kotlinx.coroutines.launch
 
 @Composable
 internal fun SettingsScreen(
@@ -64,9 +58,6 @@ internal fun SettingsScreen(
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val context = LocalContext.current
-    val resources = LocalResources.current
-    val snackbar = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
     var themeDialog by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
@@ -77,7 +68,6 @@ internal fun SettingsScreen(
                 scrollBehavior = scrollBehavior,
             )
         },
-        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         LazyColumn(
             contentPadding = PaddingValues(
@@ -172,18 +162,6 @@ internal fun SettingsScreen(
                             onCheckedChange = { v -> onUpdate { s -> s.copy(ipv6 = v) } },
                         )
                     }
-                    item {
-                        SwitchItem(
-                            shapes = it,
-                            headline = stringResource(R.string.settings_remote_dns),
-                            supporting = stringResource(R.string.settings_remote_dns_body),
-                            icon = FiendIcons.Dns,
-                            checked = true,
-                            enabled = false,
-                            onCheckedChange = {},
-
-                        )
-                    }
                 }
             }
             item {
@@ -197,18 +175,17 @@ internal fun SettingsScreen(
                             onClick = { themeDialog = true },
                         )
                     }
-                    item {
-                        SwitchItem(
-                            shapes = it,
-                            headline = stringResource(R.string.settings_dynamic_color),
-                            supporting = stringResource(
-                                if (supportsDynamicColor) R.string.settings_dynamic_color_body else R.string.settings_dynamic_color_unsupported,
-                            ),
-                            icon = FiendIcons.Palette,
-                            enabled = supportsDynamicColor,
-                            checked = settings.dynamicColor && supportsDynamicColor,
-                            onCheckedChange = { v -> onUpdate { s -> s.copy(dynamicColor = v) } },
-                        )
+                    if (supportsDynamicColor) {
+                        item {
+                            SwitchItem(
+                                shapes = it,
+                                headline = stringResource(R.string.settings_dynamic_color),
+                                supporting = stringResource(R.string.settings_dynamic_color_body),
+                                icon = FiendIcons.Palette,
+                                checked = settings.dynamicColor,
+                                onCheckedChange = { v -> onUpdate { s -> s.copy(dynamicColor = v) } },
+                            )
+                        }
                     }
                 }
             }
@@ -222,16 +199,6 @@ internal fun SettingsScreen(
                             icon = FiendIcons.Article,
                             trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
                             onClick = onOpenLogs,
-                        )
-                    }
-                    item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.settings_licenses),
-                            icon = FiendIcons.Policy,
-                            onClick = {
-                                scope.launch { snackbar.showSnackbar(resources.getString(R.string.settings_licenses_unavailable)) }
-                            },
                         )
                     }
                     item {

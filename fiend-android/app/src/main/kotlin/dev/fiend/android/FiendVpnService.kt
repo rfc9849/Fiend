@@ -148,7 +148,7 @@ class FiendVpnService : VpnService() {
                 mtu = appSettings.mtu.toUShort(),
                 ipv6 = appSettings.ipv6,
                 bypassLan = appSettings.bypassLan,
-                directAll = appSettings.directMode,
+                directAll = false,
                 directRules = appSettings.directRules,
                 blockRules = appSettings.blockRules,
                 proxyRules = appSettings.proxyRules,
