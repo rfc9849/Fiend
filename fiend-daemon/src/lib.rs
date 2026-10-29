@@ -1,6 +1,7 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod daemon;
+pub mod journal;
 mod logs;
 mod machine;
 pub mod peer;

@@ -17,6 +17,12 @@ struct Cli {
 enum Command {
     /// Run the daemon.
     Run(RunArgs),
+    /// Undo network changes that a stopped daemon left. Run it as root.
+    Restore {
+        /// Directory of the daemon state.
+        #[arg(long)]
+        store: Option<PathBuf>,
+    },
 }
 
 #[derive(clap::Args)]
@@ -47,8 +53,22 @@ fn default_store() -> PathBuf {
     }
 }
 
+fn store_dir_for(args: &RunArgs) -> PathBuf {
+    args.store.clone().unwrap_or_else(default_store)
+}
+
 fn main() {
-    let Command::Run(args) = Cli::parse().command;
+    let args = match Cli::parse().command {
+        Command::Run(args) => args,
+        Command::Restore { store } => {
+            let dir = store.unwrap_or_else(default_store);
+            match fiend_daemon::platform::native(&dir).recover() {
+                Ok(()) => println!("network settings are restored"),
+                Err(error) => fail(format!("cannot restore: {error}")),
+            }
+            return;
+        }
+    };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("fiend-daemon")
@@ -60,7 +80,10 @@ fn main() {
     let result = if args.no_network {
         runtime.block_on(run(NullPlatform, args))
     } else {
-        runtime.block_on(run(fiend_daemon::platform::native(), args))
+        runtime.block_on(run(
+            fiend_daemon::platform::native(&store_dir_for(&args)),
+            args,
+        ))
     };
     if let Err(error) = result {
         fail(error);

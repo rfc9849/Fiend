@@ -26,5 +26,12 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry", "fmt"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+route_manager = "=0.2.17"
+socket2 = { version = "0.6", features = ["all"] }
+system-configuration = "0.8"
+tun-rs = { version = "=2.8.15", features = ["async_tokio"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

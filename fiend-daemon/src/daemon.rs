@@ -209,8 +209,10 @@ impl<P: Platform> Inner<P> {
         let opened = {
             let platform = self.platform.clone();
             let inner = self.clone();
+            let engine = tun.clone();
+            let changed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || engine.network_changed());
             tokio::task::spawn_blocking(move || {
-                platform.open(&request, &|step| inner.set_step(step))
+                platform.open(&request, &|step| inner.set_step(step), changed)
             })
             .await
             .map_err(|error| error.to_string())?
@@ -307,6 +309,12 @@ impl<P: Platform> Daemon<P> {
     }
 
     pub async fn start(&self) {
+        let platform = self.inner.platform.clone();
+        match tokio::task::spawn_blocking(move || platform.recover()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(%error, "cannot restore the network settings"),
+            Err(error) => tracing::error!(%error, "network recovery failed"),
+        }
         let (auto, id) = {
             let store = lock(&self.inner.store);
             let settings = store.settings();

@@ -1,5 +1,10 @@
 use std::io;
 use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 use fiend_core::net::ProtectSocket;
 use fiend_ipc::ConnectStep;
@@ -20,12 +25,19 @@ pub trait Platform: Send + Sync + 'static {
     fn protect_socket(&self) -> ProtectSocket;
 
     /// Create the TUN device and apply routes and DNS. The returned guard
-    /// restores the old network setup when it is dropped.
+    /// restores the old network setup when it is dropped. `network_changed`
+    /// runs when the primary network changes while the guard is alive.
     fn open(
         &self,
         request: &NetworkRequest,
         progress: &dyn Fn(ConnectStep),
+        network_changed: Arc<dyn Fn() + Send + Sync>,
     ) -> io::Result<(Self::Device, Self::Guard)>;
+
+    /// Undo changes that an earlier daemon process left after a crash.
+    fn recover(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Engine only: no TUN device, no routes, no DNS change. For tests and for
@@ -57,6 +69,7 @@ impl Platform for NullPlatform {
         &self,
         _: &NetworkRequest,
         progress: &dyn Fn(ConnectStep),
+        _: Arc<dyn Fn() + Send + Sync>,
     ) -> io::Result<(NullDevice, ())> {
         progress(ConnectStep::Routes);
         progress(ConnectStep::Dns);
@@ -77,7 +90,12 @@ impl Platform for UnsupportedPlatform {
         std::sync::Arc::new(|_| Ok(()))
     }
 
-    fn open(&self, _: &NetworkRequest, _: &dyn Fn(ConnectStep)) -> io::Result<(NullDevice, ())> {
+    fn open(
+        &self,
+        _: &NetworkRequest,
+        _: &dyn Fn(ConnectStep),
+        _: Arc<dyn Fn() + Send + Sync>,
+    ) -> io::Result<(NullDevice, ())> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Network setup is not available on this system yet",
@@ -85,6 +103,17 @@ impl Platform for UnsupportedPlatform {
     }
 }
 
-pub fn native() -> UnsupportedPlatform {
+#[cfg(target_os = "macos")]
+pub type Native = macos::MacPlatform;
+#[cfg(not(target_os = "macos"))]
+pub type Native = UnsupportedPlatform;
+
+#[cfg(target_os = "macos")]
+pub fn native(state_dir: &Path) -> Native {
+    macos::MacPlatform::new(state_dir)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn native(_: &Path) -> Native {
     UnsupportedPlatform
 }
