@@ -1,0 +1,30 @@
+[package]
+name = "fiend-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "fiend_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fiend-daemon"
+path = "src/main.rs"
+
+[dependencies]
+fiend-core = { path = "../fiend-core" }
+fiend-tun = { path = "../fiend-tun" }
+fiend-app = { path = "../fiend-app", features = ["subscription"] }
+fiend-ipc = { path = "../fiend-ipc" }
+clap = { version = "4", features = ["derive"] }
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry", "fmt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

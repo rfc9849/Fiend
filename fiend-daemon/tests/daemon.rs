@@ -1,0 +1,484 @@
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use fiend_daemon::peer::{PeerPolicy, SystemDirectory};
+use fiend_daemon::platform::NullPlatform;
+use fiend_daemon::{Daemon, LogBuffer, Store, bind_socket, serve};
+use fiend_ipc::{
+    Client, ClientError, ConnectStep, ErrorCode, Event, ProfileInput, Request, RuleKind, Settings,
+    TunnelState,
+};
+use tokio_util::sync::CancellationToken;
+
+const TEMPLATE: &str = include_str!("../../fiend-core/testdata/template.json");
+const SECRET: [u8; 32] = [0x42; 32];
+
+struct Fixture {
+    dir: PathBuf,
+    socket: PathBuf,
+    shutdown: CancellationToken,
+    daemon: Daemon<NullPlatform>,
+}
+
+impl Fixture {
+    async fn new(name: &str, policy: PeerPolicy) -> Self {
+        let dir = std::env::temp_dir().join(format!("fiend-it-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let store = Store::open(dir.join("store")).unwrap();
+        let daemon = Daemon::new(NullPlatform, store, Arc::new(LogBuffer::new()));
+        let listener = bind_socket(&socket, None, &SystemDirectory).unwrap();
+        let shutdown = CancellationToken::new();
+        tokio::spawn(serve(daemon.clone(), listener, policy, shutdown.clone()));
+        Self {
+            dir,
+            socket,
+            shutdown,
+            daemon,
+        }
+    }
+
+    async fn allowed(name: &str) -> Self {
+        Self::new(
+            name,
+            PeerPolicy {
+                uids: vec![current_uid()],
+                ..PeerPolicy::default()
+            },
+        )
+        .await
+    }
+
+    async fn client(&self) -> Client {
+        Client::connect(&self.socket, "test").await.unwrap()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn current_uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(std::env::temp_dir()).unwrap().uid()
+}
+
+async fn fiend_server() -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = fiend_core::server::Server::new(fiend_core::server::ServerConfig::new(
+        SECRET,
+        "127.0.0.1",
+        443,
+    ));
+    tokio::spawn(async move {
+        let _ = server.serve(listener).await;
+    });
+    address
+}
+
+fn input(name: &str, server: &str) -> ProfileInput {
+    ProfileInput {
+        id: None,
+        name: name.into(),
+        server: server.into(),
+        secret: "42".repeat(32),
+        template_json: TEMPLATE.into(),
+    }
+}
+
+async fn wait_for(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    wanted: impl Fn(&TunnelState) -> bool,
+) -> fiend_ipc::Status {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Event::State(status) = events.recv().await.unwrap()
+                && wanted(&status.state)
+            {
+                return status;
+            }
+        }
+    })
+    .await
+    .expect("state did not arrive")
+}
+
+fn http_server(body: &'static [u8]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+    format!("http://{address}/list")
+}
+
+#[tokio::test]
+async fn connect_and_disconnect_follow_the_state_machine() {
+    let fixture = Fixture::allowed("cycle").await;
+    let server = fiend_server().await;
+    let client = fixture.client().await;
+    let profile = client
+        .save_profile(input("Local", &server.to_string()))
+        .await
+        .unwrap();
+    client.subscribe().await.unwrap();
+    let mut events = client.events();
+    assert_eq!(
+        client.status().await.unwrap().state,
+        TunnelState::Disconnected
+    );
+
+    client
+        .connect_profile(Some(profile.id.clone()))
+        .await
+        .unwrap();
+    let connected = wait_for(&mut events, |s| matches!(s, TunnelState::Connected { .. })).await;
+    assert_eq!(connected.profile_id.as_deref(), Some(profile.id.as_str()));
+    assert!(!connected.restart_required);
+    assert_eq!(
+        client.settings().await.unwrap().active_profile.as_deref(),
+        Some(profile.id.as_str())
+    );
+
+    client.disconnect().await.unwrap();
+    let status = client.status().await.unwrap();
+    assert_eq!(status.state, TunnelState::Disconnected);
+    assert!(status.profile_id.is_none());
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn steps_are_reported_in_order() {
+    let fixture = Fixture::allowed("steps").await;
+    let server = fiend_server().await;
+    let client = fixture.client().await;
+    let profile = client
+        .save_profile(input("Local", &server.to_string()))
+        .await
+        .unwrap();
+    client.subscribe().await.unwrap();
+    let mut events = client.events();
+    client.connect_profile(Some(profile.id)).await.unwrap();
+    let mut seen = Vec::new();
+    loop {
+        let status = wait_for(&mut events, |_| true).await;
+        match status.state {
+            TunnelState::Connecting { step } => seen.push(step),
+            TunnelState::Connected { .. } => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(
+        seen,
+        [ConnectStep::Server, ConnectStep::Routes, ConnectStep::Dns]
+    );
+}
+
+#[tokio::test]
+async fn failed_connect_reports_a_reason_and_allows_retry() {
+    let fixture = Fixture::allowed("failed").await;
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = closed.local_addr().unwrap();
+    drop(closed);
+    let client = fixture.client().await;
+    let profile = client
+        .save_profile(input("Closed", &address.to_string()))
+        .await
+        .unwrap();
+    client.subscribe().await.unwrap();
+    let mut events = client.events();
+    client
+        .connect_profile(Some(profile.id.clone()))
+        .await
+        .unwrap();
+    let status = wait_for(&mut events, |s| matches!(s, TunnelState::Failed { .. })).await;
+    assert!(matches!(status.state, TunnelState::Failed { reason } if !reason.is_empty()));
+    client.connect_profile(Some(profile.id)).await.unwrap();
+    wait_for(&mut events, |s| matches!(s, TunnelState::Failed { .. })).await;
+    client.disconnect().await.unwrap();
+    assert_eq!(
+        client.status().await.unwrap().state,
+        TunnelState::Disconnected
+    );
+}
+
+#[tokio::test]
+async fn choosing_another_profile_reconnects() {
+    let fixture = Fixture::allowed("switch").await;
+    let (a, b) = (fiend_server().await, fiend_server().await);
+    let client = fixture.client().await;
+    let first = client
+        .save_profile(input("A", &a.to_string()))
+        .await
+        .unwrap();
+    let second = client
+        .save_profile(input("B", &b.to_string()))
+        .await
+        .unwrap();
+    client.subscribe().await.unwrap();
+    let mut events = client.events();
+    client
+        .connect_profile(Some(first.id.clone()))
+        .await
+        .unwrap();
+    wait_for(&mut events, |s| matches!(s, TunnelState::Connected { .. })).await;
+    client
+        .connect_profile(Some(second.id.clone()))
+        .await
+        .unwrap();
+    wait_for(&mut events, |s| matches!(s, TunnelState::Disconnecting)).await;
+    let status = wait_for(&mut events, |s| matches!(s, TunnelState::Connected { .. })).await;
+    assert_eq!(status.profile_id.as_deref(), Some(second.id.as_str()));
+    let error = client.delete_profile(second.id.clone()).await.unwrap_err();
+    assert!(matches!(error, ClientError::Daemon(e) if e.code == ErrorCode::Busy));
+    client.delete_profile(first.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn settings_change_marks_the_session_as_stale() {
+    let fixture = Fixture::allowed("stale").await;
+    let server = fiend_server().await;
+    let client = fixture.client().await;
+    let profile = client
+        .save_profile(input("Local", &server.to_string()))
+        .await
+        .unwrap();
+    client.subscribe().await.unwrap();
+    let mut events = client.events();
+    client.connect_profile(Some(profile.id)).await.unwrap();
+    wait_for(&mut events, |s| matches!(s, TunnelState::Connected { .. })).await;
+    let mut settings = client.settings().await.unwrap();
+    settings.mtu = 1400;
+    client.set_settings(settings).await.unwrap();
+    assert!(client.status().await.unwrap().restart_required);
+    client
+        .set_rule_text(RuleKind::Direct, "domain:example.com\n".into())
+        .await
+        .unwrap();
+    client.disconnect().await.unwrap();
+    assert!(!client.status().await.unwrap().restart_required);
+}
+
+fn code<T>(result: Result<T, ClientError>) -> ErrorCode {
+    match result {
+        Err(ClientError::Daemon(error)) => error.code,
+        Ok(_) => panic!("accepted"),
+        Err(other) => panic!("{other}"),
+    }
+}
+
+#[tokio::test]
+async fn bad_input_is_refused_with_a_code() {
+    let fixture = Fixture::allowed("bad").await;
+    let client = fixture.client().await;
+    assert_eq!(
+        code(client.connect_profile(None).await),
+        ErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        code(client.connect_profile(Some("none".into())).await),
+        ErrorCode::NotFound
+    );
+    let mut bad = input("Bad", "127.0.0.1:1");
+    bad.secret = "short".into();
+    assert_eq!(
+        code(client.save_profile(bad).await),
+        ErrorCode::InvalidProfile
+    );
+    assert_eq!(
+        code(client.import_link("fiend://v1/!".into()).await),
+        ErrorCode::InvalidProfile
+    );
+    let settings = Settings {
+        mtu: 100,
+        ..Settings::default()
+    };
+    assert_eq!(
+        code(client.set_settings(settings).await),
+        ErrorCode::InvalidRequest
+    );
+    let settings = Settings {
+        direct_rules: "regexp:x".into(),
+        ..Settings::default()
+    };
+    assert_eq!(
+        code(client.set_settings(settings).await),
+        ErrorCode::InvalidRules
+    );
+    assert_eq!(
+        code(
+            client
+                .set_rule_text(RuleKind::Block, "ip:1.2.3.0/24".into())
+                .await
+        ),
+        ErrorCode::InvalidRules
+    );
+    assert_eq!(
+        code(client.share_link("none".into()).await),
+        ErrorCode::NotFound
+    );
+    assert_eq!(
+        code(client.measure_latency("none".into()).await),
+        ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
+async fn share_links_round_trip_and_latency_uses_the_server() {
+    let fixture = Fixture::allowed("link").await;
+    let server = fiend_server().await;
+    let client = fixture.client().await;
+    let profile = client
+        .save_profile(input("Local", &server.to_string()))
+        .await
+        .unwrap();
+    let link = client.share_link(profile.id.clone()).await.unwrap();
+    let imported = client.import_link(link).await.unwrap();
+    assert_ne!(imported.id, profile.id);
+    assert_eq!(
+        (&imported.name, &imported.server, &imported.secret),
+        (&profile.name, &profile.server, &profile.secret)
+    );
+    assert_eq!(client.list_profiles().await.unwrap().len(), 2);
+    assert!(client.measure_latency(profile.id).await.unwrap() < 10_000);
+}
+
+#[tokio::test]
+async fn subscriptions_are_downloaded_checked_and_removed() {
+    let fixture = Fixture::allowed("subs").await;
+    let client = fixture.client().await;
+    let url = http_server(b"domain:a.ru\nfull:b.ru\n");
+    let subscription = client
+        .add_subscription(url, RuleKind::Direct)
+        .await
+        .unwrap();
+    assert_eq!(subscription.entries, 2);
+    assert!(subscription.error.is_none() && subscription.updated_at_ms > 0);
+    let bad = http_server(b"regexp:x\n");
+    let broken = client
+        .add_subscription(bad, RuleKind::Direct)
+        .await
+        .unwrap();
+    assert!(broken.error.is_some() && broken.entries == 0);
+    let settings = client.refresh_subscriptions().await.unwrap();
+    assert_eq!(settings.subscriptions.len(), 2);
+    let mut changed = settings.clone();
+    changed.subscriptions.clear();
+    let kept = client.set_settings(changed).await.unwrap();
+    assert_eq!(kept.subscriptions.len(), 2);
+    client
+        .remove_subscription(subscription.id.clone())
+        .await
+        .unwrap();
+    assert!(client.remove_subscription(subscription.id).await.is_err());
+    assert!(
+        client
+            .add_subscription("ftp://x/y".into(), RuleKind::Direct)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_peer_without_permission_is_refused() {
+    let fixture = Fixture::new("peer", PeerPolicy::default()).await;
+    let error = match Client::connect(&fixture.socket, "test").await {
+        Ok(_) => panic!("accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, ClientError::Daemon(e) if e.code == ErrorCode::Unauthorized));
+}
+
+#[tokio::test]
+async fn an_unknown_protocol_major_is_refused() {
+    use fiend_ipc::{ClientMessage, Hello, ServerMessage, read_frame, write_frame};
+    let fixture = Fixture::allowed("version").await;
+    let mut stream = tokio::net::UnixStream::connect(&fixture.socket)
+        .await
+        .unwrap();
+    let mut hello = Hello::new("test");
+    hello.major = 99;
+    write_frame(&mut stream, &ClientMessage::Hello(hello), 4096)
+        .await
+        .unwrap();
+    let reply = read_frame::<_, ServerMessage>(&mut stream, 4096)
+        .await
+        .unwrap();
+    assert!(matches!(
+        reply,
+        Some(ServerMessage::Response { result: Err(e), .. }) if e.code == ErrorCode::UnsupportedVersion
+    ));
+}
+
+#[tokio::test]
+async fn garbage_and_oversize_frames_close_only_that_connection() {
+    use tokio::io::AsyncWriteExt;
+    let fixture = Fixture::allowed("garbage").await;
+    let mut raw = tokio::net::UnixStream::connect(&fixture.socket)
+        .await
+        .unwrap();
+    raw.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).await.unwrap();
+    let mut buffer = [0u8; 16];
+    let read = tokio::io::AsyncReadExt::read(&mut raw, &mut buffer)
+        .await
+        .unwrap();
+    assert_eq!(read, 0);
+    let client = fixture.client().await;
+    assert_eq!(
+        client.status().await.unwrap().state,
+        TunnelState::Disconnected
+    );
+    drop(fixture.daemon.clone());
+}
+
+#[tokio::test]
+async fn logs_are_listed_and_cleared() {
+    let fixture = Fixture::allowed("logs").await;
+    let client = fixture.client().await;
+    assert!(client.logs(10).await.unwrap().is_empty());
+    client.clear_logs().await.unwrap();
+    let reply = client.request(Request::Logs { limit: 5 }).await.unwrap();
+    assert!(matches!(reply, fiend_ipc::Reply::Logs { entries } if entries.is_empty()));
+}
+
+#[tokio::test]
+async fn connect_at_startup_connects_the_active_profile() {
+    let fixture = Fixture::allowed("auto").await;
+    let server = fiend_server().await;
+    let client = fixture.client().await;
+    let profile = client
+        .save_profile(input("Local", &server.to_string()))
+        .await
+        .unwrap();
+    let mut settings = client.settings().await.unwrap();
+    settings.active_profile = Some(profile.id);
+    settings.connect_at_startup = true;
+    client.set_settings(settings).await.unwrap();
+    client.subscribe().await.unwrap();
+    let mut events = client.events();
+    fixture.daemon.start().await;
+    wait_for(&mut events, |s| matches!(s, TunnelState::Connected { .. })).await;
+    fixture.daemon.shutdown().await;
+    assert_eq!(
+        client.status().await.unwrap().state,
+        TunnelState::Disconnected
+    );
+}

@@ -1,0 +1,177 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub server: String,
+    pub secret: String,
+    pub template_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileInput {
+    pub id: Option<String>,
+    pub name: String,
+    pub server: String,
+    pub secret: String,
+    pub template_json: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleKind {
+    Direct,
+    Block,
+    Proxy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleStats {
+    pub domains: u32,
+    pub exact: u32,
+    pub keywords: u32,
+    pub cidrs: u32,
+}
+
+impl RuleStats {
+    pub fn total(&self) -> u64 {
+        u64::from(self.domains)
+            + u64::from(self.exact)
+            + u64::from(self.keywords)
+            + u64::from(self.cidrs)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subscription {
+    pub id: String,
+    pub url: String,
+    pub kind: RuleKind,
+    pub updated_at_ms: u64,
+    pub entries: u64,
+    pub error: Option<String>,
+}
+
+pub const MIN_MTU: u16 = 1280;
+pub const MAX_MTU: u16 = 9000;
+pub const DEFAULT_MTU: u16 = 1500;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub active_profile: Option<String>,
+    pub connect_at_startup: bool,
+    pub bypass_lan: bool,
+    pub ipv6: bool,
+    pub direct_mode: bool,
+    pub mtu: u16,
+    pub direct_resolver: String,
+    pub direct_rules: String,
+    pub block_rules: String,
+    pub proxy_rules: String,
+    pub subscriptions: Vec<Subscription>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            active_profile: None,
+            connect_at_startup: false,
+            bypass_lan: true,
+            ipv6: true,
+            direct_mode: false,
+            mtu: DEFAULT_MTU,
+            direct_resolver: String::new(),
+            direct_rules: String::new(),
+            block_rules: String::new(),
+            proxy_rules: String::new(),
+            subscriptions: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectStep {
+    Server,
+    Routes,
+    Dns,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TunnelState {
+    Disconnected,
+    Connecting { step: ConnectStep },
+    Connected { since_ms: u64 },
+    Disconnecting,
+    Failed { reason: String },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stats {
+    pub sent_bytes: u64,
+    pub received_bytes: u64,
+    pub upload_bps: u64,
+    pub download_bps: u64,
+    pub active_flows: u64,
+    pub dropped_packets: u64,
+    pub latency_ms: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Status {
+    pub state: TunnelState,
+    pub profile_id: Option<String>,
+    pub stats: Option<Stats>,
+    pub restart_required: bool,
+    pub daemon_version: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp_ms: u64,
+    pub level: LogLevel,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    InvalidRequest,
+    NotFound,
+    InvalidProfile,
+    InvalidRules,
+    Busy,
+    Engine,
+    Unauthorized,
+    UnsupportedVersion,
+    Internal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{message}")]
+pub struct IpcError {
+    pub code: ErrorCode,
+    pub message: String,
+}
+
+impl IpcError {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
