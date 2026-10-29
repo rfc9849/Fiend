@@ -295,6 +295,14 @@ fn main() {
             vec![Update::Service(ServiceState::NotInstalled)],
             |v, w, cx| v.open_service_dialog(w, cx),
         );
+        shot(n("service-update"), theme, connected_updates(), |v, w, cx| {
+            v.service_outdated = true;
+            v.open_service_dialog(w, cx)
+        });
+        shot(n("settings-update"), theme, connected_updates(), |v, _, cx| {
+            v.service_outdated = true;
+            v.navigate(Page::Settings, cx)
+        });
         shot(
             n("no-service"),
             theme,

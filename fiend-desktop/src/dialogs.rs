@@ -10,6 +10,7 @@ use gpui_kit::{
 };
 
 use crate::app::{AppView, Page};
+use crate::model::ServiceState;
 use crate::design::{ButtonKind, MONO, Ui};
 use crate::format;
 use crate::menu::{MenuId, MenuOption};
@@ -91,7 +92,15 @@ pub struct ConfirmDialog {
     pub busy: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceMode {
+    Install,
+    Start,
+    Update,
+}
+
 pub struct ServiceDialog {
+    pub mode: ServiceMode,
     pub busy: bool,
     pub error: Option<String>,
 }
@@ -417,8 +426,17 @@ impl AppView {
         }
     }
 
+    pub fn service_mode(&self) -> ServiceMode {
+        match self.model.service {
+            ServiceState::NotRunning => ServiceMode::Start,
+            ServiceState::Ready if self.service_outdated => ServiceMode::Update,
+            _ => ServiceMode::Install,
+        }
+    }
+
     pub fn open_service_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog = Some(Dialog::Service(ServiceDialog {
+            mode: self.service_mode(),
             busy: false,
             error: None,
         }));
@@ -427,28 +445,35 @@ impl AppView {
     }
 
     pub fn run_service_task(&mut self, install: bool, cx: &mut Context<Self>) {
-        if let Some(Dialog::Service(dialog)) = self.dialog.as_mut() {
-            dialog.busy = true;
-            dialog.error = None;
-        }
+        let mode = match self.dialog.as_mut() {
+            Some(Dialog::Service(dialog)) => {
+                dialog.busy = true;
+                dialog.error = None;
+                dialog.mode
+            }
+            _ => ServiceMode::Install,
+        };
         let task = cx.background_spawn(async move {
-            if install {
+            let result = if install {
                 crate::service::install()
             } else {
                 crate::service::uninstall(false)
-            }
+            };
+            (result, crate::service::needs_update())
         });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let (result, outdated) = task.await;
             let _ = this.update(cx, |this, cx| {
+                this.service_outdated = outdated;
                 match result {
                     Ok(()) => {
                         this.dialog = None;
                         this.show_toast(
-                            if install {
-                                "Service installed"
-                            } else {
-                                "Service removed"
+                            match (install, mode) {
+                                (false, _) => "Service removed",
+                                (true, ServiceMode::Install) => "Service installed",
+                                (true, ServiceMode::Start) => "Service started",
+                                (true, ServiceMode::Update) => "Service updated",
                             },
                             false,
                             cx,
@@ -1841,12 +1866,28 @@ impl AppView {
                 } else {
                     "Linux systemd service"
                 };
-                let content = div()
-                    .child(ui.notice(
-                        "info",
+                let (title, notice, button, working) = match service.mode {
+                    ServiceMode::Install => (
+                        "Install system service",
                         "Administrator access is required to create the tunnel and set routes and DNS. You enter the password one time.",
-                        false,
-                    ))
+                        "Install service",
+                        "Installing…",
+                    ),
+                    ServiceMode::Start => (
+                        "Start system service",
+                        "The service is installed but does not run. Fiend installs it again and starts it. Enter the administrator password.",
+                        "Start service",
+                        "Starting…",
+                    ),
+                    ServiceMode::Update => (
+                        "Update system service",
+                        "This version of Fiend has a new service. Update it to use the new version. The tunnel stops for a short time. Enter the administrator password.",
+                        "Update service",
+                        "Updating…",
+                    ),
+                };
+                let content = div()
+                    .child(ui.notice("info", notice, false))
                     .child(ui.group().child(ui.setting_row(name, Some("Runs in the background."), div(), true)))
                     .when_some(service.error.clone(), |this, error| {
                         this.child(div().mt(px(12.)).text_size(px(11.)).text_color(p.danger).child(error))
@@ -1856,11 +1897,7 @@ impl AppView {
                     None,
                     "Not now",
                     Some((
-                        if service.busy {
-                            "Installing…"
-                        } else {
-                            "Install service"
-                        },
+                        if service.busy { working } else { button },
                         ButtonKind::Primary,
                         service.busy,
                     )),
@@ -1868,7 +1905,7 @@ impl AppView {
                 );
                 self.modal(
                     ui,
-                    "Install system service",
+                    title,
                     None,
                     content.into_any_element(),
                     actions,

@@ -65,10 +65,10 @@ impl AppView {
                 ServiceState::Incompatible(message) => ("Service not supported", message.clone()),
                 ServiceState::Ready => ("", String::new()),
             };
-            let action = if matches!(self.model.service, ServiceState::NotInstalled) {
-                "Install service"
-            } else {
-                "Service unavailable"
+            let action = match self.model.service {
+                ServiceState::NotInstalled => "Install service",
+                ServiceState::NotRunning => "Start service",
+                _ => "Service unavailable",
             };
             (
                 title.to_owned(),
@@ -1166,7 +1166,10 @@ impl AppView {
         let prefs = self.prefs.clone();
         let service_ready = self.model.service.is_ready();
         let installed = crate::service::is_installed();
-        let status = if service_ready {
+        let outdated = service_ready && self.service_outdated;
+        let status = if outdated {
+            "Installed · Update available".to_owned()
+        } else if service_ready {
             "Installed · Ready to create a tunnel".to_owned()
         } else {
             match self.model.service {
@@ -1184,7 +1187,15 @@ impl AppView {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(ui.tag("Ready", true))
+                .when(!outdated, |this| this.child(ui.tag("Ready", true)))
+                .when(outdated, |this| {
+                    this.child(
+                        ui.compact_button("update-service", "Update", None, ButtonKind::Primary)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_service_dialog(window, cx)
+                            })),
+                    )
+                })
                 .when(installed, |this| {
                     this.child(ui.compact_button("uninstall-service", "Uninstall", None, ButtonKind::Ghost).on_click(
                         cx.listener(|this, _, window, cx| {
@@ -1201,9 +1212,17 @@ impl AppView {
                         }),
                     ))
                 })
-        } else if matches!(self.model.service, ServiceState::NotInstalled) {
+        } else if matches!(
+            self.model.service,
+            ServiceState::NotInstalled | ServiceState::NotRunning
+        ) {
+            let label = if matches!(self.model.service, ServiceState::NotRunning) {
+                "Start"
+            } else {
+                "Install"
+            };
             div().child(
-                ui.button("install-service", "Install", None, ButtonKind::Primary)
+                ui.button("install-service", label, None, ButtonKind::Primary)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.open_service_dialog(window, cx)),
                     ),

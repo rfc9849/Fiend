@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 pub const MAC_PLIST: &str = "/Library/LaunchDaemons/dev.fiend.daemon.plist";
+pub const MAC_HELPER: &str = "/Library/PrivilegedHelperTools/dev.fiend.daemon";
 pub const LINUX_UNIT: &str = "/etc/systemd/system/fiend.service";
+pub const LINUX_HELPER: &str = "/usr/local/libexec/fiend/fiend-daemon";
 
 pub fn is_installed() -> bool {
     if cfg!(target_os = "macos") {
@@ -23,6 +25,37 @@ pub fn daemon_binary() -> Option<PathBuf> {
     };
     let candidate = exe.parent()?.join(name);
     candidate.is_file().then_some(candidate)
+}
+
+fn installed_helper() -> Option<PathBuf> {
+    let path = if cfg!(target_os = "macos") {
+        MAC_HELPER
+    } else if cfg!(target_os = "linux") {
+        LINUX_HELPER
+    } else {
+        return None;
+    };
+    Some(PathBuf::from(path)).filter(|path| path.is_file())
+}
+
+pub fn needs_update() -> bool {
+    let (Some(bundled), Some(helper)) = (daemon_binary(), installed_helper()) else {
+        return false;
+    };
+    files_differ(&bundled, &helper)
+}
+
+fn files_differ(a: &Path, b: &Path) -> bool {
+    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if meta_a.len() != meta_b.len() {
+        return true;
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(data_a), Ok(data_b)) => data_a != data_b,
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -80,4 +113,23 @@ pub fn uninstall(purge: bool) -> Result<(), String> {
     } else {
         "uninstall"
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_files_are_compared_by_content() {
+        let dir = std::env::temp_dir().join(format!("fiend-service-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+        std::fs::write(&a, b"daemon one").unwrap();
+        std::fs::write(&b, b"daemon one").unwrap();
+        std::fs::write(&c, b"daemon two").unwrap();
+        assert!(!files_differ(&a, &b));
+        assert!(files_differ(&a, &c));
+        assert!(!files_differ(&a, &dir.join("missing")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

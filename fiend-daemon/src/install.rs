@@ -120,19 +120,63 @@ fn write_root_file(path: &Path, content: &str, mode: u32) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+fn mac_service_loaded() -> bool {
+    Command::new("launchctl")
+        .args(["print", &format!("system/{LABEL}")])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn mac_stop_service() {
+    run_quiet("launchctl", &["bootout", &format!("system/{LABEL}")]);
+    for _ in 0..50 {
+        if !mac_service_loaded() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_start_service() -> io::Result<()> {
+    let mut last = None;
+    for _ in 0..5 {
+        match run("launchctl", &["bootstrap", "system", MAC_PLIST]) {
+            Ok(()) => {
+                last = None;
+                break;
+            }
+            Err(_) if mac_service_loaded() => {
+                last = None;
+                break;
+            }
+            Err(error) => {
+                last = Some(error);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    }
+    if let Some(error) = last {
+        return Err(error);
+    }
+    run_quiet("launchctl", &["enable", &format!("system/{LABEL}")]);
+    run_quiet("launchctl", &["kickstart", &format!("system/{LABEL}")]);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn install() -> io::Result<()> {
     require_root()?;
     let exe = std::env::current_exe()?;
-    run_quiet("launchctl", &["bootout", &format!("system/{LABEL}")]);
+    mac_stop_service();
     install_file(&exe, Path::new(MAC_HELPER), 0o755)?;
     write_root_file(
         Path::new(MAC_PLIST),
         &mac_plist(Path::new(MAC_HELPER)),
         0o644,
     )?;
-    run("launchctl", &["bootstrap", "system", MAC_PLIST])?;
-    run_quiet("launchctl", &["enable", &format!("system/{LABEL}")]);
-    run_quiet("launchctl", &["kickstart", &format!("system/{LABEL}")]);
+    mac_start_service()?;
     println!("Service installed.");
     Ok(())
 }
@@ -140,8 +184,7 @@ pub fn install() -> io::Result<()> {
 #[cfg(target_os = "macos")]
 pub fn uninstall(purge: bool) -> io::Result<()> {
     require_root()?;
-    run_quiet("launchctl", &["bootout", &format!("system/{LABEL}")]);
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    mac_stop_service();
     let state = PathBuf::from(MAC_STORE);
     let _ = crate::platform::native(&state).recover();
     for path in [MAC_PLIST, MAC_HELPER, MAC_LOG] {

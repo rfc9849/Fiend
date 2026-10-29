@@ -106,6 +106,7 @@ pub struct AppView {
     pub dialog_focus: FocusHandle,
     pub now_ms: u64,
     pub last_notified: Option<TunnelState>,
+    pub service_outdated: bool,
 }
 
 impl AppView {
@@ -171,6 +172,7 @@ impl AppView {
             dialog_focus: cx.focus_handle(),
             now_ms: format::now_ms(),
             last_notified: None,
+            service_outdated: crate::service::needs_update(),
         }
     }
 
@@ -201,6 +203,13 @@ impl AppView {
     }
 
     fn after_service_ready(&mut self, cx: &mut Context<Self>) {
+        if self.service_outdated && self.dialog.is_none() {
+            self.dialog = Some(Dialog::Service(crate::dialogs::ServiceDialog {
+                mode: crate::dialogs::ServiceMode::Update,
+                busy: false,
+                error: None,
+            }));
+        }
         if self.selected_profile.is_none() {
             self.selected_profile = self
                 .model
