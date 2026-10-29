@@ -10,7 +10,6 @@ pub struct Prefs {
     pub theme: ThemeMode,
     pub launch_at_login: bool,
     pub connect_on_open: bool,
-    pub notifications: bool,
 }
 
 impl Default for Prefs {
@@ -19,7 +18,6 @@ impl Default for Prefs {
             theme: ThemeMode::System,
             launch_at_login: false,
             connect_on_open: false,
-            notifications: true,
         }
     }
 }
@@ -59,6 +57,6 @@ mod tests {
     fn unknown_and_missing_fields_use_defaults() {
         let prefs: Prefs = serde_json::from_str(r#"{"theme":"dark","extra":1}"#).unwrap();
         assert_eq!(prefs.theme, ThemeMode::Dark);
-        assert!(prefs.notifications && !prefs.launch_at_login);
+        assert!(!prefs.launch_at_login && !prefs.connect_on_open);
     }
 }

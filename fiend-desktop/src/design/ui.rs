@@ -4,6 +4,8 @@ use gpui_kit::{AnyElement, Div, ElementId, FontWeight, Rgba, SharedString, Svg, 
 
 use super::theme::{FONT, MONO, Palette};
 
+const SYSTEM_ASCENT_MINUS_DESCENT: f32 = 0.756;
+
 pub fn eid(name: impl Into<String>) -> ElementId {
     ElementId::Name(SharedString::from(name.into()))
 }
@@ -193,25 +195,41 @@ impl Ui {
                     .child(label.to_owned())
                     .child(self.icon(icon, 13., p.muted)),
             )
+            .child(self.number_with_unit(value, 22., unit, 10., 5.).mt(px(9.)))
+    }
+
+    pub fn number_with_unit(
+        &self,
+        value: &str,
+        value_size: f32,
+        unit: &str,
+        unit_size: f32,
+        gap: f32,
+    ) -> Div {
+        let value_line = value_size * 1.4;
+        let unit_line = value_line - (value_size - unit_size) * SYSTEM_ASCENT_MINUS_DESCENT;
+        div()
+            .flex()
+            .items_end()
+            .whitespace_nowrap()
             .child(
                 div()
-                    .mt(px(9.))
-                    .flex()
-                    .items_baseline()
-                    .text_size(px(22.))
+                    .text_size(px(value_size))
+                    .line_height(px(value_line))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(value.to_owned())
-                    .when(!unit.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .ml(px(5.))
-                                .text_size(px(10.))
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(p.muted)
-                                .child(unit.to_owned()),
-                        )
-                    }),
+                    .child(value.to_owned()),
             )
+            .when(!unit.is_empty(), |this| {
+                this.child(
+                    div()
+                        .ml(px(gap))
+                        .text_size(px(unit_size))
+                        .line_height(px(unit_line))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(self.p.muted)
+                        .child(unit.to_owned()),
+                )
+            })
     }
 
     pub fn group(&self) -> Div {

@@ -725,18 +725,8 @@ impl AppView {
                     .child(kind_label(kind)),
             )
             .child(
-                div()
-                    .mt(px(8.))
-                    .flex()
-                    .items_baseline()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(25.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(count.to_string()),
-                    )
-                    .child(div().text_size(px(10.)).text_color(p.muted).child("rules")),
+                ui.number_with_unit(&count.to_string(), 25., "rules", 10., 4.)
+                    .mt(px(8.)),
             )
             .child(
                 div()
@@ -1312,20 +1302,6 @@ impl AppView {
                     .text_color(p.muted)
                     .child("Your directly connected local network stays reachable. Reconnect to apply network changes."),
             )
-            .child(ui.group_title("Desktop"))
-            .child(ui.group().child(self.switch_row(
-                ui,
-                "Connection notifications",
-                "Show connection and error messages.",
-                prefs.notifications,
-                true,
-                |this, checked, cx| {
-                    this.prefs.notifications = checked;
-                    this.prefs.save();
-                    cx.notify();
-                },
-                cx,
-            )))
             .child(ui.group_title("Service"))
             .child(ui.group().child(ui.setting_row("Fiend system service", Some(&status), service_control, true)))
     }

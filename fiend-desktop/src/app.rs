@@ -105,7 +105,6 @@ pub struct AppView {
     pub menu_focus: FocusHandle,
     pub dialog_focus: FocusHandle,
     pub now_ms: u64,
-    pub last_notified: Option<TunnelState>,
     pub service_outdated: bool,
 }
 
@@ -171,7 +170,6 @@ impl AppView {
             menu_focus: cx.focus_handle(),
             dialog_focus: cx.focus_handle(),
             now_ms: format::now_ms(),
-            last_notified: None,
             service_outdated: crate::service::needs_update(),
         }
     }
@@ -182,7 +180,6 @@ impl AppView {
 
     pub fn on_update(&mut self, update: Update, cx: &mut Context<Self>) {
         let was_ready = self.model.service.is_ready();
-        let old_state = self.model.status.state.clone();
         if let Update::Profiles(profiles) = &update {
             let valid = self
                 .selected_profile
@@ -195,9 +192,6 @@ impl AppView {
         self.model.apply(update);
         if !was_ready && self.model.service.is_ready() {
             self.after_service_ready(cx);
-        }
-        if self.model.status.state != old_state {
-            self.on_state_change(old_state, cx);
         }
         cx.notify();
     }
@@ -225,30 +219,6 @@ impl AppView {
             && (self.model.settings.active_profile.is_some() || !self.model.profiles.is_empty())
         {
             self.connect(None, cx);
-        }
-    }
-
-    fn on_state_change(&mut self, old: TunnelState, cx: &mut Context<Self>) {
-        if !self.prefs.notifications {
-            return;
-        }
-        let message = match (&old, &self.model.status.state) {
-            (TunnelState::Connecting { .. }, TunnelState::Connected { .. }) => {
-                let name = self.model.active_profile().map(|p| p.name.clone());
-                Some(format!(
-                    "Connected{}",
-                    name.map(|n| format!(" via {n}")).unwrap_or_default()
-                ))
-            }
-            (_, TunnelState::Failed { reason }) => Some(format!("Connection failed: {reason}")),
-            (TunnelState::Connected { .. }, TunnelState::Disconnected) => {
-                Some("Disconnected".to_owned())
-            }
-            _ => None,
-        };
-        if let Some(message) = message {
-            crate::system::notify("Fiend", &message);
-            let _ = cx;
         }
     }
 
