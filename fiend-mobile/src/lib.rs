@@ -33,6 +33,18 @@ pub enum FiendError {
     Engine { reason: String },
 }
 
+impl From<fiend_app::AppError> for FiendError {
+    fn from(error: fiend_app::AppError) -> Self {
+        use fiend_app::AppError;
+        match error {
+            AppError::InvalidProfile { reason } => Self::InvalidProfile { reason },
+            AppError::InvalidLink => Self::InvalidLink,
+            AppError::InvalidRules { reason } => Self::InvalidRules { reason },
+            AppError::Engine { reason } => Self::Engine { reason },
+        }
+    }
+}
+
 #[derive(Debug, Error, uniffi::Error)]
 pub enum PlatformError {
     #[error("Platform callback failed")]
@@ -106,54 +118,40 @@ pub struct RuleStats {
     pub cidrs: u32,
 }
 
+impl From<RuleKind> for fiend_app::RuleKind {
+    fn from(kind: RuleKind) -> Self {
+        match kind {
+            RuleKind::Direct => Self::Direct,
+            RuleKind::Block => Self::Block,
+            RuleKind::Proxy => Self::Proxy,
+        }
+    }
+}
+
+impl From<fiend_app::RuleStats> for RuleStats {
+    fn from(stats: fiend_app::RuleStats) -> Self {
+        Self {
+            domains: stats.domains,
+            exact: stats.exact,
+            keywords: stats.keywords,
+            cidrs: stats.cidrs,
+        }
+    }
+}
+
 #[uniffi::export]
 pub fn validate_rules(text: String, allow_ip: bool) -> Result<RuleStats, FiendError> {
-    let list = fiend_tun::rules::parse_list(&text, allow_ip).map_err(|error| {
-        FiendError::InvalidRules {
-            reason: error.to_string(),
-        }
-    })?;
-    let counts = list.counts();
-    let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
-    Ok(RuleStats {
-        domains: count(counts.domains),
-        exact: count(counts.exact),
-        keywords: count(counts.keywords),
-        cidrs: count(counts.cidrs),
-    })
+    Ok(fiend_app::validate_rules(&text, allow_ip)?.into())
 }
 
 #[uniffi::export]
 pub fn inspect_rule_file(path: String, kind: RuleKind) -> Result<RuleStats, FiendError> {
-    let mut rules = fiend_tun::rules::Rules::default();
-    let counts = rules
-        .add_file(&fiend_tun::rules::RuleFile {
-            path,
-            kind: match kind {
-                RuleKind::Direct => fiend_tun::rules::RuleKind::Direct,
-                RuleKind::Block => fiend_tun::rules::RuleKind::Block,
-                RuleKind::Proxy => fiend_tun::rules::RuleKind::Proxy,
-            },
-        })
-        .map_err(|error| FiendError::InvalidRules {
-            reason: error.to_string(),
-        })?;
-    let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
-    Ok(RuleStats {
-        domains: count(counts.domains),
-        exact: count(counts.exact),
-        keywords: count(counts.keywords),
-        cidrs: count(counts.cidrs),
-    })
+    Ok(fiend_app::inspect_rule_file(&path, kind.into())?.into())
 }
 
 #[uniffi::export]
 pub fn validate_resolver(value: String) -> Result<(), FiendError> {
-    fiend_tun::parse_resolver(&value)
-        .map(|_| ())
-        .map_err(|error| FiendError::InvalidRules {
-            reason: error.to_string(),
-        })
+    Ok(fiend_app::validate_resolver(&value)?)
 }
 
 #[derive(uniffi::Record)]
@@ -447,31 +445,14 @@ mod tests {
     }
 
     #[test]
-    fn rule_validation_counts_entries_and_reports_errors() {
-        let stats = validate_rules(
-            "domain:a.ru\nfull:b.ru\nkeyword:x\nip:1.2.3.0/24\n".into(),
-            true,
-        )
-        .unwrap();
-        assert_eq!(
-            (stats.domains, stats.exact, stats.keywords, stats.cidrs),
-            (1, 1, 1, 1)
-        );
-        assert!(validate_rules("ip:1.2.3.0/24".into(), false).is_err());
-        assert!(validate_rules("regexp:x".into(), true).is_err());
-        assert!(validate_resolver(String::new()).is_ok());
+    fn rule_functions_keep_the_exported_api() {
+        let stats = validate_rules("domain:a.ru\nip:1.2.3.0/24\n".into(), true).unwrap();
+        assert_eq!((stats.domains, stats.cidrs), (1, 1));
+        assert!(matches!(
+            validate_rules("regexp:x".into(), true),
+            Err(FiendError::InvalidRules { .. })
+        ));
         assert!(validate_resolver("dns.example".into()).is_err());
-    }
-
-    #[test]
-    fn rule_files_are_inspected() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../fiend-tun/tests/data/geosite-2gis.srs")
-            .to_string_lossy()
-            .into_owned();
-        let stats = inspect_rule_file(path.clone(), RuleKind::Direct).unwrap();
-        assert!(stats.domains > 0);
-        assert!(inspect_rule_file(path, RuleKind::Block).is_ok());
         assert!(inspect_rule_file("/nonexistent/fiend.srs".into(), RuleKind::Direct).is_err());
     }
 
@@ -527,28 +508,15 @@ mod tests {
 
 #[uniffi::export]
 pub fn measure_latency(profile: ProfileConfig) -> Result<u32, FiendError> {
-    let config = profile::client_config(&profile)?;
+    let profile: fiend_app::ProfileConfig = profile.into();
+    let config = fiend_app::client_config(&profile)?;
     if config.server.parse::<SocketAddr>().is_err() {
         return Err(engine_error(
             "Use a numeric server address to prevent bootstrap DNS leaks",
         ));
     }
-    let platform = logging::platform();
-    let hook = platform
+    let hook = logging::platform()
         .map(protect)
         .unwrap_or_else(|| Arc::new(|_| Ok(())));
-    runtime()?.block_on(async {
-        tokio::time::timeout(config.handshake_timeout, async {
-            let start = Instant::now();
-            let stream = fiend_core::net::dial(&config.server, &hook)
-                .await
-                .map_err(engine_error)?;
-            let _session = fiend_core::transport::connect(stream, &config.secret, &config.template)
-                .await
-                .map_err(engine_error)?;
-            Ok(u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX))
-        })
-        .await
-        .map_err(engine_error)?
-    })
+    Ok(runtime()?.block_on(fiend_app::measure_latency(&profile, &hook))?)
 }
