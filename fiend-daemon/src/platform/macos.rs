@@ -72,14 +72,25 @@ fn default_interface(exclude: Option<u32>) -> io::Result<u32> {
     })
 }
 
+/// The interface for protected sockets. The server handshake runs before the
+/// tunnel is up, so the first call finds the system default interface.
+fn bound_interface(bound: &AtomicU32) -> io::Result<NonZeroU32> {
+    if let Some(index) = NonZeroU32::new(bound.load(Ordering::Acquire)) {
+        return Ok(index);
+    }
+    let index = NonZeroU32::new(default_interface(None)?).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotConnected,
+            "There is no network connection",
+        )
+    })?;
+    bound.store(index.get(), Ordering::Release);
+    Ok(index)
+}
+
 fn protect(bound: Arc<AtomicU32>) -> ProtectSocket {
     Arc::new(move |socket| {
-        let index = NonZeroU32::new(bound.load(Ordering::Acquire)).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotConnected,
-                "There is no network connection",
-            )
-        })?;
+        let index = bound_interface(&bound)?;
         if socket.local_addr()?.is_ipv6() {
             socket.bind_device_by_index_v6(Some(index))
         } else {
@@ -373,15 +384,22 @@ mod tests {
     }
 
     #[test]
-    fn protect_fails_without_a_primary_interface() {
-        let hook = protect(Arc::new(AtomicU32::new(0)));
+    fn protect_finds_the_primary_interface_before_the_tunnel_is_up() {
+        let bound = Arc::new(AtomicU32::new(0));
+        let hook = protect(bound.clone());
         let socket = socket2::Socket::new(
             socket2::Domain::IPV4,
             socket2::Type::STREAM,
             Some(socket2::Protocol::TCP),
         )
         .unwrap();
-        assert!(hook(&socket).is_err());
+        match default_interface(None) {
+            Ok(index) => {
+                hook(&socket).unwrap();
+                assert_eq!(bound.load(Ordering::Acquire), index);
+            }
+            Err(_) => assert!(hook(&socket).is_err()),
+        }
     }
 
     #[test]
