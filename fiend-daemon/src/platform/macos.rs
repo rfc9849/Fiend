@@ -44,13 +44,19 @@ impl MacPlatform {
     }
 }
 
-fn split_routes() -> [(IpAddr, u8); 4] {
-    [
-        (IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 1),
-        (IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), 1),
-        (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 1),
-        (IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)), 1),
-    ]
+/// Routes that cover the address space without a route at `0.0.0.0` or `::`.
+/// A socket bound with `IP_BOUND_IF` to the primary interface has no scoped
+/// route, so the kernel looks up the default route by that key. A tunnel
+/// route at that key makes protected dials and scoped DNS queries fail.
+fn split_routes() -> Vec<(IpAddr, u8)> {
+    let mut routes = Vec::with_capacity(16);
+    for prefix in 1..=8u8 {
+        let first = if prefix == 1 { 128 } else { 1u8 << (8 - prefix) };
+        routes.push((IpAddr::V4(Ipv4Addr::new(first, 0, 0, 0)), prefix));
+        let first = if prefix == 1 { 0x8000 } else { 1u16 << (16 - prefix) };
+        routes.push((IpAddr::V6(Ipv6Addr::new(first, 0, 0, 0, 0, 0, 0, 0)), prefix));
+    }
+    routes
 }
 
 /// The interface of the system default route, without our own tunnel.
@@ -378,9 +384,37 @@ mod tests {
     #[test]
     fn split_routes_cover_both_families_without_a_default_route() {
         let routes = split_routes();
-        assert!(routes.iter().all(|(_, prefix)| *prefix == 1));
-        assert_eq!(routes.iter().filter(|(ip, _)| ip.is_ipv4()).count(), 2);
-        assert_eq!(routes.iter().filter(|(ip, _)| ip.is_ipv6()).count(), 2);
+        assert_eq!(routes.iter().filter(|(ip, _)| ip.is_ipv4()).count(), 8);
+        assert_eq!(routes.iter().filter(|(ip, _)| ip.is_ipv6()).count(), 8);
+        assert!(routes.iter().all(|(ip, _)| !ip.is_unspecified()));
+        let v4 = |ip: Ipv4Addr| {
+            routes.iter().any(|(net, prefix)| match net {
+                IpAddr::V4(net) => {
+                    let mask = u32::MAX << (32 - u32::from(*prefix));
+                    u32::from(ip) & mask == u32::from(*net)
+                }
+                IpAddr::V6(_) => false,
+            })
+        };
+        let v6 = |ip: Ipv6Addr| {
+            routes.iter().any(|(net, prefix)| match net {
+                IpAddr::V6(net) => {
+                    let mask = u128::MAX << (128 - u32::from(*prefix));
+                    u128::from(ip) & mask == u128::from(*net)
+                }
+                IpAddr::V4(_) => false,
+            })
+        };
+        for ip in ["1.0.0.1", "9.9.9.9", "127.0.0.1", "198.18.0.1", "255.255.255.254"] {
+            assert!(v4(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(!v4("0.1.2.3".parse().unwrap()));
+        for ip in ["100::1", "2001:db8::1", "fd42::1", "ffff::1"] {
+            assert!(v6(ip.parse().unwrap()), "{ip}");
+        }
+        assert!(!v6("::ffff:1.2.3.4".parse().unwrap()));
+        let mut seen = std::collections::HashSet::new();
+        assert!(routes.iter().all(|route| seen.insert(*route)));
     }
 
     #[test]
