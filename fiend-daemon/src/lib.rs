@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod daemon;
+pub mod install;
 pub mod journal;
 mod logs;
 mod machine;

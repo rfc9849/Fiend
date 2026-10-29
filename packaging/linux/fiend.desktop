@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Fiend
+Comment=Fiend VPN client
+Exec=fiend-desktop %u
+Icon=fiend
+Terminal=false
+Categories=Network;
+MimeType=x-scheme-handler/fiend;
+StartupWMClass=fiend-desktop

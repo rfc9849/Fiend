@@ -11,6 +11,7 @@ mod model;
 mod pages;
 mod prefs;
 mod service;
+pub mod single;
 mod system;
 
 pub use app::{AppView, LogFilter, Page, SettingsTab};
@@ -20,4 +21,4 @@ pub use design::{Palette, Scheme, ThemeMode};
 pub use dialogs::{Dialog, ProfileForm, ValueKind};
 pub use menu::{MenuId, MenuOption};
 pub use model::{Model, ServiceState, Update};
-pub use prefs::Prefs;
+pub use prefs::{Prefs, config_dir};

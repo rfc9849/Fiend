@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+getent group fiend >/dev/null || groupadd --system fiend
+if [ -n "${SUDO_USER:-}" ]; then usermod -aG fiend "$SUDO_USER" || true; fi
+systemctl daemon-reload || true
+systemctl enable --now fiend.service || true

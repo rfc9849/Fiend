@@ -466,6 +466,20 @@ impl AppView {
         }
     }
 
+    pub fn handle_message(
+        &mut self,
+        message: crate::single::Message,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.activate_window();
+        if let crate::single::Message::Open(link) = message {
+            self.page = Page::Profiles;
+            self.open_import(Some(link), window, cx);
+        }
+        cx.notify();
+    }
+
     pub fn is_ready(&self) -> bool {
         self.model.service.is_ready()
     }

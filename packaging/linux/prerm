@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+systemctl disable --now fiend.service || true
+/usr/bin/fiend-daemon restore --store /var/lib/fiend || true

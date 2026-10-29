@@ -1,0 +1,12 @@
+[Unit]
+Description=Fiend VPN daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/fiend-daemon run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

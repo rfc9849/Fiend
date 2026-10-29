@@ -122,6 +122,7 @@ impl AppView {
         let disabled = matches!(state, TunnelState::Disconnecting)
             || matches!(self.model.service, ServiceState::Starting);
 
+        let reduce_motion = cx.reduce_motion();
         let power = Button::new("power")
             .accessibility_label(action)
             .disabled(disabled)
@@ -142,19 +143,22 @@ impl AppView {
                     .border_color(ring),
             )
             .when(working, |this| {
-                this.child(
-                    ui.icon("arc", 142., p.accent)
-                        .absolute()
-                        .top(px(9.))
-                        .left(px(9.))
-                        .with_animation(
-                            "spin",
-                            Animation::new(Duration::from_millis(1200)).repeat(),
-                            |icon, delta| {
-                                icon.with_transformation(Transformation::rotate(percentage(delta)))
-                            },
-                        ),
-                )
+                let arc = ui
+                    .icon("arc", 142., p.accent)
+                    .absolute()
+                    .top(px(9.))
+                    .left(px(9.));
+                if reduce_motion {
+                    this.child(arc)
+                } else {
+                    this.child(arc.with_animation(
+                        "spin",
+                        Animation::new(Duration::from_millis(1200)).repeat(),
+                        |icon, delta| {
+                            icon.with_transformation(Transformation::rotate(percentage(delta)))
+                        },
+                    ))
+                }
             })
             .child(
                 div()

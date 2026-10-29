@@ -17,6 +17,14 @@ struct Cli {
 enum Command {
     /// Run the daemon.
     Run(RunArgs),
+    /// Install the system service. Run it as root.
+    Install,
+    /// Remove the system service and restore the network. Run it as root.
+    Uninstall {
+        /// Also remove profiles, settings, and rule lists.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Undo network changes that a stopped daemon left. Run it as root.
     Restore {
         /// Directory of the daemon state.
@@ -60,6 +68,18 @@ fn store_dir_for(args: &RunArgs) -> PathBuf {
 fn main() {
     let args = match Cli::parse().command {
         Command::Run(args) => args,
+        Command::Install => {
+            if let Err(error) = fiend_daemon::install::install() {
+                fail(error);
+            }
+            return;
+        }
+        Command::Uninstall { purge } => {
+            if let Err(error) = fiend_daemon::install::uninstall(purge) {
+                fail(error);
+            }
+            return;
+        }
         Command::Restore { store } => {
             let dir = store.unwrap_or_else(default_store);
             match fiend_daemon::platform::native(&dir).recover() {
