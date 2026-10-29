@@ -36,11 +36,30 @@ fn hard_cap(_recv: bool) -> Option<usize> {
     None
 }
 
+#[doc(hidden)]
+pub trait AsSocketRef {
+    fn socket_ref(&self) -> socket2::SockRef<'_>;
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsFd> AsSocketRef for T {
+    fn socket_ref(&self) -> socket2::SockRef<'_> {
+        socket2::SockRef::from(self)
+    }
+}
+
+#[cfg(windows)]
+impl<T: std::os::windows::io::AsSocket> AsSocketRef for T {
+    fn socket_ref(&self) -> socket2::SockRef<'_> {
+        socket2::SockRef::from(self)
+    }
+}
+
 pub fn set_link_buffers<S>(stream: &S) -> io::Result<()>
 where
-    S: std::os::fd::AsFd,
+    S: AsSocketRef,
 {
-    let socket = socket2::SockRef::from(stream);
+    let socket = stream.socket_ref();
     if let Some(size) = buffer_target(hard_cap(true)) {
         socket.set_recv_buffer_size(size)?;
     }
@@ -97,9 +116,9 @@ pub async fn accept(listener: &TcpListener) -> (TcpStream, SocketAddr) {
 
 pub fn set_tcp_keepalive<S>(stream: &S) -> io::Result<()>
 where
-    S: std::os::fd::AsFd,
+    S: AsSocketRef,
 {
-    let socket = socket2::SockRef::from(stream);
+    let socket = stream.socket_ref();
     socket.set_keepalive(true)?;
     socket.set_tcp_keepalive(
         &TcpKeepalive::new()

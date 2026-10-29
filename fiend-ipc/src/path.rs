@@ -9,5 +9,12 @@ pub fn default_socket() -> PathBuf {
     if let Some(path) = std::env::var_os(SOCKET_ENV).filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
     }
-    PathBuf::from("/var/run/fiend/daemon.sock")
+    #[cfg(windows)]
+    {
+        PathBuf::from(PIPE_NAME)
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/var/run/fiend/daemon.sock")
+    }
 }

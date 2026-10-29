@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use fiend_desktop::single::{Message, Role, acquire};
 use fiend_desktop::{AppView, Assets, Prefs, spawn_backend};
 use futures::StreamExt;
@@ -8,6 +10,38 @@ use gpui_kit::{
 };
 
 gpui_kit::actions!([Quit]);
+
+#[cfg(windows)]
+fn register_protocol() {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Some(program) = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .map(|root| root.join(r"System32\reg.exe"))
+    else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let key = r"HKCU\Software\Classes\fiend";
+    let open = format!(r"{}\shell\open\command", key);
+    let command = format!("\"{}\" \"%1\"", exe.display());
+    let entries = [
+        vec![key, "/ve", "/d", "URL:Fiend Protocol", "/f"],
+        vec![key, "/v", "URL Protocol", "/t", "REG_SZ", "/f"],
+        vec![open.as_str(), "/ve", "/d", command.as_str(), "/f"],
+    ];
+    for entry in entries {
+        let mut process = std::process::Command::new(&program);
+        process
+            .arg("add")
+            .args(entry)
+            .creation_flags(CREATE_NO_WINDOW);
+        let _ = process.output();
+    }
+}
 
 fn main() {
     let first = std::env::args()
@@ -21,6 +55,8 @@ fn main() {
     let Role::Primary(mut messages) = acquire(&lock, &first) else {
         return;
     };
+    #[cfg(windows)]
+    register_protocol();
     let socket = fiend_ipc::path::default_socket();
     let prefs = Prefs::load();
     let (url_sender, mut urls) = futures::channel::mpsc::unbounded::<Message>();
@@ -32,6 +68,7 @@ fn main() {
     });
     application.run(move |cx| {
         gpui_kit::init(cx);
+        #[cfg(not(windows))]
         cx.register_url_scheme("fiend").detach();
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([

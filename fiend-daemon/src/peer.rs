@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub fn parse_username(text: &str, uid: u32) -> Option<String> {
 
 pub struct SystemDirectory;
 
+#[cfg(unix)]
 impl Directory for SystemDirectory {
     fn console_uid(&self) -> Option<u32> {
         use std::os::unix::fs::MetadataExt;
@@ -56,6 +58,21 @@ impl Directory for SystemDirectory {
 
     fn username(&self, uid: u32) -> Option<String> {
         parse_username(&std::fs::read_to_string("/etc/passwd").ok()?, uid)
+    }
+}
+
+#[cfg(not(unix))]
+impl Directory for SystemDirectory {
+    fn console_uid(&self) -> Option<u32> {
+        None
+    }
+
+    fn group(&self, _: &str) -> Option<Group> {
+        None
+    }
+
+    fn username(&self, _: u32) -> Option<String> {
+        None
     }
 }
 

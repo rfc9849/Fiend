@@ -72,6 +72,9 @@ fn describe(error: &ClientError) -> ServiceState {
         ClientError::Io(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
             ServiceState::NotRunning
         }
+        ClientError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            ServiceState::Refused("You have no permission to use the service".into())
+        }
         _ if crate::service::is_installed() => ServiceState::NotRunning,
         _ => ServiceState::NotInstalled,
     }

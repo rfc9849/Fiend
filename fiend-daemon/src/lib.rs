@@ -10,6 +10,8 @@ pub mod platform;
 mod server;
 mod session;
 mod store;
+#[cfg(windows)]
+pub mod windows;
 
 pub use daemon::Daemon;
 pub use logs::{LogBuffer, install_logging};

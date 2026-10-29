@@ -26,6 +26,7 @@ auto-launch = "0.6.0"
 rqrr = "0.11.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 age = "0.11"
+rand = "0.10"
 
 [dev-dependencies]
 fiend-daemon = { path = "../fiend-daemon" }

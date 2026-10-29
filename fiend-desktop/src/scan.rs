@@ -2,24 +2,57 @@ use std::path::Path;
 use std::process::Command;
 
 fn capture(path: &Path) -> Result<(), String> {
-    let target = path.to_string_lossy().into_owned();
-    let attempts: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
-        &[("screencapture", &["-x", "-t", "png"])]
-    } else {
-        &[
-            ("grim", &[]),
-            ("gnome-screenshot", &["-f"]),
-            ("spectacle", &["-b", "-n", "-f", "-o"]),
-            ("import", &["-window", "root"]),
-        ]
-    };
-    for (program, arguments) in attempts {
-        let status = Command::new(program).args(*arguments).arg(&target).status();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let target = path.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+             $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; \
+             $i=New-Object System.Drawing.Bitmap $b.Width,$b.Height; \
+             $g=[System.Drawing.Graphics]::FromImage($i); \
+             $g.CopyFromScreen($b.Left,$b.Top,0,0,$i.Size); \
+             $i.Save('{target}',[System.Drawing.Imaging.ImageFormat]::Png); \
+             $g.Dispose(); $i.Dispose()"
+        );
+        let status = Command::new(crate::service::powershell_path())
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
+            .creation_flags(0x0800_0000)
+            .status();
         if matches!(status, Ok(status) if status.success()) && path.exists() {
             return Ok(());
         }
+        Err("Cannot capture the screen. Try again.".into())
     }
-    Err("Cannot capture the screen. Allow screen recording for Fiend and try again.".into())
+    #[cfg(not(windows))]
+    {
+        let target = path.to_string_lossy().into_owned();
+        let attempts: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+            &[("screencapture", &["-x", "-t", "png"])]
+        } else {
+            &[
+                ("grim", &[]),
+                ("gnome-screenshot", &["-f"]),
+                ("spectacle", &["-b", "-n", "-f", "-o"]),
+                ("import", &["-window", "root"]),
+            ]
+        };
+        for (program, arguments) in attempts {
+            let status = Command::new(program).args(*arguments).arg(&target).status();
+            if matches!(status, Ok(status) if status.success()) && path.exists() {
+                return Ok(());
+            }
+        }
+        Err("Cannot capture the screen. Allow screen recording for Fiend and try again.".into())
+    }
 }
 
 pub fn decode(image: &image::DynamicImage) -> Vec<String> {

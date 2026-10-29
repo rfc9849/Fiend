@@ -7,3 +7,9 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "unwind"
+
+[profile.release.package.gpui-pre-windows]
+debug-assertions = true
+
+[profile.release.build-override]
+debug-assertions = true

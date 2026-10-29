@@ -1,15 +1,17 @@
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 
 pub mod commands;
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod local_dns;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 use fiend_core::net::ProtectSocket;
 use fiend_ipc::ConnectStep;
@@ -111,11 +113,35 @@ impl Platform for UnsupportedPlatform {
     }
 }
 
+fn split_routes() -> Vec<(IpAddr, u8)> {
+    let mut routes = Vec::with_capacity(16);
+    for prefix in 1..=8u8 {
+        let first = if prefix == 1 {
+            128
+        } else {
+            1u8 << (8 - prefix)
+        };
+        routes.push((IpAddr::V4(Ipv4Addr::new(first, 0, 0, 0)), prefix));
+        let first = if prefix == 1 {
+            0x8000
+        } else {
+            1u16 << (16 - prefix)
+        };
+        routes.push((
+            IpAddr::V6(Ipv6Addr::new(first, 0, 0, 0, 0, 0, 0, 0)),
+            prefix,
+        ));
+    }
+    routes
+}
+
 #[cfg(target_os = "macos")]
 pub type Native = macos::MacPlatform;
 #[cfg(target_os = "linux")]
 pub type Native = linux::LinuxPlatform;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+pub type Native = windows::WindowsPlatform;
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub type Native = UnsupportedPlatform;
 
 #[cfg(target_os = "macos")]
@@ -128,7 +154,12 @@ pub fn native(state_dir: &Path) -> Native {
     linux::LinuxPlatform::new(state_dir)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+pub fn native(state_dir: &Path) -> Native {
+    windows::WindowsPlatform::new(state_dir)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn native(_: &Path) -> Native {
     UnsupportedPlatform
 }

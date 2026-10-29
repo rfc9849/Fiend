@@ -51,6 +51,7 @@ impl Drop for LocalDns {
 
 fn bind(address: SocketAddr, kind: Type, protocol: Protocol) -> io::Result<Socket> {
     let socket = Socket::new(Domain::for_address(address), kind, Some(protocol))?;
+    #[cfg(not(windows))]
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&address.into())?;
@@ -157,8 +158,8 @@ mod tests {
 
     #[tokio::test]
     async fn answers_over_udp_and_tcp_until_dropped() {
-        let dns = LocalDns::start("127.0.0.1:0".parse().unwrap(), echo(), &Handle::current())
-            .unwrap();
+        let dns =
+            LocalDns::start("127.0.0.1:0".parse().unwrap(), echo(), &Handle::current()).unwrap();
         let address = dns.address();
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();

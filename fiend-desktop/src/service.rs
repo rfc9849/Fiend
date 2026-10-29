@@ -1,17 +1,47 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
 pub const MAC_PLIST: &str = "/Library/LaunchDaemons/dev.fiend.daemon.plist";
+#[cfg(target_os = "macos")]
 pub const MAC_HELPER: &str = "/Library/PrivilegedHelperTools/dev.fiend.daemon";
+#[cfg(target_os = "linux")]
 pub const LINUX_UNIT: &str = "/etc/systemd/system/fiend.service";
+#[cfg(target_os = "linux")]
 pub const LINUX_HELPER: &str = "/usr/local/libexec/fiend/fiend-daemon";
 
+#[cfg(windows)]
+pub(crate) fn powershell_path() -> PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+}
+
+#[cfg(windows)]
+fn windows_helper() -> PathBuf {
+    std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+        .join("Fiend")
+        .join("fiend-daemon.exe")
+}
+
 pub fn is_installed() -> bool {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         Path::new(MAC_PLIST).exists()
-    } else if cfg!(target_os = "linux") {
+    }
+    #[cfg(target_os = "linux")]
+    {
         Path::new(LINUX_UNIT).exists()
             || Path::new("/usr/lib/systemd/system/fiend.service").exists()
-    } else {
+    }
+    #[cfg(windows)]
+    {
+        windows_helper().is_file()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
         false
     }
 }
@@ -28,14 +58,16 @@ pub fn daemon_binary() -> Option<PathBuf> {
 }
 
 fn installed_helper() -> Option<PathBuf> {
-    let path = if cfg!(target_os = "macos") {
-        MAC_HELPER
-    } else if cfg!(target_os = "linux") {
-        LINUX_HELPER
-    } else {
-        return None;
-    };
-    Some(PathBuf::from(path)).filter(|path| path.is_file())
+    #[cfg(target_os = "macos")]
+    let path = PathBuf::from(MAC_HELPER);
+    #[cfg(target_os = "linux")]
+    let path = PathBuf::from(LINUX_HELPER);
+    #[cfg(windows)]
+    let path = windows_helper();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    return None;
+    #[allow(unreachable_code)]
+    Some(path).filter(|path| path.is_file())
 }
 
 pub fn needs_update() -> bool {
@@ -81,7 +113,33 @@ fn elevate(daemon: &Path, arguments: &str) -> std::io::Result<std::process::Outp
     command.output()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn elevate(daemon: &Path, arguments: &str) -> std::io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+
+    fn quoted(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "''"))
+    }
+
+    let script = format!(
+        "$ErrorActionPreference='Stop'; try {{ $p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode }} catch {{ Write-Error $_; exit 1 }}",
+        quoted(&daemon.to_string_lossy()),
+        quoted(arguments)
+    );
+    let mut command = std::process::Command::new(powershell_path());
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &script,
+    ]);
+    command.creation_flags(0x0800_0000);
+    command.output()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn elevate(_: &Path, _: &str) -> std::io::Result<std::process::Output> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -89,21 +147,61 @@ fn elevate(_: &Path, _: &str) -> std::io::Result<std::process::Output> {
     ))
 }
 
+#[cfg(windows)]
+fn error_file() -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|time| time.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "fiend-install-error-{}-{stamp}.txt",
+        std::process::id()
+    ))
+}
+
 fn run(arguments: &str) -> Result<(), String> {
     let daemon = daemon_binary().ok_or("The daemon file is not next to the app")?;
+    #[cfg(windows)]
+    let error_path = error_file();
+    #[cfg(windows)]
+    let arguments = format!("{arguments} --error-file \"{}\"", error_path.display());
+    #[cfg(windows)]
+    let arguments = arguments.as_str();
     let output = elevate(&daemon, arguments).map_err(|error| error.to_string())?;
     if output.status.success() {
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(&error_path);
         return Ok(());
     }
     let text = String::from_utf8_lossy(&output.stderr);
-    if text.contains("User canceled") || text.contains("dismissed") {
-        return Err("The password prompt was cancelled".into());
+    let lower = text.to_lowercase();
+    if lower.contains("user canceled")
+        || lower.contains("user cancelled")
+        || lower.contains("canceled by the user")
+        || lower.contains("cancelled by the user")
+        || lower.contains("dismissed")
+    {
+        return Err("The administrator prompt was cancelled".into());
+    }
+    #[cfg(windows)]
+    if let Ok(recorded) = std::fs::read_to_string(&error_path) {
+        let _ = std::fs::remove_file(&error_path);
+        let recorded = recorded.trim();
+        if !recorded.is_empty() {
+            return Err(recorded.chars().take(4096).collect());
+        }
     }
     let line = text.lines().last().unwrap_or("The command failed").trim();
     Err(line.to_owned())
 }
 
 pub fn install() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let sid = fiend_ipc::current_user_sid().map_err(|error| error.to_string())?;
+        run(&format!("install --user-sid {sid}"))
+    }
+    #[cfg(not(windows))]
     run("install")
 }
 

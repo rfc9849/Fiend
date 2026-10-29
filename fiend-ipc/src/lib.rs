@@ -1,10 +1,14 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod client;
 mod frame;
 mod message;
 pub mod path;
 mod types;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::current_user_sid;
 
 pub use client::{Client, ClientError};
 pub use frame::{

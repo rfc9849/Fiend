@@ -159,9 +159,14 @@ impl Runner for SystemRunner {
                 Ok(())
             }
             _ => {
-                let output = std::process::Command::new(program)
-                    .args(arguments)
-                    .output()?;
+                let mut command = std::process::Command::new(program);
+                command.args(arguments);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    command.creation_flags(0x0800_0000);
+                }
+                let output = command.output()?;
                 if output.status.success() {
                     Ok(())
                 } else {

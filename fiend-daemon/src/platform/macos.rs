@@ -2,7 +2,7 @@
 //! socket protection, and DNS override through SCDynamicStore.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -23,7 +23,7 @@ use tun_rs::{AsyncDevice, DeviceBuilder};
 
 use super::commands::{Step, SystemRunner, apply_steps, undo_all};
 use super::local_dns::LocalDns;
-use super::{NetworkRequest, Platform};
+use super::{NetworkRequest, Platform, split_routes};
 use crate::journal::{Journal, JournalFile, RouteEntry};
 
 const TUN_V4: Ipv4Addr = Ipv4Addr::new(10, 42, 0, 2);
@@ -44,17 +44,6 @@ impl MacPlatform {
             bound_interface: Arc::new(AtomicU32::new(0)),
         }
     }
-}
-
-fn split_routes() -> Vec<(IpAddr, u8)> {
-    let mut routes = Vec::with_capacity(16);
-    for prefix in 1..=8u8 {
-        let first = if prefix == 1 { 128 } else { 1u8 << (8 - prefix) };
-        routes.push((IpAddr::V4(Ipv4Addr::new(first, 0, 0, 0)), prefix));
-        let first = if prefix == 1 { 0x8000 } else { 1u16 << (16 - prefix) };
-        routes.push((IpAddr::V6(Ipv6Addr::new(first, 0, 0, 0, 0, 0, 0, 0)), prefix));
-    }
-    routes
 }
 
 /// The interface of the system default route, without our own tunnel.
@@ -217,9 +206,16 @@ fn delete_routes(journal: &Journal) {
 fn loopback_alias() -> Step {
     let address = LOCAL_DNS.to_string();
     Step {
-        apply: ["/sbin/ifconfig", "lo0", "alias", &address, "netmask", "255.255.255.255"]
-            .map(str::to_owned)
-            .to_vec(),
+        apply: [
+            "/sbin/ifconfig",
+            "lo0",
+            "alias",
+            &address,
+            "netmask",
+            "255.255.255.255",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
         undo: Some(
             ["/sbin/ifconfig", "lo0", "-alias", &address]
                 .map(str::to_owned)
@@ -410,6 +406,8 @@ fn monitor(
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
 
     #[test]
@@ -436,7 +434,13 @@ mod tests {
                 IpAddr::V4(_) => false,
             })
         };
-        for ip in ["1.0.0.1", "9.9.9.9", "127.0.0.1", "198.18.0.1", "255.255.255.254"] {
+        for ip in [
+            "1.0.0.1",
+            "9.9.9.9",
+            "127.0.0.1",
+            "198.18.0.1",
+            "255.255.255.254",
+        ] {
             assert!(v4(ip.parse().unwrap()), "{ip}");
         }
         assert!(!v4("0.1.2.3".parse().unwrap()));

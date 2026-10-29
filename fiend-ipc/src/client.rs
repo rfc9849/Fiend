@@ -48,6 +48,32 @@ impl Client {
         Self::over(stream, name).await
     }
 
+    #[cfg(windows)]
+    pub async fn connect(path: &std::path::Path, name: &str) -> Result<Self, ClientError> {
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        const ERROR_PIPE_BUSY: i32 = 231;
+        for _ in 0..20 {
+            match ClientOptions::new()
+                .security_qos_flags(crate::windows::IDENTIFY_ONLY)
+                .open(path.as_os_str())
+            {
+                Ok(stream) => {
+                    crate::windows::verify_server(&stream)?;
+                    return Self::over(stream, name).await;
+                }
+                Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ClientError::Io(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "the daemon is busy",
+        )))
+    }
+
     pub async fn over<S>(stream: S, name: &str) -> Result<Self, ClientError>
     where
         S: AsyncRead + AsyncWrite + Send + 'static,

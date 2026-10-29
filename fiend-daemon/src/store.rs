@@ -34,7 +34,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&temporary, path)
+    fs::rename(&temporary, path)?;
+    #[cfg(windows)]
+    crate::windows::protect_store(path)?;
+    Ok(())
 }
 
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> io::Result<T> {
@@ -65,6 +68,8 @@ impl Store {
         let dir = dir.into();
         create_private_dir(&dir)?;
         create_private_dir(&dir.join("rules"))?;
+        #[cfg(windows)]
+        crate::windows::protect_store(&dir)?;
         let profiles: ProfileFile = read_json(&dir.join("profiles.json"))?;
         let settings: Settings = read_json(&dir.join("settings.json"))?;
         Ok(Self {
