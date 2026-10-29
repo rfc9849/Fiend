@@ -1,5 +1,48 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tuning {
+    pub handshake_timeout_ms: u32,
+    pub max_connections: u32,
+    pub udp_idle_ms: u32,
+    pub udp_keepalive_ms: u32,
+    pub max_udp_flows: u32,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            handshake_timeout_ms: 10_000,
+            max_connections: 256,
+            udp_idle_ms: 60_000,
+            udp_keepalive_ms: 20_000,
+            max_udp_flows: 256,
+        }
+    }
+}
+
+impl Tuning {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(1_000..=60_000).contains(&self.handshake_timeout_ms) {
+            return Err("Handshake timeout must be from 1000 to 60000 ms");
+        }
+        if !(1..=4_096).contains(&self.max_connections) {
+            return Err("Max connections must be from 1 to 4096");
+        }
+        if !(1_000..=600_000).contains(&self.udp_idle_ms) {
+            return Err("UDP idle time must be from 1000 to 600000 ms");
+        }
+        if !(1_000..=600_000).contains(&self.udp_keepalive_ms) {
+            return Err("UDP keepalive must be from 1000 to 600000 ms");
+        }
+        if !(1..=4_096).contains(&self.max_udp_flows) {
+            return Err("Max UDP flows must be from 1 to 4096");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
@@ -7,6 +50,8 @@ pub struct Profile {
     pub server: String,
     pub secret: String,
     pub template_json: String,
+    #[serde(default)]
+    pub tuning: Tuning,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +61,8 @@ pub struct ProfileInput {
     pub server: String,
     pub secret: String,
     pub template_json: String,
+    #[serde(default)]
+    pub tuning: Tuning,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

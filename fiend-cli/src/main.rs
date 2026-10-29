@@ -506,6 +506,7 @@ mod tests {
             server: String::new(),
             secret: String::new(),
             template_json: String::new(),
+            tuning: Default::default(),
         }
     }
 

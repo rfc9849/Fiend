@@ -17,5 +17,5 @@ pub use message::{
 };
 pub use types::{
     ConnectStep, DEFAULT_MTU, ErrorCode, IpcError, LogEntry, LogLevel, MAX_MTU, MIN_MTU, Profile,
-    ProfileInput, RuleKind, RuleStats, Settings, Stats, Status, Subscription, TunnelState,
+    ProfileInput, RuleKind, RuleStats, Settings, Stats, Status, Subscription, Tuning, TunnelState,
 };

@@ -120,6 +120,7 @@ impl Store {
             server: input.server.trim().to_owned(),
             secret: input.secret.to_ascii_lowercase(),
             template_json: input.template_json,
+            tuning: input.tuning,
         };
         let previous = self.profiles.clone();
         match self.profiles.iter_mut().find(|item| item.id == id) {
@@ -174,6 +175,7 @@ mod tests {
             server: " 127.0.0.1:443 ".into(),
             secret: "AB".repeat(32),
             template_json: "{}".into(),
+            tuning: Default::default(),
         }
     }
 

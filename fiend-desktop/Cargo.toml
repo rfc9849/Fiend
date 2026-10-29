@@ -1,0 +1,41 @@
+[package]
+name = "fiend-desktop"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "fiend_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fiend-desktop"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = { version = "=0.8.1", default-features = false }
+fiend-ipc = { path = "../fiend-ipc" }
+fiend-app = { path = "../fiend-app" }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "io-util", "macros"] }
+dirs = "7.0.0"
+qrcode = "0.14.1"
+rfd = "0.17.2"
+auto-launch = "0.6.0"
+
+[dev-dependencies]
+fiend-daemon = { path = "../fiend-daemon" }
+fiend-core = { path = "../fiend-core" }
+tokio-util = "0.7"
+gpui-kit = { version = "=0.8.1", default-features = false, features = ["test-support"] }
+
+[[test]]
+name = "screens"
+path = "tests/screens.rs"
+harness = false
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+harness = false

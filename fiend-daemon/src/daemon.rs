@@ -455,6 +455,10 @@ impl<P: Platform> Daemon<P> {
     }
 
     fn save_profile(&self, input: ProfileInput) -> Result<Reply> {
+        input
+            .tuning
+            .validate()
+            .map_err(|reason| error(ErrorCode::InvalidProfile, reason))?;
         fiend_app::validate_profile(fiend_app::ProfileConfig {
             name: input.name.clone(),
             server: input.server.clone(),
@@ -510,6 +514,7 @@ impl<P: Platform> Daemon<P> {
                 server: parsed.server,
                 secret: parsed.secret,
                 template_json: parsed.template_json,
+                tuning: Default::default(),
             })
             .map_err(internal)?
             .ok_or_else(|| error(ErrorCode::Internal, "The profile was not saved"))?;

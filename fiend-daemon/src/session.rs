@@ -8,7 +8,6 @@ use fiend_tun::rules::RuleFile;
 
 use crate::machine::EngineSettings;
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn app_profile(profile: &Profile) -> fiend_app::ProfileConfig {
@@ -43,11 +42,11 @@ pub(crate) fn build_client(
 ) -> Result<Client, String> {
     let mut config = fiend_app::client_config(&app_profile(profile)).map_err(|e| e.to_string())?;
     config.server = server.to_string();
-    config.handshake_timeout = HANDSHAKE_TIMEOUT;
-    config.max_connections = 256;
-    config.udp_idle = Duration::from_secs(60);
-    config.udp_keepalive = Duration::from_secs(20);
-    config.max_udp_flows = 256;
+    config.handshake_timeout = Duration::from_millis(profile.tuning.handshake_timeout_ms.into());
+    config.max_connections = profile.tuning.max_connections as usize;
+    config.udp_idle = Duration::from_millis(profile.tuning.udp_idle_ms.into());
+    config.udp_keepalive = Duration::from_millis(profile.tuning.udp_keepalive_ms.into());
+    config.max_udp_flows = profile.tuning.max_udp_flows as usize;
     config.protect_socket = protect;
     let config = fiend_core::config::build_client(config).map_err(|e| e.to_string())?;
     Ok(Client::new(config))

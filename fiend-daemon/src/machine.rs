@@ -165,6 +165,7 @@ mod tests {
                 server: "127.0.0.1:1".into(),
                 secret: String::new(),
                 template_json: String::new(),
+                tuning: Default::default(),
             },
             engine: EngineSettings {
                 bypass_lan: true,

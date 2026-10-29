@@ -91,6 +91,7 @@ fn input(name: &str, server: &str) -> ProfileInput {
         server: server.into(),
         secret: "42".repeat(32),
         template_json: TEMPLATE.into(),
+        tuning: Default::default(),
     }
 }
 

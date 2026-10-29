@@ -1,5 +1,5 @@
 [workspace]
-members = ["fiend-core", "fiend-tun", "fiend-app", "fiend-ipc", "fiend-daemon", "fiend-cli", "fiend-mobile"]
+members = ["fiend-core", "fiend-tun", "fiend-app", "fiend-ipc", "fiend-daemon", "fiend-cli", "fiend-desktop", "fiend-mobile"]
 resolver = "3"
 
 [profile.release]
