@@ -69,6 +69,9 @@ fn describe(error: &ClientError) -> ServiceState {
         ClientError::Daemon(error) if error.code == ErrorCode::UnsupportedVersion => {
             ServiceState::Incompatible(error.message.clone())
         }
+        ClientError::Io(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            ServiceState::NotRunning
+        }
         _ if crate::service::is_installed() => ServiceState::NotRunning,
         _ => ServiceState::NotInstalled,
     }

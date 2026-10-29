@@ -921,6 +921,23 @@ impl AppView {
         );
     }
 
+    pub fn scan_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let task = cx.background_spawn(async { crate::scan::scan_screen() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(link) => this.load_text(link.as_bytes(), false, window, cx),
+                Err(error) => {
+                    if let Some(Dialog::Import(form)) = this.dialog.as_mut() {
+                        form.error = Some(error);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub fn import_file(&mut self, rules: bool, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
             let Some(file) = rfd::AsyncFileDialog::new().pick_file().await else {
@@ -1397,6 +1414,17 @@ impl AppView {
                                 .on_click(cx.listener(
                                     |this, _, window, cx| this.import_file(false, window, cx),
                                 )),
+                            )
+                            .child(
+                                ui.button(
+                                    "import-scan",
+                                    "Scan screen",
+                                    Some("eye"),
+                                    ButtonKind::Ghost,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.scan_screen(window, cx)),
+                                ),
                             )
                             .child(
                                 ui.button("import-paste", "Paste", None, ButtonKind::Ghost)

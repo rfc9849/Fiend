@@ -8,7 +8,8 @@ use fiend_ipc::{
     LogEntry, LogLevel, Profile, Settings, Stats, Status, Subscription, Tuning, TunnelState,
 };
 use futures::channel::mpsc;
-use gpui_kit::{AppContext as _, HeadlessAppContext, px, size};
+use gpui_kit::prelude::*;
+use gpui_kit::{HeadlessAppContext, IntoElement, Render, div, px, rgb, size, svg};
 
 const TEMPLATE: &str = include_str!("../../fiend-core/testdata/template.json");
 
@@ -167,7 +168,77 @@ fn disconnected() -> Vec<Update> {
     updates
 }
 
+struct Icon;
+
+impl Render for Icon {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .size(px(480.))
+                    .rounded(px(108.))
+                    .bg(rgb(0x171a1d))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .relative()
+                            .size(px(300.))
+                            .child(
+                                svg()
+                                    .path("icons/brand.svg")
+                                    .size(px(300.))
+                                    .text_color(rgb(0xe2e7eb))
+                                    .absolute()
+                                    .top_0()
+                                    .left_0(),
+                            )
+                            .child(
+                                svg()
+                                    .path("icons/brand-face.svg")
+                                    .size(px(300.))
+                                    .text_color(rgb(0x171a1d))
+                                    .absolute()
+                                    .top_0()
+                                    .left_0(),
+                            ),
+                    ),
+            )
+    }
+}
+
+fn write_icon() {
+    let platform = gpui_kit::platform::current_platform(true);
+    let mut cx = HeadlessAppContext::with_platform(
+        platform.text_system(),
+        Arc::new(Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+    let window = cx
+        .open_window(size(px(512.), px(512.)), |_, cx| cx.new(|_| Icon))
+        .unwrap();
+    cx.run_until_parked();
+    let image = cx.capture_screenshot(window.into()).unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon-1024.png");
+    image.save(&path).unwrap();
+    println!("icon written to {}", path.display());
+}
+
 fn main() {
+    if std::env::var_os("FIEND_WRITE_ICON").is_some() {
+        write_icon();
+        return;
+    }
     for (suffix, theme) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
         let n =
             |base: &str| -> &'static str { Box::leak(format!("{base}-{suffix}").into_boxed_str()) };

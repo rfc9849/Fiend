@@ -43,14 +43,16 @@ impl Fixture {
     }
 
     async fn allowed(name: &str) -> Self {
-        Self::new(
+        let fixture = Self::new(
             name,
             PeerPolicy {
                 uids: vec![current_uid()],
                 ..PeerPolicy::default()
             },
         )
-        .await
+        .await;
+        fixture.daemon.allow_local_subscription_urls();
+        fixture
     }
 
     async fn client(&self) -> Client {
@@ -482,4 +484,22 @@ async fn connect_at_startup_connects_the_active_profile() {
         client.status().await.unwrap().state,
         TunnelState::Disconnected
     );
+}
+
+#[tokio::test]
+async fn rule_lists_on_this_computer_are_refused() {
+    let fixture = Fixture::new(
+        "strict",
+        PeerPolicy {
+            uids: vec![current_uid()],
+            ..PeerPolicy::default()
+        },
+    )
+    .await;
+    let client = fixture.client().await;
+    let result = client
+        .add_subscription("http://127.0.0.1:9/list".into(), RuleKind::Direct)
+        .await;
+    assert_eq!(code(result), ErrorCode::InvalidRules);
+    assert!(client.settings().await.unwrap().subscriptions.is_empty());
 }

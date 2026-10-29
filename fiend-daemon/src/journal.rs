@@ -24,11 +24,14 @@ pub struct Journal {
     pub routes: Vec<RouteEntry>,
     #[serde(default)]
     pub dns: Vec<DnsEntry>,
+    /// Commands that undo earlier changes. They run in reverse order.
+    #[serde(default)]
+    pub undo: Vec<Vec<String>>,
 }
 
 impl Journal {
     pub fn is_empty(&self) -> bool {
-        self.routes.is_empty() && self.dns.is_empty()
+        self.routes.is_empty() && self.dns.is_empty() && self.undo.is_empty()
     }
 
     pub fn add_route(&mut self, entry: RouteEntry) {

@@ -10,6 +10,7 @@ mod menu;
 mod model;
 mod pages;
 mod prefs;
+mod scan;
 mod service;
 pub mod single;
 mod system;

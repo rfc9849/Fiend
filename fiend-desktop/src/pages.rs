@@ -289,6 +289,7 @@ impl AppView {
             .mx_auto()
             .mt(px(32.))
             .child(panel)
+            .when(selector.is_none(), |this| this.child(div().h(px(16.))))
             .when_some(selector, |this, selector| this.child(selector))
             .child(grid)
     }

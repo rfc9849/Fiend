@@ -3,6 +3,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
+pub mod commands;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
@@ -105,7 +108,9 @@ impl Platform for UnsupportedPlatform {
 
 #[cfg(target_os = "macos")]
 pub type Native = macos::MacPlatform;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub type Native = linux::LinuxPlatform;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub type Native = UnsupportedPlatform;
 
 #[cfg(target_os = "macos")]
@@ -113,7 +118,12 @@ pub fn native(state_dir: &Path) -> Native {
     macos::MacPlatform::new(state_dir)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub fn native(state_dir: &Path) -> Native {
+    linux::LinuxPlatform::new(state_dir)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn native(_: &Path) -> Native {
     UnsupportedPlatform
 }

@@ -19,6 +19,48 @@ use crate::store::Store;
 type Result<T> = std::result::Result<T, IpcError>;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MAX_PROFILES: usize = 256;
+pub const MAX_SUBSCRIPTIONS: usize = 32;
+
+/// Reject hosts that point at this machine or at a link-local service. The
+/// daemon runs as root, so it must not fetch such a URL for a local user.
+pub fn check_subscription_host(url: &str) -> std::result::Result<(), String> {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if let Some(inner) = authority.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("")
+    } else {
+        authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _)| host)
+    };
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return Err("The list address points at this computer.".into());
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let bad = match ip {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_loopback() || ip.is_link_local() || ip.is_unspecified()
+            }
+            std::net::IpAddr::V6(ip) => {
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || (ip.segments()[0] & 0xffc0) == 0xfe80
+                    || ip
+                        .to_ipv4_mapped()
+                        .is_some_and(|v4| v4.is_loopback() || v4.is_link_local())
+            }
+        };
+        if bad {
+            return Err("The list address points at this computer.".into());
+        }
+    }
+    Ok(())
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
@@ -94,6 +136,7 @@ struct Inner<P: Platform> {
     subscriptions: tokio::sync::Mutex<()>,
     events: broadcast::Sender<Event>,
     logs: Arc<LogBuffer>,
+    allow_local_urls: std::sync::atomic::AtomicBool,
 }
 
 pub struct Daemon<P: Platform> {
@@ -296,8 +339,16 @@ impl<P: Platform> Daemon<P> {
                 subscriptions: tokio::sync::Mutex::new(()),
                 events,
                 logs,
+                allow_local_urls: std::sync::atomic::AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Tests use a local web server for rule lists.
+    pub fn allow_local_subscription_urls(&self) {
+        self.inner
+            .allow_local_urls
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn events(&self) -> broadcast::Receiver<Event> {
@@ -466,6 +517,12 @@ impl<P: Platform> Daemon<P> {
             template_json: input.template_json.clone(),
         })
         .map_err(from_app)?;
+        if input.id.is_none() && lock(&self.inner.store).profiles().len() >= MAX_PROFILES {
+            return Err(error(
+                ErrorCode::InvalidRequest,
+                format!("You can save up to {MAX_PROFILES} profiles"),
+            ));
+        }
         let profile = lock(&self.inner.store)
             .upsert_profile(input)
             .map_err(internal)?
@@ -507,6 +564,12 @@ impl<P: Platform> Daemon<P> {
 
     fn import_link(&self, link: String) -> Result<Reply> {
         let parsed = fiend_app::parse_share_link(link).map_err(from_app)?;
+        if lock(&self.inner.store).profiles().len() >= MAX_PROFILES {
+            return Err(error(
+                ErrorCode::InvalidRequest,
+                format!("You can save up to {MAX_PROFILES} profiles"),
+            ));
+        }
         let profile = lock(&self.inner.store)
             .upsert_profile(ProfileInput {
                 id: None,
@@ -576,6 +639,20 @@ impl<P: Platform> Daemon<P> {
 
     async fn add_subscription(&self, url: String, kind: RuleKind) -> Result<Reply> {
         let url = fiend_app::subscription::validate_url(&url).map_err(from_app)?;
+        if !self
+            .inner
+            .allow_local_urls
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            check_subscription_host(&url)
+                .map_err(|reason| error(ErrorCode::InvalidRules, reason))?;
+        }
+        if lock(&self.inner.store).settings().subscriptions.len() >= MAX_SUBSCRIPTIONS {
+            return Err(error(
+                ErrorCode::InvalidRequest,
+                format!("You can add up to {MAX_SUBSCRIPTIONS} subscriptions"),
+            ));
+        }
         let _guard = self.inner.subscriptions.lock().await;
         let id = crate::store::new_id();
         lock(&self.inner.store)
@@ -717,5 +794,36 @@ impl<P: Platform> Daemon<P> {
             .await
             .map_err(from_app)?;
         Ok(Reply::Latency { ms })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_subscription_host;
+
+    #[test]
+    fn local_hosts_are_refused_for_rule_lists() {
+        for url in [
+            "http://localhost/a",
+            "https://api.localhost:8443/a",
+            "http://127.0.0.1:9/a",
+            "http://127.1.2.3/a",
+            "http://0.0.0.0/a",
+            "http://169.254.169.254/latest",
+            "http://[::1]/a",
+            "http://[fe80::1]/a",
+            "http://[::ffff:127.0.0.1]/a",
+            "http://user:pw@127.0.0.1/a",
+        ] {
+            assert!(check_subscription_host(url).is_err(), "{url}");
+        }
+        for url in [
+            "https://example.com/a.srs",
+            "http://192.168.1.5:8080/list.txt",
+            "http://10.0.0.2/list",
+            "https://[2001:db8::1]/a",
+        ] {
+            assert!(check_subscription_host(url).is_ok(), "{url}");
+        }
     }
 }

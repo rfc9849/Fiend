@@ -21,6 +21,7 @@ use crate::platform::Platform;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PARALLEL_REQUESTS: usize = 16;
+const MAX_CONNECTIONS: usize = 32;
 
 pub fn bind_socket(
     path: &Path,
@@ -70,6 +71,7 @@ pub async fn serve<P: Platform>(
     shutdown: CancellationToken,
 ) {
     let policy = Arc::new(policy);
+    let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         let stream = tokio::select! {
             _ = shutdown.cancelled() => return,
@@ -82,10 +84,15 @@ pub async fn serve<P: Platform>(
                 }
             },
         };
+        let Ok(slot) = slots.clone().try_acquire_owned() else {
+            tracing::warn!("too many clients");
+            continue;
+        };
         let daemon = daemon.clone();
         let policy = policy.clone();
         let shutdown = shutdown.child_token();
         tokio::spawn(async move {
+            let _slot = slot;
             if let Err(error) = connection(daemon, stream, &policy, shutdown).await {
                 tracing::info!(%error, "client connection ended");
             }
