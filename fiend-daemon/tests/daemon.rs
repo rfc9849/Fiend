@@ -296,6 +296,7 @@ async fn bad_input_is_refused_with_a_code() {
         code(client.connect_profile(None).await),
         ErrorCode::InvalidRequest
     );
+    assert!(client.list_profiles().await.unwrap().is_empty());
     assert_eq!(
         code(client.connect_profile(Some("none".into())).await),
         ErrorCode::NotFound
@@ -502,4 +503,20 @@ async fn rule_lists_on_this_computer_are_refused() {
         .await;
     assert_eq!(code(result), ErrorCode::InvalidRules);
     assert!(client.settings().await.unwrap().subscriptions.is_empty());
+}
+
+#[tokio::test]
+async fn connect_without_a_profile_uses_the_first_one() {
+    let fixture = Fixture::allowed("first").await;
+    let server = fiend_server().await;
+    let client = fixture.client().await;
+    let profile = client
+        .save_profile(input("Only", &server.to_string()))
+        .await
+        .unwrap();
+    client.subscribe().await.unwrap();
+    let mut events = client.events();
+    client.connect_profile(None).await.unwrap();
+    let status = wait_for(&mut events, |s| matches!(s, TunnelState::Connected { .. })).await;
+    assert_eq!(status.profile_id.as_deref(), Some(profile.id.as_str()));
 }

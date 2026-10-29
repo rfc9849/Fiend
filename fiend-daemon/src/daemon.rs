@@ -438,6 +438,7 @@ impl<P: Platform> Daemon<P> {
             let store = lock(&self.inner.store);
             let id = profile_id
                 .or_else(|| store.settings().active_profile.clone())
+                .or_else(|| store.profiles().first().map(|profile| profile.id.clone()))
                 .ok_or_else(|| error(ErrorCode::InvalidRequest, "No profile is selected"))?;
             let profile = store
                 .profile(&id)
