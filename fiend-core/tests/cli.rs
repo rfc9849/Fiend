@@ -145,6 +145,93 @@ origin_port = 1
 }
 
 #[test]
+fn prepare_import_keeps_settings_and_does_not_replace_config() {
+    let dir = temp_dir("prepare-import");
+    fs::write(dir.join("secret.bin"), [0x91; 32]).unwrap();
+    let source = write(
+        &dir,
+        "server.toml",
+        "listen = \"127.0.0.1:9443\"\nsecret_file = \"secret.bin\"\norigin_host = \"example.com\"\n[origin]\nrecord_sizes = [100, 200]\n",
+    );
+    let destination = dir.join("installed");
+    let output = Command::new(bin())
+        .arg("prepare")
+        .arg(&destination)
+        .arg("--import")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = destination.join("node.toml");
+    let settings = fiend_core::config::load_server(&path).unwrap();
+    assert_eq!(settings.listen.to_string(), "127.0.0.1:9443");
+    assert_eq!(settings.config.secret, vec![0x91; 32]);
+    assert_eq!(settings.config.origin.record_sizes, vec![100, 200]);
+    let before = fs::read(&path).unwrap();
+    let output = Command::new(bin())
+        .arg("prepare")
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(before, fs::read(&path).unwrap());
+    let output = Command::new(bin())
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn prepare_new_node_and_reject_invalid_input() {
+    let dir = temp_dir("prepare-new");
+    let destination = dir.join("installed");
+    let output = Command::new(bin())
+        .arg("prepare")
+        .arg(&destination)
+        .args(["--port", "8443"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let settings = fiend_core::config::load_server(destination.join("node.toml")).unwrap();
+    assert_eq!(settings.listen.port(), 8443);
+    assert_eq!(settings.config.secret.len(), 32);
+    for port in ["0", "65536", "abc"] {
+        let output = Command::new(bin())
+            .arg("prepare")
+            .arg(dir.join(port))
+            .args(["--port", port])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!dir.join(port).exists());
+    }
+    let output = Command::new(bin())
+        .arg("check")
+        .arg(dir.join("missing.toml"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let output = Command::new(bin()).arg("generate-secret").output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(hex::decode(text.trim()).unwrap().len(), 32);
+}
+
+#[test]
 fn invalid_config_exits_with_an_error() {
     let dir = temp_dir("invalid-config");
     let path = write(

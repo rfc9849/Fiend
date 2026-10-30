@@ -1,0 +1,16 @@
+[package]
+name = "fiend-panel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "=0.8.9"
+hex = "=0.4.3"
+rand = "=0.10.3"
+rust-embed = { version = "=8.13.0", features = ["debug-embed"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+tokio = { version = "=1.54.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+toml = "=1.1.8"
+
+[dev-dependencies]
+tower = { version = "=0.5.3", features = ["util"] }

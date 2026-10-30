@@ -1,3 +1,5 @@
+mod provision;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +18,20 @@ async fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("template") => run_template(&args[1..]),
+        Some("prepare") => provision::prepare(&args[1..]),
+        Some("generate-secret") if args.len() == 1 => {
+            println!("{}", hex::encode(rand::random::<[u8; 32]>()));
+            Ok(())
+        }
+        Some("check") => config_path(&args[1..], "check").and_then(|path| {
+            config::load_server(path).map_err(|error| format!("config: {error}"))?;
+            println!("node config is valid");
+            Ok(())
+        }),
+        Some("--version") => {
+            println!("fiend-core {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("client") => run_client(&args[1..]).await,
         Some("server") => run_server(&args[1..]).await,
         Some("-h" | "--help" | "help") => {
@@ -43,6 +59,9 @@ fn usage() {
     println!("  template <input.bin>");
     println!("  client <config.toml>");
     println!("  server <config.toml>");
+    println!("  check <config.toml>");
+    println!("  generate-secret");
+    println!("  prepare <directory> [--import <server.toml> | --port <port>]");
 }
 
 fn run_template(args: &[String]) -> Result<(), String> {
