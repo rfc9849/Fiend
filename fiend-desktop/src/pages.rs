@@ -417,7 +417,6 @@ impl AppView {
                 .focus_visible(move |s| s.border_1().border_color(p.accent))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected_profile = Some(id.clone());
-                    this.show_secret = false;
                     cx.notify();
                 }))
                 .child(ui.avatar(&format::initials(&profile.name), 34., 10.))
@@ -471,11 +470,6 @@ impl AppView {
             let connected = matches!(self.model.status.state, TunnelState::Connected { .. } | TunnelState::Connecting { .. });
             let running_here = is_active && connected;
             let (host, port) = format::host_port(&profile.server);
-            let secret_text = if self.show_secret {
-                profile.secret.clone()
-            } else {
-                format!("•••• •••• •••• {}", &profile.secret[profile.secret.len().saturating_sub(4)..])
-            };
             let secret_copy = profile.secret.clone();
             let template_name = crate::dialogs::template_label(&profile.template_json);
             let t = profile.tuning;
@@ -534,15 +528,6 @@ impl AppView {
                             div()
                                 .flex()
                                 .items_center()
-                                .child(ui.mono(secret_text))
-                                .child(
-                                    ui.icon_button("secret-show", "eye", if self.show_secret { "Hide secret" } else { "Show secret" })
-                                        .size(px(24.))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_secret = !this.show_secret;
-                                            cx.notify();
-                                        })),
-                                )
                                 .child(
                                     ui.icon_button("secret-copy", "copy", "Copy secret")
                                         .size(px(24.))

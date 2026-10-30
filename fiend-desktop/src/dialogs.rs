@@ -56,7 +56,6 @@ pub struct ProfileForm {
     pub template: String,
     pub template_json: String,
     pub errors: HashMap<&'static str, String>,
-    pub show_secret: bool,
     pub tuning_open: bool,
     pub baseline: String,
     pub saving: bool,
@@ -210,8 +209,8 @@ pub fn template_label(template_json: &str) -> String {
         .find(|template| template.2 == template_json)
         .map(|template| template.1)
         .unwrap_or_else(|| match fiend_app::template_domain(template_json) {
-            Some(domain) => format!("Imported · {domain}"),
-            None => "Imported template".to_owned(),
+            Some(domain) => domain,
+            None => "Custom template".to_owned(),
         })
 }
 
@@ -609,7 +608,6 @@ impl AppView {
             template,
             template_json,
             errors: HashMap::new(),
-            show_secret: false,
             tuning_open: false,
             baseline: String::new(),
             saving: false,
@@ -1590,25 +1588,6 @@ impl AppView {
                 let err = |key: &str| form.errors.get(key);
                 let secret_box =
                     self.input_box(ui, &form.secret, window, cx, err("secret").is_some(), true);
-                let secret_toggle = ui
-                    .icon_button(
-                        "secret-toggle",
-                        "eye",
-                        if form.show_secret {
-                            "Hide secret"
-                        } else {
-                            "Show secret"
-                        },
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(Dialog::Profile(form)) = this.dialog.as_mut() {
-                            form.show_secret = !form.show_secret;
-                            let show = form.show_secret;
-                            form.secret
-                                .update(cx, |state, cx| state.set_masked(!show, window, cx));
-                        }
-                        cx.notify();
-                    }));
                 let template = self.select(
                     ui,
                     MenuId::Template,
@@ -1663,12 +1642,7 @@ impl AppView {
                         self.field(
                             ui,
                             "Secret",
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .child(div().flex_1().child(secret_box))
-                                .child(secret_toggle),
+                            secret_box,
                             err("secret"),
                             Some("64 hexadecimal characters."),
                         ),
@@ -2261,6 +2235,12 @@ mod tests {
     fn rule_lines_ignore_comments_and_blanks() {
         assert_eq!(rule_count("domain:a.ru\n\n# note\n  full:b.ru  \n"), 2);
         assert_eq!(rule_count(""), 0);
+    }
+
+    #[test]
+    fn custom_template_label_uses_domain() {
+        assert_eq!(template_label(r#"{"domain":"example.com"}"#), "example.com");
+        assert_eq!(template_label("{}"), "Custom template");
     }
 
     #[test]
