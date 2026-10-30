@@ -329,6 +329,7 @@ struct MuxFile {
     target_timeout_ms: Option<u64>,
     ping_interval_ms: Option<u64>,
     probe_timeout_ms: Option<u64>,
+    rtt_interval_ms: Option<u64>,
     surplus_idle_ms: Option<u64>,
     attempts: Option<usize>,
     backoff_floor_ms: Option<u64>,
@@ -363,6 +364,9 @@ impl MuxFile {
         }
         if let Some(value) = self.probe_timeout_ms {
             config.probe_timeout = Duration::from_millis(value);
+        }
+        if let Some(value) = self.rtt_interval_ms {
+            config.rtt_interval = Some(Duration::from_millis(value));
         }
         if let Some(value) = self.surplus_idle_ms {
             config.surplus_idle = Duration::from_millis(value);
@@ -437,6 +441,10 @@ fn validate_mux(config: &mux::Config, role: &str) -> Result<(), ConfigError> {
         ("ping_interval_ms", config.ping_interval),
         ("probe_timeout_ms", config.probe_timeout),
         ("surplus_idle_ms", config.surplus_idle),
+        (
+            "rtt_interval_ms",
+            config.rtt_interval.unwrap_or(config.ping_interval),
+        ),
     ] {
         if duration.is_zero() {
             return Err(invalid(format!(

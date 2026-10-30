@@ -55,6 +55,8 @@ pub(crate) struct LinkShared {
     bulk: AtomicBool,
     closed: AtomicBool,
     last_inbound_ms: AtomicU64,
+    rtt_us: AtomicU64,
+    rtt_at_ms: AtomicU64,
     epoch: Instant,
     wake: Arc<Notify>,
 }
@@ -79,6 +81,8 @@ impl LinkShared {
             bulk: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             last_inbound_ms: AtomicU64::new(0),
+            rtt_us: AtomicU64::new(u64::MAX),
+            rtt_at_ms: AtomicU64::new(0),
             epoch: now,
             wake,
         }
@@ -184,6 +188,22 @@ impl LinkShared {
         self.bulk.load(Ordering::Acquire) && self.work().total() > 0
     }
 
+    fn record_rtt(&self, rtt: Duration) {
+        let micros = u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX - 1);
+        self.rtt_at_ms.store(self.elapsed_ms(), Ordering::Release);
+        self.rtt_us.store(micros, Ordering::Release);
+    }
+
+    pub(crate) fn rtt(&self) -> Option<(Duration, Duration)> {
+        let micros = self.rtt_us.load(Ordering::Acquire);
+        if micros == u64::MAX {
+            return None;
+        }
+        let at = self.rtt_at_ms.load(Ordering::Acquire);
+        let age = Duration::from_millis(self.elapsed_ms().saturating_sub(at));
+        Some((Duration::from_micros(micros), age))
+    }
+
     fn elapsed_ms(&self) -> u64 {
         u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
@@ -252,10 +272,9 @@ impl ClientLink {
 
         let keepalive = ping_pong.map(|ping_pong| {
             let shared = shared.clone();
-            let interval = config.ping_interval;
-            let probe = config.probe_timeout;
+            let timing = Timing::new(config);
             tokio::spawn(async move {
-                keepalive_loop(shared, ping_pong, interval, probe, driver_abort).await;
+                keepalive_loop(shared, ping_pong, timing, driver_abort).await;
             })
         });
 
@@ -398,29 +417,62 @@ impl Drop for LaneReservation {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Timing {
+    tick: Duration,
+    interval: Duration,
+    probe: Duration,
+    measure: bool,
+}
+
+impl Timing {
+    fn new(config: &Config) -> Self {
+        Self {
+            tick: config.ping_tick(),
+            interval: config.ping_interval,
+            probe: config.probe_timeout,
+            measure: config.rtt_interval.is_some(),
+        }
+    }
+}
+
 async fn keepalive_loop(
     shared: Arc<LinkShared>,
     mut ping_pong: PingPong,
-    interval: Duration,
-    probe: Duration,
+    timing: Timing,
     driver: AbortHandle,
 ) {
+    let mut first = timing.measure;
     loop {
-        sleep(interval).await;
+        if !first {
+            sleep(timing.tick).await;
+        }
+        first = false;
         if shared.is_closed() {
             return;
         }
-        if shared.last_inbound_ms.load(Ordering::Acquire) != 0 && shared.idle_for() < interval {
+        let busy = shared.last_inbound_ms.load(Ordering::Acquire) != 0
+            && shared.idle_for() < timing.interval;
+        if busy && !timing.measure {
             continue;
         }
-        match timeout(probe, ping_pong.ping(Ping::opaque())).await {
-            Ok(Ok(_)) => shared.note_io(0, true),
-            _ => {
-                shared.mark_closed();
-                driver.abort();
-                return;
+        let started = Instant::now();
+        let ping = ping_pong.ping(Ping::opaque());
+        tokio::pin!(ping);
+        let answered = loop {
+            match timeout(timing.probe, &mut ping).await {
+                Ok(result) => break result.is_ok(),
+                Err(_) if shared.idle_for() < timing.probe => {}
+                Err(_) => break false,
             }
+        };
+        if !answered {
+            shared.mark_closed();
+            driver.abort();
+            return;
         }
+        shared.record_rtt(started.elapsed());
+        shared.note_io(0, true);
     }
 }
 
@@ -487,6 +539,64 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(link.is_closed());
         held.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_measured_link_pings_at_once_and_while_busy() {
+        use crate::crypto::RecordCipher;
+        use crate::mux::ServerConnection;
+
+        let (client, server) = tokio::io::duplex(64 << 10);
+        let session = |io| {
+            Session::new(
+                io,
+                RecordCipher::new(&[1; 32], [2; 12]),
+                RecordCipher::new(&[1; 32], [2; 12]),
+                16384,
+            )
+        };
+        let config = Config {
+            rtt_interval: Some(Duration::from_secs(1)),
+            ..Config::default()
+        };
+        let server_config = config.clone();
+        let served = tokio::spawn(async move {
+            let mut connection = ServerConnection::handshake(session(server), &server_config)
+                .await
+                .expect("server handshake");
+            while let Ok(Some(_)) = connection.accept().await {}
+        });
+        let link = ClientLink::connect(session(client), &config, 1, Arc::new(Notify::new()))
+            .await
+            .expect("client handshake");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let (_, age) = link.shared().rtt().expect("first sample");
+        assert!(age < Duration::from_secs(1));
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        link.shared().note_io(1, true);
+        tokio::time::advance(Duration::from_millis(600)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let (_, age) = link.shared().rtt().expect("busy sample");
+        assert!(age < Duration::from_millis(200), "{age:?}");
+        assert!(!link.is_closed());
+        served.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rtt_samples_age() {
+        let shared = LinkShared::new(Arc::new(Notify::new()));
+        assert!(shared.rtt().is_none());
+        shared.record_rtt(Duration::from_millis(42));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            shared.rtt(),
+            Some((Duration::from_millis(42), Duration::from_secs(3)))
+        );
     }
 
     #[tokio::test(start_paused = true)]

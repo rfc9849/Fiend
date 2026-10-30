@@ -216,6 +216,10 @@ where
         self.inner.stats()
     }
 
+    pub fn rtt(&self) -> Option<Duration> {
+        self.inner.rtt()
+    }
+
     pub fn close(&self) {
         self.inner.close();
     }
@@ -289,6 +293,18 @@ impl<S> PoolInner<S> {
         }
         self.wake.notify_one();
         self.ready.notify_waiters();
+    }
+
+    fn rtt(&self) -> Option<Duration> {
+        let max_age = self.config.rtt_max_age();
+        self.state()
+            .links
+            .iter()
+            .filter(|link| !link.is_closed())
+            .filter_map(|link| link.shared().rtt())
+            .filter(|(_, age)| *age <= max_age)
+            .min_by_key(|(_, age)| *age)
+            .map(|(rtt, _)| rtt)
     }
 
     fn stats(&self) -> PoolStats {

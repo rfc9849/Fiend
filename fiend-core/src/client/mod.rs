@@ -110,6 +110,10 @@ impl Client {
         self.inner.pool.stats()
     }
 
+    pub fn rtt(&self) -> Option<Duration> {
+        self.inner.pool.rtt()
+    }
+
     pub fn close(&self) {
         self.inner.pool.close();
     }

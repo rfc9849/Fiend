@@ -1,4 +1,5 @@
-use std::time::Instant;
+use std::io;
+use std::time::{Duration, Instant};
 
 use fiend_core::net::ProtectSocket;
 
@@ -10,17 +11,33 @@ pub async fn measure_latency(
 ) -> Result<u32, AppError> {
     let config = profile::client_config(profile)?;
     tokio::time::timeout(config.handshake_timeout, async {
-        let start = Instant::now();
-        let stream = fiend_core::net::dial(&config.server, protect)
+        let mut last = io::Error::new(io::ErrorKind::AddrNotAvailable, "server has no addresses");
+        for address in tokio::net::lookup_host(&config.server)
             .await
-            .map_err(AppError::engine)?;
-        let _session = fiend_core::transport::connect(stream, &config.secret, &config.template)
-            .await
-            .map_err(AppError::engine)?;
-        Ok(u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX))
+            .map_err(AppError::engine)?
+        {
+            let start = Instant::now();
+            let stream = match fiend_core::net::dial(&address.to_string(), protect).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    last = error;
+                    continue;
+                }
+            };
+            let rtt = start.elapsed();
+            let _session = fiend_core::transport::connect(stream, &config.secret, &config.template)
+                .await
+                .map_err(AppError::engine)?;
+            return Ok(millis(rtt));
+        }
+        Err(AppError::engine(last))
     })
     .await
     .map_err(AppError::engine)?
+}
+
+fn millis(duration: Duration) -> u32 {
+    u32::try_from(duration.as_micros().div_ceil(1000)).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

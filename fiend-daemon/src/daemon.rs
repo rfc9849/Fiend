@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use fiend_core::client::Client;
 use fiend_ipc::{
     BackupData, ConnectStep, DEFAULT_MTU, ErrorCode, Event, IpcError, MAX_MTU, MIN_MTU, Profile,
     ProfileInput, Reply, Request, RuleKind, RuleStats, Settings, Stats, Status, Subscription,
@@ -61,6 +62,12 @@ pub fn check_subscription_host(url: &str) -> std::result::Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn rtt_ms(client: &Client) -> Option<u32> {
+    client
+        .rtt()
+        .map(|rtt| u32::try_from(rtt.as_micros().div_ceil(1000)).unwrap_or(u32::MAX))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -289,11 +296,11 @@ impl<P: Platform> Inner<P> {
             return Ok(());
         }
 
-        if lock(&self.machine).connected(now_ms(), Some(latency)) {
+        if lock(&self.machine).connected(now_ms(), rtt_ms(&client)) {
             self.emit_state();
         }
         tracing::info!("tunnel connected");
-        let stats_task = tokio::spawn(self.clone().stats_loop(tun.clone(), latency));
+        let stats_task = tokio::spawn(self.clone().stats_loop(tun.clone(), client.clone()));
 
         let run = tun.run(device);
         tokio::pin!(run);
@@ -310,7 +317,7 @@ impl<P: Platform> Inner<P> {
         result.map_err(|error| error.to_string())
     }
 
-    async fn stats_loop(self: Arc<Self>, tun: Arc<TunEngine>, latency: u32) {
+    async fn stats_loop(self: Arc<Self>, tun: Arc<TunEngine>, client: Client) {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last = (Instant::now(), 0u64, 0u64);
@@ -326,7 +333,7 @@ impl<P: Platform> Inner<P> {
                 download_bps: rate(raw.downloaded, last.2),
                 active_flows: raw.flows,
                 dropped_packets: raw.dropped_packets,
-                latency_ms: Some(latency),
+                latency_ms: rtt_ms(&client),
             };
             last = (Instant::now(), raw.uploaded, raw.downloaded);
             if lock(&self.machine).set_stats(stats) && self.events.receiver_count() > 0 {

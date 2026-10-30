@@ -9,6 +9,7 @@ use fiend_tun::rules::RuleFile;
 use crate::machine::EngineSettings;
 
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
+const RTT_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) fn app_profile(profile: &Profile) -> fiend_app::ProfileConfig {
     fiend_app::ProfileConfig {
@@ -48,6 +49,7 @@ pub(crate) fn build_client(
     config.udp_keepalive = Duration::from_millis(profile.tuning.udp_keepalive_ms.into());
     config.max_udp_flows = profile.tuning.max_udp_flows as usize;
     config.protect_socket = protect;
+    config.mux.rtt_interval = Some(RTT_INTERVAL);
     let config = fiend_core::config::build_client(config).map_err(|e| e.to_string())?;
     Ok(Client::new(config))
 }

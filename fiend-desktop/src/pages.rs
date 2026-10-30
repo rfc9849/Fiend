@@ -9,11 +9,15 @@ use gpui_kit::{
 };
 
 use crate::app::{AppView, LogFilter, SettingsTab};
+use crate::design::sparkline;
 use crate::design::{ButtonKind, MONO, ThemeMode, Ui};
 use crate::dialogs::{ConfirmAction, ValueKind, kind_label, kind_value, rule_count};
 use crate::format;
 use crate::menu::{MenuId, MenuOption};
-use crate::model::ServiceState;
+use crate::model::{HISTORY_LIMIT, Sample, ServiceState};
+
+const RATE_FLOOR: f32 = 12_500.;
+const LATENCY_FLOOR: f32 = 50.;
 
 fn step_text(step: ConnectStep) -> &'static str {
     match step {
@@ -237,19 +241,14 @@ impl AppView {
                 .mb(px(16.))
                 .child(ui.avatar(&format::initials(&profile.name), 42., 12.))
                 .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .child(select)
-                        .child(
-                            div()
-                                .mt(px(2.))
-                                .font_family(MONO)
-                                .text_size(px(10.))
-                                .text_color(p.muted)
-                                .child(profile.server.clone()),
-                        ),
+                    div().flex().flex_col().items_start().child(select).child(
+                        div()
+                            .mt(px(2.))
+                            .font_family(MONO)
+                            .text_size(px(10.))
+                            .text_color(p.muted)
+                            .child(profile.server.clone()),
+                    ),
                 )
         });
 
@@ -263,20 +262,66 @@ impl AppView {
             .latency_ms
             .map(|ms| ms.to_string())
             .unwrap_or_else(|| "—".into());
-        let cell = |label: &str, icon: &str, value: String, unit: &str| {
+        let history = &self.model.history;
+        let series = |pick: fn(&Sample) -> Option<f32>, floor: f32| {
+            let values: Vec<Option<f32>> = history.iter().map(pick).collect();
+            sparkline(values, HISTORY_LIMIT, floor, p.accent).into_any_element()
+        };
+        let (got, got_unit) = format::size(stats.received_bytes);
+        let (sent, sent_unit) = format::size(stats.sent_bytes);
+        let part = |icon: &str, value: String| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(3.))
+                .min_w_0()
+                .whitespace_nowrap()
+                .child(ui.icon(icon, 10., p.muted))
+                .child(value)
+        };
+        let split = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(6.))
+            .text_size(px(11.))
+            .text_color(p.muted)
+            .child(part("down", format!("{got} {got_unit}")))
+            .child(part("up", format!("{sent} {sent_unit}")))
+            .into_any_element();
+        let cell = |label: &str, icon: &str, value: String, unit: &str, footer| {
             if live {
-                ui.stat_card(label, icon, &value, unit)
+                ui.stat_card(label, icon, &value, unit, footer)
             } else {
-                ui.stat_card(label, icon, "—", "")
+                ui.stat_card(label, icon, "—", "", div().into_any_element())
             }
         };
         let grid = div()
             .flex()
             .gap(px(10.))
-            .child(cell("Download", "down", down, down_unit))
-            .child(cell("Upload", "up", up, up_unit))
-            .child(cell("Latency", "speed", latency, "ms"))
-            .child(cell("Transferred", "data", total, total_unit));
+            .child(cell(
+                "Download",
+                "down",
+                down,
+                down_unit,
+                series(|s| Some(s.download_bps as f32), RATE_FLOOR),
+            ))
+            .child(cell(
+                "Upload",
+                "up",
+                up,
+                up_unit,
+                series(|s| Some(s.upload_bps as f32), RATE_FLOOR),
+            ))
+            .child(cell(
+                "Latency",
+                "speed",
+                latency,
+                "ms",
+                series(|s| s.latency_ms.map(|ms| ms as f32), LATENCY_FLOOR),
+            ))
+            .child(cell("Transferred", "data", total, total_unit, split));
         let _ = window;
         div()
             .max_w(px(640.))
@@ -1380,45 +1425,56 @@ impl AppView {
                         .when(selected, |this| this.child(ui.icon("check", 13., p.accent))),
                 )
         });
-        div()
-            .child(ui.group_title("Theme"))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(12.))
-                    .mt(px(16.))
-                    .mb(px(20.))
-                    .children(choices),
-            )
+        div().child(ui.group_title("Theme")).child(
+            div()
+                .flex()
+                .gap(px(12.))
+                .mt(px(16.))
+                .mb(px(20.))
+                .children(choices),
+        )
     }
 
     fn settings_about(&mut self, ui: &Ui) -> gpui_kit::Div {
         let p = ui.p;
-        div()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(14.))
-                    .mt(px(28.))
-                    .mb(px(20.))
-                    .child(
-                        div()
-                            .relative()
-                            .size(px(28.))
-                            .child(ui.icon("brand", 28., p.text).absolute().top_0().left_0())
-                            .child(ui.icon("brand-face", 28., p.surface).absolute().top_0().left_0()),
-                    )
-                    .child(
-                        div()
-                            .child(div().text_size(px(23.)).font_weight(FontWeight::MEDIUM).child("fiend"))
-                            .child(div().text_size(px(11.)).text_color(p.muted).child(format!(
-                                "Version {} · Service {}",
-                                env!("CARGO_PKG_VERSION"),
-                                if self.model.status.daemon_version.is_empty() { "not connected".to_owned() } else { self.model.status.daemon_version.clone() }
-                            ))),
-                    ),
-            )
+        div().child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(14.))
+                .mt(px(28.))
+                .mb(px(20.))
+                .child(
+                    div()
+                        .relative()
+                        .size(px(28.))
+                        .child(ui.icon("brand", 28., p.text).absolute().top_0().left_0())
+                        .child(
+                            ui.icon("brand-face", 28., p.surface)
+                                .absolute()
+                                .top_0()
+                                .left_0(),
+                        ),
+                )
+                .child(
+                    div()
+                        .child(
+                            div()
+                                .text_size(px(23.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("fiend"),
+                        )
+                        .child(div().text_size(px(11.)).text_color(p.muted).child(format!(
+                            "Version {} · Service {}",
+                            env!("CARGO_PKG_VERSION"),
+                            if self.model.status.daemon_version.is_empty() {
+                                "not connected".to_owned()
+                            } else {
+                                self.model.status.daemon_version.clone()
+                            }
+                        ))),
+                ),
+        )
     }
 }
 

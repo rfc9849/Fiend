@@ -174,7 +174,14 @@ impl Ui {
         }
     }
 
-    pub fn stat_card(&self, label: &str, icon: &str, value: &str, unit: &str) -> Div {
+    pub fn stat_card(
+        &self,
+        label: &str,
+        icon: &str,
+        value: &str,
+        unit: &str,
+        footer: impl IntoElement,
+    ) -> Div {
         let p = self.p;
         div()
             .flex_1()
@@ -196,6 +203,14 @@ impl Ui {
                     .child(self.icon(icon, 13., p.muted)),
             )
             .child(self.number_with_unit(value, 22., unit, 10., 5.).mt(px(9.)))
+            .child(
+                div()
+                    .mt(px(10.))
+                    .h(px(super::SPARK_HEIGHT))
+                    .flex()
+                    .items_end()
+                    .child(footer),
+            )
     }
 
     pub fn number_with_unit(

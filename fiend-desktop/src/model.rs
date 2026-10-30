@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use fiend_ipc::{LogEntry, Profile, Settings, Stats, Status, TunnelState};
 
@@ -30,6 +30,24 @@ pub enum Update {
 }
 
 pub const LOG_LIMIT: usize = 1000;
+pub const HISTORY_LIMIT: usize = 60;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sample {
+    pub download_bps: u64,
+    pub upload_bps: u64,
+    pub latency_ms: Option<u32>,
+}
+
+impl From<Stats> for Sample {
+    fn from(stats: Stats) -> Self {
+        Self {
+            download_bps: stats.download_bps,
+            upload_bps: stats.upload_bps,
+            latency_ms: stats.latency_ms,
+        }
+    }
+}
 
 pub struct Model {
     pub service: ServiceState,
@@ -38,6 +56,7 @@ pub struct Model {
     pub settings: Settings,
     pub logs: Vec<LogEntry>,
     pub latencies: HashMap<String, u32>,
+    pub history: VecDeque<Sample>,
 }
 
 impl Default for Model {
@@ -55,6 +74,7 @@ impl Default for Model {
             settings: Settings::default(),
             logs: Vec::new(),
             latencies: HashMap::new(),
+            history: VecDeque::with_capacity(HISTORY_LIMIT),
         }
     }
 }
@@ -67,10 +87,23 @@ impl Model {
                     self.status.state = TunnelState::Disconnected;
                     self.status.stats = None;
                     self.status.restart_required = false;
+                    self.history.clear();
                 }
                 self.service = service;
             }
-            Update::Status(status) => self.status = status,
+            Update::Status(status) => {
+                let same_session = matches!(
+                    (&self.status.state, &status.state),
+                    (
+                        TunnelState::Connected { since_ms: before },
+                        TunnelState::Connected { since_ms: after },
+                    ) if before == after
+                ) && self.status.profile_id == status.profile_id;
+                if !same_session {
+                    self.history.clear();
+                }
+                self.status = status;
+            }
             Update::Profiles(profiles) => {
                 self.latencies
                     .retain(|id, _| profiles.iter().any(|profile| &profile.id == id));
@@ -84,7 +117,13 @@ impl Model {
                     self.logs.remove(0);
                 }
             }
-            Update::Stats(stats) => self.status.stats = Some(stats),
+            Update::Stats(stats) => {
+                if self.history.len() == HISTORY_LIMIT {
+                    self.history.pop_front();
+                }
+                self.history.push_back(stats.into());
+                self.status.stats = Some(stats);
+            }
         }
     }
 
@@ -136,5 +175,34 @@ mod tests {
         model.apply(Update::Service(ServiceState::NotRunning));
         assert_eq!(model.status.state, TunnelState::Disconnected);
         assert!(model.status.stats.is_none());
+        assert!(model.history.is_empty());
+    }
+
+    fn connected(since_ms: u64) -> Status {
+        Status {
+            state: TunnelState::Connected { since_ms },
+            profile_id: Some("a".into()),
+            stats: None,
+            restart_required: false,
+            daemon_version: String::new(),
+        }
+    }
+
+    #[test]
+    fn history_keeps_one_session_and_the_newest_samples() {
+        let mut model = Model::default();
+        model.apply(Update::Status(connected(1)));
+        for index in 0..HISTORY_LIMIT as u64 + 5 {
+            model.apply(Update::Stats(Stats {
+                download_bps: index,
+                ..Stats::default()
+            }));
+        }
+        assert_eq!(model.history.len(), HISTORY_LIMIT);
+        assert_eq!(model.history[0].download_bps, 5);
+        model.apply(Update::Status(connected(1)));
+        assert_eq!(model.history.len(), HISTORY_LIMIT);
+        model.apply(Update::Status(connected(2)));
+        assert!(model.history.is_empty());
     }
 }

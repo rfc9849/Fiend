@@ -10,6 +10,7 @@ pub struct Config {
     pub target_timeout: Duration,
     pub ping_interval: Duration,
     pub probe_timeout: Duration,
+    pub rtt_interval: Option<Duration>,
     pub surplus_idle: Duration,
     pub attempts: usize,
     pub backoff_floor: Duration,
@@ -32,6 +33,7 @@ impl Default for Config {
             target_timeout: Duration::from_secs(15),
             ping_interval: Duration::from_secs(10),
             probe_timeout: Duration::from_secs(5),
+            rtt_interval: None,
             surplus_idle: Duration::from_secs(30),
             attempts: 3,
             backoff_floor: Duration::from_millis(250),
@@ -42,5 +44,16 @@ impl Default for Config {
             max_concurrent_streams: 200,
             max_send_buffer_size: 64 << 10,
         }
+    }
+}
+
+impl Config {
+    pub(crate) fn ping_tick(&self) -> Duration {
+        self.rtt_interval
+            .map_or(self.ping_interval, |rtt| rtt.min(self.ping_interval))
+    }
+
+    pub(crate) fn rtt_max_age(&self) -> Duration {
+        self.ping_tick() * 2 + self.probe_timeout
     }
 }

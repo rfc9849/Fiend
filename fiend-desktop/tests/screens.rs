@@ -49,7 +49,7 @@ pub fn logs() -> Vec<LogEntry> {
 pub fn connected_updates() -> Vec<Update> {
     let list = profiles();
     let active = list[0].id.clone();
-    vec![
+    let mut updates = vec![
         Update::Service(ServiceState::Ready),
         Update::Profiles(list),
         Update::Settings(Settings {
@@ -86,7 +86,22 @@ pub fn connected_updates() -> Vec<Update> {
             daemon_version: "0.1.0".into(),
         }),
         Update::Logs(logs()),
-    ]
+    ];
+    updates.extend((0..48u64).map(|second| {
+        let wave = 0.5 + 0.5 * (second as f64 * 0.3).sin();
+        let burst = 0.5 + 0.5 * (second as f64 * 0.17 + 1.0).cos();
+        Update::Stats(Stats {
+            sent_bytes: 120_000_000,
+            received_bytes: 1_120_000_000,
+            upload_bps: 40_000 + (burst * wave * 380_000.0) as u64,
+            download_bps: 60_000 + (burst * 3_000_000.0) as u64,
+            active_flows: 12,
+            dropped_packets: 0,
+            latency_ms: (second != 20)
+                .then_some(22 + (second * 7 % 5) as u32 + u32::from(second == 33) * 30),
+        })
+    }));
+    updates
 }
 
 pub struct Shot {
@@ -271,12 +286,17 @@ fn main() {
             let id = v.model.profiles[0].id.clone();
             v.open_profile_form(Some(id), w, cx)
         });
-        shot(n("profile-imported"), theme, connected_updates(), |v, w, cx| {
-            let template = fiend_core::fingerprint::Template::from_json(TEMPLATE).unwrap();
-            v.model.profiles[1].template_json = serde_json::to_string(&template).unwrap();
-            let id = v.model.profiles[1].id.clone();
-            v.open_profile_form(Some(id), w, cx)
-        });
+        shot(
+            n("profile-imported"),
+            theme,
+            connected_updates(),
+            |v, w, cx| {
+                let template = fiend_core::fingerprint::Template::from_json(TEMPLATE).unwrap();
+                v.model.profiles[1].template_json = serde_json::to_string(&template).unwrap();
+                let id = v.model.profiles[1].id.clone();
+                v.open_profile_form(Some(id), w, cx)
+            },
+        );
         shot(n("import"), theme, connected_updates(), |v, w, cx| {
             v.open_import(None, w, cx)
         });
@@ -295,14 +315,24 @@ fn main() {
             vec![Update::Service(ServiceState::NotInstalled)],
             |v, w, cx| v.open_service_dialog(w, cx),
         );
-        shot(n("service-update"), theme, connected_updates(), |v, w, cx| {
-            v.service_outdated = true;
-            v.open_service_dialog(w, cx)
-        });
-        shot(n("settings-update"), theme, connected_updates(), |v, _, cx| {
-            v.service_outdated = true;
-            v.navigate(Page::Settings, cx)
-        });
+        shot(
+            n("service-update"),
+            theme,
+            connected_updates(),
+            |v, w, cx| {
+                v.service_outdated = true;
+                v.open_service_dialog(w, cx)
+            },
+        );
+        shot(
+            n("settings-update"),
+            theme,
+            connected_updates(),
+            |v, _, cx| {
+                v.service_outdated = true;
+                v.navigate(Page::Settings, cx)
+            },
+        );
         shot(
             n("no-service"),
             theme,
