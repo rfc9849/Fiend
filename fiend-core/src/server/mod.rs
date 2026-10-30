@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::split;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::time::{sleep, timeout};
 
 use crate::addr::Address;
@@ -62,6 +62,7 @@ struct ServerInner {
     replay: FreshnessCheck,
     connections: Arc<Semaphore>,
     origin: RwLock<OriginProfile>,
+    node: Option<crate::node::Node>,
 }
 
 impl ServerInner {
@@ -75,6 +76,14 @@ impl ServerInner {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
+        Self::with_optional_node(config, None)
+    }
+
+    pub fn managed(config: ServerConfig, node: crate::node::Node) -> Self {
+        Self::with_optional_node(config, Some(node))
+    }
+
+    fn with_optional_node(config: ServerConfig, node: Option<crate::node::Node>) -> Self {
         let replay = FreshnessCheck::new(config.replay_ttl.max(transport::AUTH_WINDOW));
         let connections = Arc::new(Semaphore::new(config.max_connections.max(1)));
         let origin = RwLock::new(config.origin.clone());
@@ -84,6 +93,7 @@ impl Server {
                 replay,
                 connections,
                 origin,
+                node,
             }),
         }
     }
@@ -124,6 +134,13 @@ impl Server {
     }
 
     fn start_origin_probe(&self) {
+        if let Some(node) = &self.inner.node {
+            let node = node.clone();
+            tokio::spawn(async move {
+                node.refresh_origin().await;
+            });
+            return;
+        }
         if !self.inner.config.origin.record_sizes.is_empty() {
             return;
         }
@@ -164,6 +181,9 @@ impl Server {
     }
 
     async fn handle(&self, stream: TcpStream) -> mux::Result<()> {
+        if let Some(node) = &self.inner.node {
+            return self.handle_managed(stream, node.clone()).await;
+        }
         let config = &self.inner.config;
         let origin = self.inner.origin();
         let outcome = transport::serve_connection(
@@ -177,23 +197,82 @@ impl Server {
         .await?;
 
         if let Some(session) = outcome {
-            serve_mux(session, config.clone()).await?;
+            serve_mux(session, config.clone(), None).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_managed(&self, stream: TcpStream, node: crate::node::Node) -> mux::Result<()> {
+        use crate::node::Principal;
+        use crate::transport::AcceptOutcome;
+        let mut config = self.inner.config.clone();
+        (config.origin_host, config.origin_port, config.origin) = node.origin();
+        let mut principal = None;
+        let outcome =
+            transport::accept_with(stream, &self.inner.replay, &config.origin, |body, time| {
+                let (secret, identity) = node.authenticate(body, time)?;
+                principal = Some(identity);
+                Some(secret)
+            })
+            .await?;
+        match outcome {
+            AcceptOutcome::Passthrough { stream, buffered } => {
+                node.sent_to_origin();
+                transport::bridge_passthrough(
+                    stream,
+                    buffered,
+                    &config.origin_host,
+                    config.origin_port,
+                )
+                .await?;
+            }
+            AcceptOutcome::Session(session) => {
+                node.accepted();
+                match principal {
+                    Some(Principal::Control) => crate::node::control::serve(*session, node).await?,
+                    Some(Principal::User(entry)) => {
+                        let Some(mut guard) = node.begin_session(entry.clone()) else {
+                            return Ok(());
+                        };
+                        tokio::select! {
+                            result = serve_mux(*session, config, Some(entry)) => result?,
+                            _ = guard.revoked() => {},
+                        }
+                    }
+                    None => return Err(io::Error::other("missing authenticated identity").into()),
+                }
+            }
         }
         Ok(())
     }
 }
 
-async fn serve_mux(session: Session<TcpStream>, config: ServerConfig) -> mux::Result<()> {
+async fn serve_mux(
+    session: Session<TcpStream>,
+    config: ServerConfig,
+    user: Option<Arc<crate::node::UserEntry>>,
+) -> mux::Result<()> {
     let mut connection = ServerConnection::handshake(session, &config.mux).await?;
-    while let Some(incoming) = connection.accept().await? {
-        let config = config.clone();
-        tokio::spawn(async move {
-            if let Err(error) = handle_incoming(incoming, config).await {
-                tracing::debug!(%error, "lane handler failed");
+    let mut lanes = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            incoming = connection.accept() => {
+                let Some(mut incoming) = incoming? else { return Ok(()); };
+                if let Some(user) = &user {
+                    if !user.active(crate::node::unix_time()) { return Ok(()); }
+                    let user = user.clone();
+                    incoming = incoming.with_meter(Arc::new(move |count, inbound| user.note_bytes(count, inbound)));
+                }
+                let config = config.clone();
+                lanes.spawn(async move {
+                    if let Err(error) = handle_incoming(incoming, config).await {
+                        tracing::debug!(%error, "lane handler failed");
+                    }
+                });
             }
-        });
+            _ = lanes.join_next(), if !lanes.is_empty() => {},
+        }
     }
-    Ok(())
 }
 
 async fn handle_incoming(incoming: Incoming, config: ServerConfig) -> mux::Result<()> {
@@ -257,13 +336,11 @@ async fn bridge_udp(
     let (mut read, mut write) = split(lane);
     let socket = Arc::new(socket);
     let activity = Arc::new(AtomicU64::new(0));
-    let done = Arc::new(Notify::new());
     let epoch = Instant::now();
 
     let lane_socket = socket.clone();
-    let lane_done = done.clone();
     let lane_activity = activity.clone();
-    let lane_to_socket = tokio::spawn(async move {
+    let lane_to_socket = async move {
         loop {
             match udp::read_frame(&mut read).await {
                 Ok(Some(payload)) => {
@@ -276,13 +353,11 @@ async fn bridge_udp(
                 Err(_) => break,
             }
         }
-        lane_done.notify_one();
-    });
+    };
 
     let socket_lane = socket.clone();
-    let socket_done = done.clone();
     let socket_activity = activity.clone();
-    let socket_to_lane = tokio::spawn(async move {
+    let socket_to_lane = async move {
         let mut buffer = vec![0u8; UDP_BUFFER];
         while let Ok((length, source)) = socket_lane.recv_from(&mut buffer).await {
             if udp::write_response(&mut write, &Address::Ip(source), &buffer[..length])
@@ -293,8 +368,7 @@ async fn bridge_udp(
             }
             touch(&socket_activity, epoch);
         }
-        socket_done.notify_one();
-    });
+    };
 
     let check = idle_timeout
         .min(Duration::from_secs(1))
@@ -311,11 +385,10 @@ async fn bridge_udp(
     };
 
     tokio::select! {
-        _ = done.notified() => {}
+        _ = lane_to_socket => {}
+        _ = socket_to_lane => {}
         _ = idle => {}
     }
-    lane_to_socket.abort();
-    socket_to_lane.abort();
     Ok(())
 }
 

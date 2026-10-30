@@ -9,8 +9,8 @@ mod session;
 pub use error::{Error, Result};
 pub use freshness::FreshnessCheck;
 pub use handshake::{
-    AUTH_WINDOW, AcceptOutcome, HANDSHAKE_VERSION, ServerFlight, accept, build_server_flight,
-    connect, default_flight_sizes, serve_connection,
+    AUTH_WINDOW, AcceptOutcome, HANDSHAKE_VERSION, ServerFlight, accept, accept_with,
+    build_server_flight, connect, default_flight_sizes, serve_connection,
 };
 pub use originprofile::{
     OriginProfile, OriginProfileCache, build_probe_hello, probe_origin, probe_origin_at,

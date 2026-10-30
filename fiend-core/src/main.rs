@@ -23,11 +23,8 @@ async fn main() -> ExitCode {
             println!("{}", hex::encode(rand::random::<[u8; 32]>()));
             Ok(())
         }
-        Some("check") => config_path(&args[1..], "check").and_then(|path| {
-            config::load_server(path).map_err(|error| format!("config: {error}"))?;
-            println!("node config is valid");
-            Ok(())
-        }),
+        Some("check") => run_check(&args[1..]),
+        Some("node") => run_node(&args[1..]).await,
         Some("--version") => {
             println!("fiend-core {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -59,7 +56,8 @@ fn usage() {
     println!("  template <input.bin>");
     println!("  client <config.toml>");
     println!("  server <config.toml>");
-    println!("  check <config.toml>");
+    println!("  node <config.toml>");
+    println!("  check <config.toml> [state.json]");
     println!("  generate-secret");
     println!("  prepare <directory> [--import <server.toml> | --port <port>]");
 }
@@ -118,6 +116,68 @@ async fn run_server(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn run_check(args: &[String]) -> Result<(), String> {
+    let (path, state_path) = match args {
+        [path] => (path, None),
+        [path, state] => (path, Some(state)),
+        _ => return Err("Usage: fiend-core check <config.toml> [state.json]".into()),
+    };
+    let settings = config::load_server(path).map_err(|error| format!("config: {error}"))?;
+    if let Some(path) = state_path {
+        let raw = fs::read(path).map_err(|_| "cannot read node state")?;
+        if raw.len() > fiend_core::node::MAX_STATE_BYTES {
+            return Err("node state is too large".into());
+        }
+        let state: fiend_core::node::DesiredState =
+            serde_json::from_slice(&raw).map_err(|_| "invalid node state")?;
+        let secret = fs::read_to_string(&settings.node.control_secret_file)
+            .map_err(|_| "cannot read control secret")?;
+        let secret = fiend_core::node::decode_secret(&secret).map_err(|error| error.to_string())?;
+        state.validate(&secret).map_err(|error| error.to_string())?;
+    }
+    println!("node config is valid");
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn run_node(args: &[String]) -> Result<(), String> {
+    use fiend_core::node::{DesiredState, Node, control, decode_secret};
+    let path = config_path(args, "node")?;
+    let settings = config::load_server(path).map_err(|error| format!("config: {error}"))?;
+    let secret = fs::read_to_string(&settings.node.control_secret_file)
+        .map_err(|_| "cannot read control secret")?;
+    let secret = decode_secret(&secret).map_err(|error| error.to_string())?;
+    let initial = DesiredState::from_legacy(&settings.config);
+    let node = Node::load(&settings.node.state_file, secret.to_vec(), initial)
+        .map_err(|error| format!("node state: {error}"))?;
+    let listener =
+        net::bind_listener(settings.listen).map_err(|error| format!("listen: {error}"))?;
+    node.configure_updates(
+        settings.node.updates_dir,
+        fs::canonicalize(path).map_err(|error| error.to_string())?,
+    )
+    .await;
+    let server = Server::managed(settings.config, node.clone());
+    tracing::info!(listen = %listener.local_addr().map_err(|error| error.to_string())?, "node started");
+    tokio::select! {
+        result = server.serve(listener) => result.map_err(|error| format!("node: {error}"))?,
+        result = control::serve_unix(&settings.node.control_socket, node.clone()) => result.map_err(|error| format!("control socket: {error}"))?,
+        _ = node.maintain_usage() => {},
+        _ = node.wait_for_restart() => tracing::info!("binary update restart requested"),
+        _ = shutdown_signal() => tracing::info!("shutdown signal received"),
+    }
+    node.persist_usage()
+        .await
+        .map_err(|error| format!("save usage: {error}"))?;
+    tracing::info!("node stopped");
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn run_node(_args: &[String]) -> Result<(), String> {
+    Err("managed node mode needs Unix".into())
+}
+
 fn config_path<'a>(args: &'a [String], command: &str) -> Result<&'a str, String> {
     match args {
         [path] => Ok(path),
@@ -152,7 +212,8 @@ fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_writer(fiend_core::node::logs::Writer::default)
         .try_init();
 }
 

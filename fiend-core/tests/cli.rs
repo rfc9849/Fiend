@@ -144,6 +144,60 @@ origin_port = 1
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn managed_node_starts_checks_saved_state_and_stops_cleanly() {
+    let dir = temp_dir("managed-node");
+    let port = free_port();
+    let socket = PathBuf::from(format!(
+        "/tmp/fiend-cli-{}.sock",
+        hex::encode(rand::random::<[u8; 16]>())
+    ));
+    write(&dir, "control.secret", &"93".repeat(32));
+    let path = write(
+        &dir,
+        "node.toml",
+        &format!(
+            "listen = \"127.0.0.1:{port}\"\nsecret = \"{SECRET_HEX}\"\norigin_host = \"127.0.0.1\"\norigin_port = 1\n[origin]\nrecord_sizes = [35, 3400, 286, 74]\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"{}\"\nupdates_dir = \"updates\"\n",
+            socket.display()
+        ),
+    );
+    let mut child = Command::new(bin())
+        .arg("node")
+        .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take();
+    wait_for_port(port, &mut child, &mut stderr);
+    let check = Command::new(bin())
+        .arg("check")
+        .arg(&path)
+        .arg(dir.join("state.json"))
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = wait_for_exit(&mut child, Duration::from_secs(5)).unwrap_or_else(|| {
+        let _ = child.kill();
+        panic!("node did not stop")
+    });
+    assert!(status.success(), "{}", read_stderr(&mut stderr));
+    assert!(dir.join("state.usage.json").exists());
+    let _ = fs::remove_file(socket);
+}
+
 #[test]
 fn prepare_import_keeps_settings_and_does_not_replace_config() {
     let dir = temp_dir("prepare-import");

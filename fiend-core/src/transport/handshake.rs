@@ -128,13 +128,29 @@ where
 }
 
 pub async fn accept<S>(
-    mut stream: S,
+    stream: S,
     secret: &[u8],
     replay: &FreshnessCheck,
     origin: &OriginProfile,
 ) -> Result<AcceptOutcome<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
+{
+    accept_with(stream, replay, origin, |body, time| {
+        verify_auth_token(body, secret, time).then(|| secret.to_vec())
+    })
+    .await
+}
+
+pub async fn accept_with<S, F>(
+    mut stream: S,
+    replay: &FreshnessCheck,
+    origin: &OriginProfile,
+    select: F,
+) -> Result<AcceptOutcome<S>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce(&[u8], i64) -> Option<Vec<u8>>,
 {
     let deadline = Instant::now() + PRE_AUTH_TIMEOUT;
     let mut buffered = Vec::with_capacity(2048);
@@ -154,9 +170,14 @@ where
     }
 
     let body = &buffered[5..];
-    if !verify_auth_token(body, secret, unix_time()) {
+    if body.len() < 71 || body[0] != 0x01 || body[38] != 32 {
         return passthrough(stream, buffered);
     }
+    let Some(secret) = select(body, unix_time()) else {
+        return passthrough(stream, buffered);
+    };
+    let secret = Zeroizing::new(secret);
+    let secret = secret.as_slice();
     let tls_random: [u8; 32] = body[6..38].try_into().expect("32-byte slice");
     let session_id: [u8; 32] = body[39..71].try_into().expect("32-byte slice");
     if !replay.check(&tls_random) {

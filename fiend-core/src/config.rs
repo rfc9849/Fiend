@@ -42,6 +42,27 @@ pub struct ClientSettings {
 pub struct ServerSettings {
     pub listen: SocketAddr,
     pub config: ServerConfig,
+    pub node: NodeSettings,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NodeSettings {
+    pub state_file: PathBuf,
+    pub control_secret_file: PathBuf,
+    pub control_socket: PathBuf,
+    pub updates_dir: PathBuf,
+}
+
+impl Default for NodeSettings {
+    fn default() -> Self {
+        Self {
+            state_file: PathBuf::from("/var/lib/fiend/state.json"),
+            control_secret_file: PathBuf::from("/etc/fiend/control.secret"),
+            control_socket: PathBuf::from("/run/fiend/control.sock"),
+            updates_dir: PathBuf::from("/var/lib/fiend/updates"),
+        }
+    }
 }
 
 pub fn load_client(path: impl AsRef<Path>) -> Result<ClientSettings, ConfigError> {
@@ -137,9 +158,21 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     config.target = file.target.into_policy();
     config.tcp_notsent_lowat = socket_size(file.tcp_notsent_lowat, "server", "tcp_notsent_lowat")?;
 
+    let mut node = file.node;
+    for path in [
+        &mut node.state_file,
+        &mut node.control_secret_file,
+        &mut node.control_socket,
+        &mut node.updates_dir,
+    ] {
+        if path.is_relative() {
+            *path = base.join(&path);
+        }
+    }
     Ok(ServerSettings {
         listen,
         config: build_server(config)?,
+        node,
     })
 }
 
@@ -251,6 +284,8 @@ struct ClientUdpFile {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ServerFile {
+    #[serde(default)]
+    node: NodeSettings,
     listen: Option<String>,
     secret: Option<String>,
     secret_file: Option<String>,

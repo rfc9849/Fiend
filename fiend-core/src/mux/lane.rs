@@ -11,6 +11,7 @@ use tokio::time::Instant;
 use super::link::{LOAD_INTERVAL, LinkShared};
 
 pub const LANE_HEADER: &str = "x-lane";
+pub(crate) type IoMeter = Arc<dyn Fn(usize, bool) + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LaneKind {
@@ -90,6 +91,7 @@ pub struct H2Lane {
     sampled: Instant,
     bulk_until: Option<Instant>,
     blocked: bool,
+    meter: Option<IoMeter>,
 }
 
 impl H2Lane {
@@ -126,6 +128,7 @@ impl H2Lane {
             sampled: Instant::now(),
             bulk_until: None,
             blocked: false,
+            meter: None,
         }
     }
 
@@ -137,7 +140,14 @@ impl H2Lane {
         self.bulk_until.is_some_and(|until| Instant::now() < until)
     }
 
+    pub(crate) fn set_meter(&mut self, meter: Option<IoMeter>) {
+        self.meter = meter;
+    }
+
     fn track(&mut self, bytes: usize, inbound: bool) {
+        if let Some(meter) = &self.meter {
+            meter(bytes, inbound);
+        }
         let Some(shared) = &self.shared else {
             return;
         };

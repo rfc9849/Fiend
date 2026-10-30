@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod fingerprint;
 pub mod mux;
 pub mod net;
+pub mod node;
 pub mod server;
 pub mod socks5;
 pub mod target;

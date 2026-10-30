@@ -18,7 +18,8 @@ const PROBE_RECORD_TIMEOUT: Duration = Duration::from_millis(150);
 const PROBE_RECORDS: usize = 8;
 const MAX_PROBE_RECORD: usize = DEFAULT_RECORD_MAX + 16 + 256;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OriginProfile {
     pub cipher_suite: u16,
     pub key_share_group: u16,

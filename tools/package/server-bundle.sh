@@ -50,12 +50,12 @@ for arch in "${ARCHES[@]}"; do
     mkdir -p "$dir/systemd"
     cp "$ROOT/target/$target/release/fiend-core" "$ROOT/target/$target/release/fiend-panel" "$dir/"
     tar -xzf "$CACHE/$asset" -C "$dir" wireproxy
-    cp "$ROOT/tools/package/install.sh" "$ROOT/tools/package/rollback.sh" "$dir/"
+    cp "$ROOT/tools/package/install.sh" "$ROOT/tools/package/rollback.sh" "$ROOT/tools/package/activate-update.sh" "$ROOT/tools/package/node-entry.sh" "$dir/"
     cp "$ROOT/tools/package/systemd/"*.service "$dir/systemd/"
-    chmod 755 "$dir/fiend-core" "$dir/fiend-panel" "$dir/wireproxy" "$dir/install.sh" "$dir/rollback.sh"
+    chmod 755 "$dir/fiend-core" "$dir/fiend-panel" "$dir/wireproxy" "$dir/install.sh" "$dir/rollback.sh" "$dir/activate-update.sh" "$dir/node-entry.sh"
     (
         cd "$dir"
-        shasum -a 256 fiend-core fiend-panel wireproxy install.sh rollback.sh systemd/*.service > SHA256SUMS
+        shasum -a 256 fiend-core fiend-panel wireproxy install.sh rollback.sh activate-update.sh node-entry.sh systemd/*.service > SHA256SUMS
         if [ "$(uname -s)" = Darwin ]; then
             tar --no-xattrs --no-mac-metadata -czf "$OUT/fiend-$VERSION-linux-$arch.tar.gz.part" .
         else

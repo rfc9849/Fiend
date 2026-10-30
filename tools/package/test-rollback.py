@@ -17,7 +17,12 @@ class RollbackTests(unittest.TestCase):
         self.previous = self.root / "fiend-core.prev"
         self.failed = self.root / "fiend-core.failed"
         self.current.write_bytes(b"new binary")
-        self.environment = dict(os.environ, FIEND_BIN=str(self.root), FIEND_CONFIG="test-node.toml")
+        commands = self.root / "commands"
+        commands.mkdir()
+        runuser = commands / "runuser"
+        runuser.write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
+        runuser.chmod(0o755)
+        self.environment = dict(os.environ, FIEND_BIN=str(self.root), FIEND_CONFIG="test-node.toml", PATH=str(commands) + os.pathsep + os.environ["PATH"])
 
     def run_rollback(self):
         return subprocess.run(["sh", str(SCRIPT)], env=self.environment, capture_output=True)

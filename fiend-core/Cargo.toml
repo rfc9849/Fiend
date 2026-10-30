@@ -25,7 +25,7 @@ version = "0.13"
 
 [dependencies.tokio]
 version = "1"
-features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"]
+features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"]
 
 [dependencies.ml-kem]
 version = "0.3"
@@ -57,6 +57,9 @@ version = "3"
 
 [dependencies.zeroize]
 version = "1"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+sysinfo = { version = "=0.40.1", default-features = false, features = ["system", "network"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

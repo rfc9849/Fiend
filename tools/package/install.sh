@@ -58,7 +58,7 @@ if [ -n "$BUNDLE" ]; then
 fi
 (
     cd "$SOURCE"
-    for file in fiend-core fiend-panel wireproxy install.sh rollback.sh systemd/fiend-node.service systemd/fiend-panel.service systemd/fiend-node-rollback.service; do
+    for file in fiend-core fiend-panel wireproxy install.sh rollback.sh activate-update.sh node-entry.sh systemd/fiend-node.service systemd/fiend-panel.service systemd/fiend-node-rollback.service; do
         [ -f "$file" ] && [ ! -L "$file" ] || fail "Missing bundle file: $file"
         awk -v name="$file" '$2 == name && length($1) == 64 {found++} END {exit found != 1}' SHA256SUMS || fail "Missing checksum: $file"
     done
@@ -120,7 +120,10 @@ if [ "$PANEL_ONLY" = 0 ]; then
         install -m 0755 "$SOURCE/$binary" "/opt/fiend/bin/$binary.new"
         mv -f "/opt/fiend/bin/$binary.new" "/opt/fiend/bin/$binary"
     done
+    install -d -o fiend -g fiend -m 0700 /var/lib/fiend/updates
     install -m 0755 "$SOURCE/rollback.sh" /opt/fiend/bin/fiend-rollback
+    install -m 0755 "$SOURCE/activate-update.sh" /opt/fiend/bin/fiend-activate-update
+    install -m 0755 "$SOURCE/node-entry.sh" /opt/fiend/bin/fiend-node
     install -m 0644 "$SOURCE/systemd/fiend-node.service" "$SOURCE/systemd/fiend-node-rollback.service" /etc/systemd/system/
 fi
 if [ "$MODE" = panel ]; then
@@ -144,4 +147,4 @@ if [ "$MODE" = panel ]; then
     systemctl restart fiend-panel.service
     systemctl is-active --quiet fiend-panel.service
 fi
-printf '%s\n' 'Phase 0 package installed. Node control and panel setup are not available yet.'
+printf '%s\n' 'Server package installed. The panel setup wizard is not available yet.'

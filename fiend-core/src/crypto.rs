@@ -55,6 +55,22 @@ pub fn auth_token_matches(
     )
 }
 
+#[derive(Clone)]
+pub struct AuthKey(HmacSha256);
+
+impl AuthKey {
+    pub fn new(secret: &[u8]) -> Self {
+        Self(HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length"))
+    }
+
+    pub fn matches(&self, tls_random: &[u8], hour_bucket: i64, supplied: &[u8]) -> bool {
+        let mut mac = self.0.clone();
+        mac.update(tls_random);
+        mac.update(&(hour_bucket as u64).to_be_bytes());
+        mac.verify_slice(supplied).is_ok()
+    }
+}
+
 pub const SERVER_NONCE_SIZE: usize = 16;
 
 pub fn server_auth_random(

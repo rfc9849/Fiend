@@ -63,6 +63,7 @@ pub struct Incoming {
     body: RecvStream,
     respond: SendResponse<Bytes>,
     lane_share: usize,
+    meter: Option<super::lane::IoMeter>,
 }
 
 impl Incoming {
@@ -114,7 +115,13 @@ impl Incoming {
             body,
             respond,
             lane_share,
+            meter: None,
         })
+    }
+
+    pub(crate) fn with_meter(mut self, meter: super::lane::IoMeter) -> Self {
+        self.meter = Some(meter);
+        self
     }
 
     pub async fn accept(mut self) -> Result<H2Lane> {
@@ -124,13 +131,15 @@ impl Incoming {
             .body(())
             .map_err(|_| Error::InvalidConnect)?;
         let send = self.respond.send_response(response, false)?;
-        Ok(H2Lane::new(
+        let mut lane = H2Lane::new(
             self.kind,
             self.authority,
             send,
             self.body,
             LaneOptions::server(self.lane_share),
-        ))
+        );
+        lane.set_meter(self.meter);
+        Ok(lane)
     }
 
     pub fn reject(mut self, status: http::StatusCode) {
