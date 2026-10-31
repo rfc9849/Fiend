@@ -927,3 +927,54 @@ async fn invalid_rules_or_resolver_are_rejected() {
         assert!(TunEngine::new(client.clone(), options).is_err());
     }
 }
+
+#[tokio::test]
+async fn fake_ip_outlives_its_ttl_and_engine_restarts() {
+    let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = echo.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (mut read, mut write) = stream.split();
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+            });
+        }
+    });
+    let pool = Arc::new(std::sync::Mutex::new(
+        fiend_tun::dns::FakeDns::new(16, 1).unwrap(),
+    ));
+    let options = || TunOptions {
+        fake_dns: Some(pool.clone()),
+        ..TunOptions::default()
+    };
+    let (engine, _, mut peer, task) = stack(options()).await;
+    let (ip, code) = fake_ip(&mut peer, "localhost.").await;
+    assert_eq!(code, hickory_proto::op::ResponseCode::NoError);
+    let target = SocketAddr::new(ip.into(), port);
+    tcp_echo_once(
+        &mut peer,
+        "10.0.0.2:30001".parse().unwrap(),
+        target,
+        b"first",
+    )
+    .await;
+    engine.stop();
+    task.await.unwrap().unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (engine, _, mut peer, task) = stack(options()).await;
+    tcp_echo_once(
+        &mut peer,
+        "10.0.0.2:30002".parse().unwrap(),
+        target,
+        b"after TTL",
+    )
+    .await;
+    let (other, _) = fake_ip(&mut peer, "other.example.").await;
+    assert_ne!(other, ip);
+    let (same, _) = fake_ip(&mut peer, "localhost.").await;
+    assert_eq!(same, ip);
+    engine.stop();
+    task.await.unwrap().unwrap();
+}

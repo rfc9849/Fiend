@@ -3,7 +3,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use fiend_core::addr::Address;
@@ -25,6 +25,19 @@ use crate::resolve::{Resolver, parse_server};
 use crate::rules::{Route, RuleFile, Rules, is_blocked_udp_port, is_null_network};
 
 const QUIC_PORT: u16 = 443;
+const DNS_CAPACITY: usize = 8192;
+const DNS_TTL: u32 = 60;
+
+pub fn shared_fake_dns() -> Arc<Mutex<FakeDns>> {
+    static SHARED: OnceLock<Arc<Mutex<FakeDns>>> = OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            Arc::new(Mutex::new(
+                FakeDns::new(DNS_CAPACITY, DNS_TTL).expect("default fake DNS settings are valid"),
+            ))
+        })
+        .clone()
+}
 
 pub trait PacketIo: Send + Sync + 'static {
     fn recv(&self, packet: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send;
@@ -56,6 +69,7 @@ pub struct TunOptions {
     pub max_udp_flows: usize,
     pub dns_capacity: usize,
     pub dns_ttl: u32,
+    pub fake_dns: Option<Arc<Mutex<FakeDns>>>,
     pub udp_idle: Duration,
     pub protect_socket: ProtectSocket,
 }
@@ -75,8 +89,9 @@ impl Default for TunOptions {
             direct_resolver: String::new(),
             max_tcp_flows: 256,
             max_udp_flows: 256,
-            dns_capacity: 8192,
-            dns_ttl: 60,
+            dns_capacity: DNS_CAPACITY,
+            dns_ttl: DNS_TTL,
+            fake_dns: None,
             udp_idle: Duration::from_secs(60),
             protect_socket: Arc::new(|_| Ok(())),
         }
@@ -112,7 +127,7 @@ struct Context {
     options: TunOptions,
     rules: Arc<Rules>,
     resolver: Resolver,
-    dns: Mutex<FakeDns>,
+    dns: Arc<Mutex<FakeDns>>,
     counters: Counters,
 }
 
@@ -154,9 +169,19 @@ impl TunEngine {
             parse_server(&options.direct_resolver)?,
             options.protect_socket.clone(),
         );
-        let dns = FakeDns::new(options.dns_capacity, options.dns_ttl)
-            .map_err(io::Error::other)?
-            .with_rules(rules.clone());
+        let dns = match options.fake_dns.take() {
+            Some(dns) => {
+                dns.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .set_rules(rules.clone());
+                dns
+            }
+            None => Arc::new(Mutex::new(
+                FakeDns::new(options.dns_capacity, options.dns_ttl)
+                    .map_err(io::Error::other)?
+                    .with_rules(rules.clone()),
+            )),
+        };
         let (network, _) = watch::channel(0);
         Ok(Self {
             context: Arc::new(Context {
@@ -164,7 +189,7 @@ impl TunEngine {
                 options,
                 rules,
                 resolver,
-                dns: Mutex::new(dns),
+                dns,
                 counters: Counters::default(),
             }),
             cancel: CancellationToken::new(),
@@ -200,7 +225,7 @@ impl TunEngine {
             .dns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .answer(query, Instant::now())
+            .answer(query)
             .ok()
     }
 
@@ -347,19 +372,19 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                     continue;
                 }
                 match &packet.transport {
-                    Transport::Tcp { syn, .. } => {
+                    Transport::Tcp { syn, rst, .. } => {
                         if *syn && (tcp.contains(&packet.key) || tcp.len() >= context.options.max_tcp_flows) {
                             context.drop_packet();
                             if !tcp.contains(&packet.key) && let Ok(reset) = packet.reset() { let _ = output.try_send(reset); }
                             continue;
                         }
                         if *syn { tcp.insert(packet.key); }
-                        if tcp.contains(&packet.key) { stack_input.send(raw).await?; }
+                        if tcp.contains(&packet.key) || *rst { stack_input.send(raw).await?; }
                         else { context.drop_packet(); if let Ok(reset) = packet.reset() { let _ = output.try_send(reset); } }
                     }
                     Transport::Udp(payload) => {
                         if packet.key.destination.port() == 53 {
-                            if let Ok(answer) = context.dns.lock().unwrap_or_else(|e| e.into_inner()).answer(payload, Instant::now()) {
+                            if let Ok(answer) = context.dns.lock().unwrap_or_else(|e| e.into_inner()).answer(payload) {
                                 context.queue_udp(&output, packet.key, &answer);
                             } else { context.drop_packet(); }
                             continue;
@@ -411,7 +436,7 @@ impl Context {
         self.dns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .destination(address, Instant::now())
+            .destination(address)
             .map_err(io::Error::other)
     }
 
@@ -457,6 +482,27 @@ impl Context {
         }
     }
 
+    async fn send_udp(
+        &self,
+        output: &mpsc::Sender<Vec<u8>>,
+        key: FlowKey,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let id = self.counters.packet_id.fetch_add(1, Ordering::Relaxed);
+        let Ok(packets) = udp_packets(key.destination, key.source, payload, self.options.mtu, id)
+        else {
+            self.drop_packet();
+            return Ok(());
+        };
+        for packet in packets {
+            output
+                .send(packet)
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "TUN writer is closed"))?;
+        }
+        Ok(())
+    }
+
     fn queue_udp(&self, output: &mpsc::Sender<Vec<u8>>, key: FlowKey, payload: &[u8]) {
         let id = self.counters.packet_id.fetch_add(1, Ordering::Relaxed);
         let Ok(packets) = udp_packets(key.destination, key.source, payload, self.options.mtu, id)
@@ -493,7 +539,7 @@ async fn tcp_flow(
                 .dns
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .answer(&packet, Instant::now())
+                .answer(&packet)
                 .map_err(io::Error::other)?;
             stream.write_u16(answer.len() as u16).await?;
             stream.write_all(&answer).await?;
@@ -583,7 +629,7 @@ async fn udp_flow(
                         let Some(packet) = packet else { return Err(io::Error::new(io::ErrorKind::BrokenPipe, "UDP flow is closed")); };
                         socket.send(&packet).await?;
                     }
-                    size = socket.recv(&mut buffer) => { context.queue_udp(&output, key, &buffer[..size?]); }
+                    size = socket.recv(&mut buffer) => { context.send_udp(&output, key, &buffer[..size?]).await?; }
                 }
                 Ok(())
             };
@@ -615,7 +661,7 @@ async fn udp_flow(
         loop {
             match receiver.recv().await {
                 Ok(Some(response)) => {
-                    context.queue_udp(&output, key, &response.payload);
+                    context.send_udp(&output, key, &response.payload).await?;
                     activity.send_replace(tokio::time::Instant::now());
                 }
                 Ok(None) => {}

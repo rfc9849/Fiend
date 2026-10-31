@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use fiend_core::addr::Address;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, ResponseCode};
@@ -32,13 +31,8 @@ pub enum DnsError {
     MissingDomain,
 }
 
-struct Entry {
-    domain: String,
-    expires: Instant,
-}
-
 pub struct FakeDns {
-    entries: LruCache<Ipv4Addr, Entry>,
+    entries: LruCache<Ipv4Addr, String>,
     domains: HashMap<String, Ipv4Addr>,
     next: u32,
     ttl: u32,
@@ -68,7 +62,11 @@ impl FakeDns {
         self
     }
 
-    pub fn answer(&mut self, packet: &[u8], now: Instant) -> Result<Vec<u8>, DnsError> {
+    pub fn set_rules(&mut self, rules: Arc<Rules>) {
+        self.rules = Some(rules);
+    }
+
+    pub fn answer(&mut self, packet: &[u8]) -> Result<Vec<u8>, DnsError> {
         if packet.len() > MAX_QUERY {
             return Err(DnsError::PacketSize);
         }
@@ -120,63 +118,54 @@ impl FakeDns {
                     .is_some_and(|rules| rules.is_blocked(&domain))
                 {
                     response.metadata.response_code = ResponseCode::NXDomain;
-                } else if let Some(ip) = self.allocate(&domain, now) {
-                    response.add_answer(Record::from_rdata(query.name, self.ttl, RData::A(A(ip))));
                 } else {
-                    response.metadata.response_code = ResponseCode::ServFail;
+                    let ip = self.allocate(&domain);
+                    response.add_answer(Record::from_rdata(query.name, self.ttl, RData::A(A(ip))));
                 }
             }
         }
         response.to_vec().map_err(|_| DnsError::Packet)
     }
 
-    pub fn destination(&mut self, address: SocketAddr, now: Instant) -> Result<Address, DnsError> {
+    pub fn destination(&mut self, address: SocketAddr) -> Result<Address, DnsError> {
         let IpAddr::V4(ip) = address.ip() else {
             return Ok(Address::Ip(address));
         };
         if !is_fake_ip(ip) {
             return Ok(Address::Ip(address));
         }
-        if self
-            .entries
-            .peek(&ip)
-            .is_some_and(|entry| entry.expires <= now)
-        {
-            if let Some(entry) = self.entries.pop(&ip) {
-                self.domains.remove(&entry.domain);
-            }
-            return Err(DnsError::MissingDomain);
-        }
-        let entry = self.entries.get(&ip).ok_or(DnsError::MissingDomain)?;
-        Ok(Address::domain(entry.domain.clone(), address.port()))
+        let domain = self.entries.get(&ip).ok_or(DnsError::MissingDomain)?;
+        Ok(Address::domain(domain.clone(), address.port()))
     }
 
-    fn allocate(&mut self, domain: &str, now: Instant) -> Option<Ipv4Addr> {
-        let expires = now.checked_add(Duration::from_secs(u64::from(self.ttl)))?;
-        if let Some(ip) = self.domains.get(domain).copied() {
-            if let Some(entry) = self.entries.get_mut(&ip)
-                && entry.expires > now
-            {
-                entry.expires = expires;
-                return Some(ip);
+    fn allocate(&mut self, domain: &str) -> Ipv4Addr {
+        if let Some(ip) = self.domains.get(domain).copied()
+            && self.entries.get(&ip).is_some()
+        {
+            return ip;
+        }
+        let ip = loop {
+            let ip = Ipv4Addr::from(self.next);
+            self.next = if self.next >= LAST_IP {
+                FIRST_IP
+            } else {
+                self.next + 1
+            };
+            if !self.entries.contains(&ip) {
+                break ip;
             }
-            self.entries.pop(&ip);
-            self.domains.remove(domain);
-        }
-        if self.next > LAST_IP {
-            return None;
-        }
-        let ip = Ipv4Addr::from(self.next);
-        self.next += 1;
-        let entry = Entry {
-            domain: domain.to_owned(),
-            expires,
+            if self.entries.len() >= self.entries.cap().get()
+                && let Some((ip, removed)) = self.entries.pop_lru()
+            {
+                self.domains.remove(&removed);
+                break ip;
+            }
         };
-        if let Some((_, removed)) = self.entries.push(ip, entry) {
-            self.domains.remove(&removed.domain);
+        if let Some((_, removed)) = self.entries.push(ip, domain.to_owned()) {
+            self.domains.remove(&removed);
         }
         self.domains.insert(domain.to_owned(), ip);
-        Some(ip)
+        ip
     }
 }
 
@@ -210,9 +199,9 @@ mod tests {
         request.to_vec().unwrap()
     }
 
-    fn allocate(dns: &mut FakeDns, domain: &str, now: Instant) -> Ipv4Addr {
+    fn allocate(dns: &mut FakeDns, domain: &str) -> Ipv4Addr {
         let response =
-            Message::from_vec(&dns.answer(&query(domain, RecordType::A), now).unwrap()).unwrap();
+            Message::from_vec(&dns.answer(&query(domain, RecordType::A)).unwrap()).unwrap();
         assert_eq!(response.metadata.id, 42);
         assert_eq!(response.metadata.response_code, ResponseCode::NoError);
         assert!(response.metadata.recursion_desired);
@@ -226,15 +215,13 @@ mod tests {
 
     #[test]
     fn answers_map_back_to_canonical_domains() {
-        let now = Instant::now();
         let mut dns = FakeDns::new(16, 60).unwrap();
-        let ip = allocate(&mut dns, "WWW.Example.COM.", now);
+        let ip = allocate(&mut dns, "WWW.Example.COM.");
         assert!(is_fake_ip(ip));
         assert_ne!(ip, DNS_ADDRESS);
-        assert_eq!(ip, allocate(&mut dns, "www.example.com", now));
+        assert_eq!(ip, allocate(&mut dns, "www.example.com"));
         assert_eq!(
-            dns.destination(SocketAddr::new(ip.into(), 443), now)
-                .unwrap(),
+            dns.destination(SocketAddr::new(ip.into(), 443)).unwrap(),
             Address::domain("www.example.com", 443)
         );
         assert_eq!(dns.entries.len(), 1);
@@ -243,7 +230,6 @@ mod tests {
 
     #[test]
     fn aaaa_https_svcb_and_other_queries_are_empty() {
-        let now = Instant::now();
         let mut dns = FakeDns::new(16, 60).unwrap();
         for kind in [
             RecordType::AAAA,
@@ -253,7 +239,7 @@ mod tests {
             RecordType::ANY,
         ] {
             let response =
-                Message::from_vec(&dns.answer(&query("example.com", kind), now).unwrap()).unwrap();
+                Message::from_vec(&dns.answer(&query("example.com", kind)).unwrap()).unwrap();
             assert_eq!(response.metadata.response_code, ResponseCode::NoError);
             assert!(response.answers.is_empty());
             assert_eq!(response.queries[0].query_type, kind);
@@ -262,56 +248,71 @@ mod tests {
     }
 
     #[test]
-    fn expiry_and_lru_eviction_fail_closed_without_ip_reuse() {
-        let now = Instant::now();
-        let mut dns = FakeDns::new(2, 60).unwrap();
-        let first = allocate(&mut dns, "first.example", now);
-        let second = allocate(&mut dns, "second.example", now);
-        dns.destination(SocketAddr::new(first.into(), 80), now)
-            .unwrap();
-        let third = allocate(&mut dns, "third.example", now);
-        assert!(
-            dns.destination(SocketAddr::new(second.into(), 80), now)
-                .is_err()
+    fn mappings_outlive_the_ttl_and_lru_eviction_fails_closed() {
+        let mut dns = FakeDns::new(2, 1).unwrap();
+        let first = allocate(&mut dns, "first.example");
+        let second = allocate(&mut dns, "second.example");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_eq!(
+            dns.destination(SocketAddr::new(first.into(), 80)).unwrap(),
+            Address::domain("first.example", 80)
         );
-        assert!(
-            dns.destination(SocketAddr::new(third.into(), 80), now)
-                .is_ok()
-        );
+        assert_eq!(first, allocate(&mut dns, "first.example"));
+        let third = allocate(&mut dns, "third.example");
+        assert!(dns.destination(SocketAddr::new(second.into(), 80)).is_err());
+        assert!(dns.destination(SocketAddr::new(third.into(), 80)).is_ok());
         assert_eq!(dns.domains.len(), 2);
-        let later = now + Duration::from_secs(60);
-        assert!(
-            dns.destination(SocketAddr::new(first.into(), 80), later)
-                .is_err()
-        );
-        let renewed = allocate(&mut dns, "first.example", later);
+        let renewed = allocate(&mut dns, "second.example");
         assert_ne!(renewed, first);
         assert_ne!(renewed, second);
         assert_ne!(renewed, third);
     }
 
     #[test]
-    fn exhausted_address_space_returns_servfail() {
-        let now = Instant::now();
-        let mut dns = FakeDns::new(2, 60).unwrap();
+    fn exhausted_address_space_wraps_and_skips_live_addresses() {
+        let mut dns = FakeDns::new(3, 60).unwrap();
+        let first = allocate(&mut dns, "first.example");
+        assert_eq!(first, Ipv4Addr::from(FIRST_IP));
         dns.next = LAST_IP;
-        allocate(&mut dns, "last.example", now);
-        let response = Message::from_vec(
-            &dns.answer(&query("next.example", RecordType::A), now)
+        assert_eq!(allocate(&mut dns, "last.example"), Ipv4Addr::from(LAST_IP));
+        allocate(&mut dns, "first.example");
+        let wrapped = allocate(&mut dns, "next.example");
+        assert_eq!(wrapped, Ipv4Addr::from(FIRST_IP + 1));
+        assert_eq!(
+            dns.destination(SocketAddr::new(first.into(), 443)).unwrap(),
+            Address::domain("first.example", 443)
+        );
+        assert_eq!(
+            dns.destination(SocketAddr::new(Ipv4Addr::from(LAST_IP).into(), 443))
                 .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
-        assert!(response.answers.is_empty());
+            Address::domain("last.example", 443)
+        );
+    }
+
+    #[test]
+    fn a_full_pool_reuses_the_least_recent_address() {
+        let mut dns = FakeDns::new(MAX_ENTRIES, 60).unwrap();
+        for index in 0..MAX_ENTRIES {
+            dns.allocate(&format!("d{index}.example"));
+        }
+        allocate(&mut dns, "d0.example");
+        let reused = allocate(&mut dns, "new.example");
+        assert_eq!(reused, Ipv4Addr::from(FIRST_IP + 1));
+        assert!(!dns.domains.contains_key("d1.example"));
+        assert_eq!(
+            dns.destination(SocketAddr::new(Ipv4Addr::from(FIRST_IP).into(), 443))
+                .unwrap(),
+            Address::domain("d0.example", 443)
+        );
+        assert_eq!(dns.entries.len(), MAX_ENTRIES);
     }
 
     #[test]
     fn invalid_packets_do_not_create_mappings() {
         let mut dns = FakeDns::new(2, 60).unwrap();
-        assert!(dns.answer(&[0], Instant::now()).is_err());
-        assert!(dns.answer(&vec![0; MAX_QUERY + 1], Instant::now()).is_err());
-        let response =
-            Message::from_vec(&dns.answer(&[0, 42, 0], Instant::now()).unwrap()).unwrap();
+        assert!(dns.answer(&[0]).is_err());
+        assert!(dns.answer(&vec![0; MAX_QUERY + 1]).is_err());
+        let response = Message::from_vec(&dns.answer(&[0, 42, 0]).unwrap()).unwrap();
         assert_eq!(response.metadata.id, 42);
         assert_eq!(response.metadata.response_code, ResponseCode::FormErr);
         assert!(dns.entries.is_empty());
@@ -325,19 +326,11 @@ mod tests {
         let mut dns = FakeDns::new(2, 60).unwrap();
         let mut request = Message::from_vec(&query("example.com", RecordType::A)).unwrap();
         request.add_query(request.queries[0].clone());
-        let response = Message::from_vec(
-            &dns.answer(&request.to_vec().unwrap(), Instant::now())
-                .unwrap(),
-        )
-        .unwrap();
+        let response = Message::from_vec(&dns.answer(&request.to_vec().unwrap()).unwrap()).unwrap();
         assert_eq!(response.metadata.response_code, ResponseCode::FormErr);
         request.queries.pop();
         request.queries[0].query_class = DNSClass::CH;
-        let response = Message::from_vec(
-            &dns.answer(&request.to_vec().unwrap(), Instant::now())
-                .unwrap(),
-        )
-        .unwrap();
+        let response = Message::from_vec(&dns.answer(&request.to_vec().unwrap()).unwrap()).unwrap();
         assert_eq!(response.metadata.response_code, ResponseCode::Refused);
         assert!(dns.entries.is_empty());
     }
@@ -349,37 +342,28 @@ mod tests {
         let mut edns = Edns::new();
         edns.set_max_payload(65535).set_dnssec_ok(true);
         request.edns = Some(edns);
-        let response = Message::from_vec(
-            &dns.answer(&request.to_vec().unwrap(), Instant::now())
-                .unwrap(),
-        )
-        .unwrap();
+        let response = Message::from_vec(&dns.answer(&request.to_vec().unwrap()).unwrap()).unwrap();
         let edns = response.edns.unwrap();
         assert_eq!(edns.max_payload(), 1232);
         assert!(!edns.flags().dnssec_ok);
         assert!(!response.metadata.authentic_data);
         request.edns.as_mut().unwrap().set_version(1);
-        let response = Message::from_vec(
-            &dns.answer(&request.to_vec().unwrap(), Instant::now())
-                .unwrap(),
-        )
-        .unwrap();
+        let response = Message::from_vec(&dns.answer(&request.to_vec().unwrap()).unwrap()).unwrap();
         assert_eq!(u16::from(response.metadata.response_code), 16);
     }
 
     #[test]
     fn unmapped_fake_addresses_never_become_ip_targets() {
-        let now = Instant::now();
         let mut dns = FakeDns::new(2, 60).unwrap();
         for ip in ["198.18.0.0", "198.18.0.1", "198.19.255.255"] {
             assert!(
-                dns.destination(format!("{ip}:443").parse().unwrap(), now)
+                dns.destination(format!("{ip}:443").parse().unwrap())
                     .is_err()
             );
         }
         for address in ["1.1.1.1:53", "[2606:4700:4700::1111]:443", "198.20.0.1:443"] {
             let address = address.parse().unwrap();
-            assert_eq!(dns.destination(address, now).unwrap(), Address::Ip(address));
+            assert_eq!(dns.destination(address).unwrap(), Address::Ip(address));
         }
     }
 }

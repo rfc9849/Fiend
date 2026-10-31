@@ -274,6 +274,7 @@ impl Tunnel {
                     max_tcp_flows: max_connections,
                     max_udp_flows,
                     udp_idle,
+                    fake_dns: Some(fiend_tun::shared_fake_dns()),
                     protect_socket: direct_protect,
                     ..fiend_tun::TunOptions::default()
                 },

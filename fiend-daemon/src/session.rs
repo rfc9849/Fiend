@@ -92,6 +92,7 @@ pub(crate) fn tun_options(
         max_tcp_flows: 256,
         max_udp_flows: 256,
         udp_idle: Duration::from_secs(60),
+        fake_dns: Some(fiend_tun::shared_fake_dns()),
         protect_socket: protect,
         ..fiend_tun::TunOptions::default()
     }
