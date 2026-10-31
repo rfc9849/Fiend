@@ -5,4 +5,9 @@
     <string name="nav_home">Connection</string>
     <string name="nav_profiles">Profiles</string>
     <string name="nav_settings">Settings</string>
+    <string name="tile_state_connected">Connected</string>
+    <string name="tile_state_connecting">Connecting</string>
+    <string name="tile_state_disconnecting">Disconnecting</string>
+    <string name="tile_state_disconnected">Off</string>
+    <string name="tile_state_failed">Connection failed</string>
 </resources>
