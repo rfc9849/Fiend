@@ -39,7 +39,7 @@ class SystemdTests(unittest.TestCase):
         os.chown(self.updates, self.uid, self.gid)
         secret = self.base / "control.secret"
         secret.write_text("93" * 32)
-        self.config.write_text(f'listen = "127.0.0.1:0"\nsecret = "' + "91" * 32 + f'"\norigin_host = "127.0.0.1"\norigin_port = 1\n[origin]\nrecord_sizes = [35, 3400, 286, 74]\n[node]\nstate_file = "{self.state}"\ncontrol_secret_file = "{secret}"\ncontrol_socket = "{self.socket}"\nupdates_dir = "{self.updates}"\n')
+        self.config.write_text(f'listen = "127.0.0.1:0"\norigin_host = "127.0.0.1"\norigin_port = 1\n[origin]\nrecord_sizes = [35, 3400, 286, 74]\n[node]\nstate_file = "{self.state}"\ncontrol_secret_file = "{secret}"\ncontrol_socket = "{self.socket}"\nupdates_dir = "{self.updates}"\n')
         for path in [secret, self.config]:
             path.chmod(0o600)
             os.chown(path, self.uid, self.gid)

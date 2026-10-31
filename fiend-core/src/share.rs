@@ -300,8 +300,7 @@ mod tests {
         let hello = compact_hello(&Template::from_json(BUNDLED).unwrap());
         let secret = "ab".repeat(32);
         for link in [
-            "fiend://v1/abc".to_owned(),
-            "https://example.com".into(),
+            "https://example.com".to_owned(),
             "fiend://".into(),
             "fiend://!!".into(),
             format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(trailing)),

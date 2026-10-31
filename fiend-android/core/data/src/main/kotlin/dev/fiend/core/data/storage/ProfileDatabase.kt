@@ -8,8 +8,6 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
 import androidx.room.Upsert
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "profiles")
@@ -46,12 +44,4 @@ internal interface ProfileDao {
 @Database(entities = [ProfileEntity::class], version = 3, exportSchema = true)
 internal abstract class ProfileDatabase : RoomDatabase() {
     abstract fun profiles(): ProfileDao
-    companion object {
-        val MIGRATION_1_2 = object : Migration(1, 2) {
-            override fun migrate(db: SupportSQLiteDatabase) { db.execSQL("ALTER TABLE profiles ADD COLUMN template_json TEXT") }
-        }
-        val MIGRATION_2_3 = object : Migration(2, 3) {
-            override fun migrate(db: SupportSQLiteDatabase) { db.execSQL("ALTER TABLE profiles ADD COLUMN more_servers TEXT NOT NULL DEFAULT ''") }
-        }
-    }
 }

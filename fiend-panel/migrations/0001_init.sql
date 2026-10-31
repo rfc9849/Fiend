@@ -98,7 +98,8 @@ CREATE TABLE warp (
     exit_v4 TEXT,
     exit_v6 TEXT,
     rotated_at INTEGER,
-    checked_at INTEGER
+    checked_at INTEGER,
+    chosen INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE traffic_minute (

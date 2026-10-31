@@ -464,7 +464,6 @@ pub struct Rules {
     block: RuleList,
     proxy: RuleList,
     dpi: RuleList,
-    all_direct: bool,
     skipped: SrsSkipped,
 }
 
@@ -475,7 +474,6 @@ impl Rules {
             block: parse_list(block, false)?,
             proxy: parse_list(proxy, true)?,
             dpi: RuleList::default(),
-            all_direct: false,
             skipped: SrsSkipped::default(),
         })
     }
@@ -483,11 +481,6 @@ impl Rules {
     pub fn with_dpi(mut self, dpi: &str) -> Result<Self, RuleError> {
         self.dpi = parse_list(dpi, true)?;
         Ok(self)
-    }
-
-    pub fn with_all_direct(mut self, all_direct: bool) -> Self {
-        self.all_direct = all_direct;
-        self
     }
 
     /// Add one rule file. The format is detected from the magic bytes: a
@@ -560,22 +553,6 @@ impl Rules {
         self.dpi.finish();
     }
 
-    pub fn direct_counts(&self) -> RuleCounts {
-        self.direct.counts()
-    }
-
-    pub fn block_counts(&self) -> RuleCounts {
-        self.block.counts()
-    }
-
-    pub fn proxy_counts(&self) -> RuleCounts {
-        self.proxy.counts()
-    }
-
-    pub fn dpi_counts(&self) -> RuleCounts {
-        self.dpi.counts()
-    }
-
     pub fn skipped(&self) -> SrsSkipped {
         self.skipped
     }
@@ -594,9 +571,6 @@ impl Rules {
                     return Route::Block;
                 }
                 let dpi = self.dpi.cidrs.contains(ip);
-                if self.all_direct {
-                    return if dpi { Route::Dpi } else { Route::Direct };
-                }
                 if self.proxy.cidrs.contains(ip) {
                     return Route::Proxy;
                 }
@@ -614,9 +588,6 @@ impl Rules {
                     return Route::Block;
                 }
                 let dpi = self.dpi.domains.contains(&host);
-                if self.all_direct {
-                    return if dpi { Route::Dpi } else { Route::Direct };
-                }
                 if self.proxy.domains.contains(&host) {
                     return Route::Proxy;
                 }
@@ -773,7 +744,7 @@ mod tests {
         assert_eq!(rules.route(domain("ads.example"), false), Route::Block);
         assert_eq!(rules.route(ip("5.255.255.9:443"), false), Route::Proxy);
         assert_eq!(rules.route(ip("8.8.8.8:443"), false), Route::Proxy);
-        assert_eq!(rules.proxy_counts().domains, 1);
+        assert_eq!(rules.proxy.counts().domains, 1);
     }
 
     #[test]
@@ -787,28 +758,15 @@ mod tests {
         .with_dpi("domain:example\nip:5.5.0.0/16\n")
         .unwrap();
         assert_eq!(rules.route(domain("video.example"), false), Route::Dpi);
-        assert_eq!(rules.route(domain("www.proxy.example"), false), Route::Proxy);
+        assert_eq!(
+            rules.route(domain("www.proxy.example"), false),
+            Route::Proxy
+        );
         assert_eq!(rules.route(domain("ads.example"), false), Route::Block);
         assert_eq!(rules.route(domain("other.org"), false), Route::Proxy);
         assert_eq!(rules.route(ip("5.5.1.1:443"), false), Route::Dpi);
         assert_eq!(rules.route(ip("5.6.1.1:443"), false), Route::Direct);
-        assert_eq!(rules.dpi_counts().total(), 2);
-        let rules = rules.with_all_direct(true);
-        assert_eq!(rules.route(domain("proxy.example"), false), Route::Dpi);
-        assert_eq!(rules.route(domain("other.org"), false), Route::Direct);
-        assert_eq!(rules.route(ip("5.5.1.1:443"), false), Route::Dpi);
-        assert_eq!(rules.route(ip("5.5.1.1:443"), true), Route::Dpi);
-    }
-
-    #[test]
-    fn all_direct_sends_everything_direct_but_keeps_blocks() {
-        let rules = Rules::parse("", "domain:ads.example\n", "domain:proxy.example\n")
-            .unwrap()
-            .with_all_direct(true);
-        assert_eq!(rules.route(domain("example.org"), false), Route::Direct);
-        assert_eq!(rules.route(ip("1.1.1.1:443"), false), Route::Direct);
-        assert_eq!(rules.route(domain("ads.example"), false), Route::Block);
-        assert_eq!(rules.route(domain("proxy.example"), false), Route::Direct);
+        assert_eq!(rules.dpi.counts().total(), 2);
     }
 
     #[test]
@@ -936,7 +894,7 @@ mod tests {
             })
             .unwrap();
         rules.finish();
-        assert!(rules.direct_counts().cidrs > 1000);
+        assert!(rules.direct.counts().cidrs > 1000);
         assert_eq!(rules.route(ip("5.255.255.1:443"), false), Route::Direct);
     }
 

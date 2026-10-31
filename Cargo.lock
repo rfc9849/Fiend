@@ -2477,10 +2477,8 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 name = "fiend-app"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
  "fiend-core",
  "fiend-tun",
- "flate2",
  "hex",
  "http",
  "serde",
@@ -2548,7 +2546,6 @@ dependencies = [
  "serde_json",
  "socket2",
  "system-configuration 0.8.0",
- "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2600,7 +2597,6 @@ dependencies = [
  "fiend-app",
  "fiend-core",
  "fiend-tun",
- "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2658,7 +2654,6 @@ dependencies = [
  "etherparse 0.20.3",
  "fiend-core",
  "fiend-rules",
- "flate2",
  "futures",
  "hickory-proto",
  "lru 0.19.0",

@@ -208,10 +208,6 @@ impl Client {
         self.expect_ok(Request::Subscribe).await
     }
 
-    pub async fn unsubscribe(&self) -> Result<(), ClientError> {
-        self.expect_ok(Request::Unsubscribe).await
-    }
-
     pub async fn list_profiles(&self) -> Result<Vec<Profile>, ClientError> {
         match self.request(Request::ListProfiles).await? {
             Reply::Profiles { profiles } => Ok(profiles),

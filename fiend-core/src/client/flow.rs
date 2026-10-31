@@ -57,10 +57,6 @@ impl UdpSender {
     pub async fn shutdown(&mut self) -> io::Result<()> {
         self.lane.shutdown().await
     }
-
-    pub(super) async fn send_encoded(&mut self, frame: &[u8]) -> io::Result<()> {
-        self.lane.write_all(frame).await
-    }
 }
 
 impl UdpReceiver {

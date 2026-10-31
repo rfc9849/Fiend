@@ -1,5 +1,4 @@
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -10,7 +9,7 @@ use super::error::{Error, Result};
 use super::serverhello::{
     REC_APPDATA, REC_HANDSHAKE, parse_server_hello, server_hello_extension_order,
 };
-use crate::fingerprint::{DEFAULT_RECORD_MAX, Result as FingerprintResult};
+use crate::fingerprint::DEFAULT_RECORD_MAX;
 
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -25,91 +24,6 @@ pub struct OriginProfile {
     pub key_share_group: u16,
     pub extension_order: Vec<u16>,
     pub record_sizes: Vec<usize>,
-}
-
-struct CacheEntry {
-    profile: OriginProfile,
-    recorded: bool,
-}
-
-pub struct OriginProfileCache {
-    entry: Mutex<CacheEntry>,
-}
-
-impl Default for OriginProfileCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl OriginProfileCache {
-    pub fn new() -> Self {
-        Self {
-            entry: Mutex::new(CacheEntry {
-                profile: OriginProfile::default(),
-                recorded: false,
-            }),
-        }
-    }
-
-    pub fn profile(&self) -> OriginProfile {
-        self.entry
-            .lock()
-            .expect("origin profile lock")
-            .profile
-            .clone()
-    }
-
-    pub fn set_profile(&self, profile: OriginProfile) {
-        let mut entry = self.entry.lock().expect("origin profile lock");
-        entry.profile = profile;
-        entry.recorded = true;
-    }
-
-    fn set_if_empty(&self, profile: OriginProfile) {
-        let mut entry = self.entry.lock().expect("origin profile lock");
-        if !entry.recorded {
-            entry.profile = profile;
-            entry.recorded = true;
-        }
-    }
-
-    pub async fn refresh(&self, domain: &str, client_hello: &[u8]) {
-        match probe_origin(domain, client_hello).await {
-            Ok(profile) => self.set_profile(profile),
-            Err(_) => self.set_if_empty(OriginProfile::default()),
-        }
-    }
-
-    pub async fn start_warming<F>(
-        self: &Arc<Self>,
-        domain: impl Into<String>,
-        hello: F,
-        interval: Duration,
-    ) -> tokio::task::JoinHandle<()>
-    where
-        F: Fn() -> FingerprintResult<Vec<u8>> + Send + Sync + 'static,
-    {
-        let domain = domain.into();
-        let hello = Arc::new(hello);
-        match hello() {
-            Ok(client_hello) => self.refresh(&domain, &client_hello).await,
-            Err(_) => self.set_if_empty(OriginProfile::default()),
-        }
-
-        let cache = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                match hello() {
-                    Ok(client_hello) => cache.refresh(&domain, &client_hello).await,
-                    Err(_) => cache.set_if_empty(OriginProfile::default()),
-                }
-            }
-        })
-    }
 }
 
 pub fn build_probe_hello(domain: &str) -> Vec<u8> {
@@ -192,10 +106,6 @@ fn add_extension(output: &mut Vec<u8>, kind: u16, fill: impl FnOnce(&mut Vec<u8>
     fill(output);
     let length = (output.len() - start) as u16;
     output[length_at..length_at + 2].copy_from_slice(&length.to_be_bytes());
-}
-
-pub async fn probe_origin(domain: &str, client_hello: &[u8]) -> Result<OriginProfile> {
-    probe_origin_at(domain, 443, client_hello).await
 }
 
 pub async fn probe_origin_at(

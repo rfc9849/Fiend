@@ -273,7 +273,7 @@ impl<P: Platform> Inner<P> {
         let latency = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
         tracing::info!(latency_ms = latency, "server handshake completed");
 
-        let options = tun_options(engine, rule_files, protect);
+        let options = tun_options(&profile.tuning, engine, rule_files, protect);
         let tun = {
             let client = client.clone();
             tokio::task::spawn_blocking(move || TunEngine::new(client, options))
@@ -433,7 +433,7 @@ impl<P: Platform> Daemon<P> {
             Request::Connect { profile_id } => self.connect(profile_id).await,
             Request::Disconnect => self.disconnect().await,
             Request::Status => Ok(Reply::Status(self.status())),
-            Request::Subscribe | Request::Unsubscribe => Ok(Reply::Ok),
+            Request::Subscribe => Ok(Reply::Ok),
             Request::ListProfiles => Ok(Reply::Profiles {
                 profiles: lock(&self.inner.store).profiles().to_vec(),
             }),

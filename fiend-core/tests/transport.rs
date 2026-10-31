@@ -6,7 +6,7 @@ use fiend_core::fingerprint::{
 };
 use fiend_core::transport::{
     AcceptOutcome, FreshnessCheck, OriginProfile, ServerFlight, Session, accept,
-    build_server_flight, connect, parse_server_hello, probe_origin_at, serve_connection,
+    bridge_passthrough, build_server_flight, connect, parse_server_hello, probe_origin_at,
     server_hello_extension_order,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -397,7 +397,13 @@ async fn active_probe_is_forwarded_to_origin() {
     let replay = FreshnessCheck::new(Duration::from_secs(3600));
     let profile = OriginProfile::default();
     let serve = tokio::spawn(async move {
-        serve_connection(server_io, &secret, &replay, &profile, "127.0.0.1", port).await
+        match accept(server_io, &secret, &replay, &profile).await? {
+            AcceptOutcome::Session(session) => Ok(Some(*session)),
+            AcceptOutcome::Passthrough { stream, buffered } => {
+                bridge_passthrough(stream, buffered, "127.0.0.1", port).await?;
+                Ok::<_, fiend_core::transport::Error>(None)
+            }
+        }
     });
 
     let mut response = vec![0u8; RESPONSE.len()];
@@ -453,7 +459,13 @@ async fn unauthenticated_client_hello_reaches_origin_unchanged() {
     let replay = FreshnessCheck::new(Duration::from_secs(3600));
     let profile = OriginProfile::default();
     let serve = tokio::spawn(async move {
-        serve_connection(server_io, &secret, &replay, &profile, "127.0.0.1", port).await
+        match accept(server_io, &secret, &replay, &profile).await? {
+            AcceptOutcome::Session(session) => Ok(Some(*session)),
+            AcceptOutcome::Passthrough { stream, buffered } => {
+                bridge_passthrough(stream, buffered, "127.0.0.1", port).await?;
+                Ok::<_, fiend_core::transport::Error>(None)
+            }
+        }
     });
 
     let mut received = vec![0u8; origin_reply.len()];

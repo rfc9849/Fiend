@@ -9,7 +9,6 @@ MODE=${1:-}
 [ "$#" -gt 0 ] && shift
 case "$MODE" in panel|node|uninstall) ;; *) fail 'Usage: install.sh <panel|node|uninstall> [options]' ;; esac
 BUNDLE=
-IMPORT=
 PORT=443
 CONTROL=0
 NO_START=0
@@ -17,9 +16,9 @@ PANEL_ONLY=0
 KEEP_DATA=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --bundle|--import|--port)
+        --bundle|--port)
             [ "$#" -ge 2 ] || fail "Missing value for $1"
-            case "$1" in --bundle) BUNDLE=$2 ;; --import) IMPORT=$2 ;; --port) PORT=$2 ;; esac
+            case "$1" in --bundle) BUNDLE=$2 ;; --port) PORT=$2 ;; esac
             shift 2 ;;
         --control-secret-stdin) CONTROL=1; shift ;;
         --no-start) NO_START=1; shift ;;
@@ -29,7 +28,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 if [ "$MODE" = uninstall ]; then
-    [ -z "$BUNDLE$IMPORT" ] && [ "$CONTROL$PANEL_ONLY$NO_START" = 000 ] || fail 'Invalid uninstall options.'
+    [ -z "$BUNDLE" ] && [ "$CONTROL$PANEL_ONLY$NO_START" = 000 ] || fail 'Invalid uninstall options.'
     for service in fiend-panel fiend-node fiend-node-rollback; do
         systemctl disable --now "$service.service" 2>/dev/null || true
         rm -f "/etc/systemd/system/$service.service"
@@ -43,8 +42,6 @@ fi
 [ "$PANEL_ONLY" = 0 ] || [ "$MODE" = panel ] || fail '--panel-only needs panel mode.'
 [ "$CONTROL" = 0 ] || [ "$MODE" = node ] || fail '--control-secret-stdin needs node mode.'
 [ "$MODE" != node ] || [ "$CONTROL" = 1 ] || fail 'Node mode needs --control-secret-stdin.'
-[ -z "$IMPORT" ] || [ "$PANEL_ONLY" = 0 ] || fail '--import cannot be used with --panel-only.'
-[ -z "$IMPORT" ] || [ ! -e /etc/fiend/node.toml ] || fail 'A node config exists. Import would replace it.'
 case "$PORT" in ''|*[!0-9]*) fail 'Invalid node port.' ;; esac
 [ "$PORT" -gt 0 ] && [ "$PORT" -le 65535 ] || fail 'Invalid node port.'
 TMP=
@@ -66,7 +63,6 @@ fi
 )
 "$SOURCE/fiend-core" --version
 "$SOURCE/fiend-panel" --version
-if [ -n "$IMPORT" ]; then "$SOURCE/fiend-core" check "$IMPORT"; NO_START=1; fi
 if [ "$CONTROL" = 1 ]; then
     IFS= read -r CONTROL_SECRET || fail 'Send the control secret as one hex line with a newline.'
     [ "${#CONTROL_SECRET}" = 64 ] || fail 'The control secret needs 64 hex characters.'
@@ -90,11 +86,7 @@ install -d -o root -g fiend -m 0750 /etc/fiend
 install -d -o fiend -g fiend -m 0700 /var/lib/fiend /run/fiend
 if [ "$PANEL_ONLY" = 0 ]; then
     if [ ! -e /etc/fiend/node.toml ]; then
-        if [ -n "$IMPORT" ]; then
-            "$SOURCE/fiend-core" prepare /etc/fiend --import "$IMPORT"
-        else
-            "$SOURCE/fiend-core" prepare /etc/fiend --port "$PORT"
-        fi
+        "$SOURCE/fiend-core" prepare /etc/fiend --port "$PORT"
         chown fiend:fiend /etc/fiend/node.toml
         chmod 0600 /etc/fiend/node.toml
     fi
@@ -129,7 +121,7 @@ fi
 if [ "$MODE" = panel ]; then
     install -m 0755 "$SOURCE/fiend-panel" /opt/fiend/bin/fiend-panel.new
     mv -f /opt/fiend/bin/fiend-panel.new /opt/fiend/bin/fiend-panel
-    ACCESS=$(/opt/fiend/bin/fiend-panel init /etc/fiend/panel.toml ${IMPORT:+--import})
+    ACCESS=$(/opt/fiend/bin/fiend-panel init /etc/fiend/panel.toml)
     chown fiend:fiend /etc/fiend/panel.toml
     chmod 0600 /etc/fiend/panel.toml
     install -d -o fiend -g fiend -m 0700 /var/lib/fiend/bundles /var/lib/fiend/bundles/inbox
@@ -149,7 +141,7 @@ if [ "$PANEL_ONLY" = 0 ] && [ "$NO_START" = 0 ]; then
     systemctl restart fiend-node.service
     systemctl is-active --quiet fiend-node.service
 else
-    printf '%s\n' 'Node start skipped. The existing server has not been stopped.'
+    printf '%s\n' 'Node start skipped.'
 fi
 if [ "$MODE" = panel ]; then
     systemctl enable fiend-panel.service

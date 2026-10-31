@@ -56,8 +56,10 @@ async fn udp_response_parser_handles_random_input() {
         let _ = udp::read_response(&mut reader).await;
         let mut reader = data.as_slice();
         let _ = udp::read_frame(&mut reader).await;
-        let mut reader = data.as_slice();
-        let _ = socks5::read_request(&mut reader).await;
+        if let Some((&atyp, rest)) = data.split_first() {
+            let mut reader = rest;
+            let _ = socks5::read_address(&mut reader, atyp).await;
+        }
     }
 }
 
@@ -66,20 +68,6 @@ async fn udp_response_rejects_truncated_addresses() {
     let data = [0, 3, 1, 1, 127];
     let mut reader = data.as_slice();
     assert!(udp::read_response(&mut reader).await.is_err());
-}
-
-#[tokio::test]
-async fn socks5_handshake_handles_random_input() {
-    let mut rng = Rng::new(0x510c);
-    for length in 0..=128 {
-        let data = rng.bytes(length);
-        let (mut client, mut server) = duplex(4096);
-        tokio::spawn(async move {
-            let _ = server.write_all(&data).await;
-            let _ = server.shutdown().await;
-        });
-        let _ = timeout(Duration::from_millis(200), socks5::handshake(&mut client)).await;
-    }
 }
 
 #[tokio::test]

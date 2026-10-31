@@ -75,6 +75,12 @@ async fn udp_echo() -> SocketAddr {
     address
 }
 
+async fn send_reply(stream: &mut TcpStream, bound: &Address) {
+    let mut reply = vec![socks5::VERSION, socks5::REP_SUCCESS, 0];
+    bound.encode_into(&mut reply).unwrap();
+    stream.write_all(&reply).await.unwrap();
+}
+
 async fn socks_proxy(tcp: SocketAddr, udp: SocketAddr, seen: Seen) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -112,7 +118,7 @@ async fn socks_proxy(tcp: SocketAddr, udp: SocketAddr, seen: Seen) -> SocketAddr
                 if request[1] == socks5::CMD_UDP_ASSOCIATE {
                     let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
                     let bound = Address::Ip(relay.local_addr().unwrap());
-                    socks5::send_reply(&mut stream, 0, &bound).await.unwrap();
+                    send_reply(&mut stream, &bound).await;
                     let mut buffer = [0u8; 2048];
                     let (count, client) = relay.recv_from(&mut buffer).await.unwrap();
                     let (destination, payload) =
@@ -121,16 +127,17 @@ async fn socks_proxy(tcp: SocketAddr, udp: SocketAddr, seen: Seen) -> SocketAddr
                     let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
                     upstream.send_to(payload, udp).await.unwrap();
                     let (count, _) = upstream.recv_from(&mut buffer).await.unwrap();
-                    let reply =
-                        socks5::encode_udp_response(&destination, &buffer[..count]).unwrap();
+                    let reply = socks5::encode_udp_request(&destination, &buffer[..count]).unwrap();
                     relay.send_to(&reply, client).await.unwrap();
                     let _ = stream.read_u8().await;
                     return;
                 }
                 let mut upstream = TcpStream::connect(tcp).await.unwrap();
-                socks5::send_reply(&mut stream, 0, &socks5::zero_address())
-                    .await
-                    .unwrap();
+                send_reply(
+                    &mut stream,
+                    &Address::Ip(SocketAddr::from(([0, 0, 0, 0], 0))),
+                )
+                .await;
                 let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
             });
         }
@@ -192,10 +199,10 @@ async fn node(
     outbounds: Vec<Outbound>,
     rules: Vec<Rule>,
 ) -> (SocketAddr, Node) {
-    let mut config = ServerConfig::new(USER, "127.0.0.1", 1);
+    let mut config = ServerConfig::new("127.0.0.1", 1);
     config.origin.record_sizes = vec![35, 3400, 286, 74];
     config.target = policy;
-    let mut state = DesiredState::from_legacy(&config);
+    let mut state = DesiredState::initial(&config);
     state.users = users;
     state.outbounds = outbounds;
     state.rules = rules;
@@ -479,7 +486,7 @@ async fn target_policy_applies_to_the_final_destination_of_every_outbound() {
 #[test]
 fn invalid_routing_state_is_rejected() {
     let base = |outbounds: Vec<Outbound>, rules: Vec<Rule>, warp: WarpSettings| {
-        let mut state = DesiredState::from_legacy(&ServerConfig::new(USER, "127.0.0.1", 1));
+        let mut state = DesiredState::initial(&ServerConfig::new("127.0.0.1", 1));
         state.version = 2;
         state.outbounds = outbounds;
         state.rules = rules;

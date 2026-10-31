@@ -74,14 +74,39 @@ fn current_uid() -> u32 {
     std::fs::metadata(std::env::temp_dir()).unwrap().uid()
 }
 
+fn managed_server(
+    secret: &[u8],
+    config: fiend_core::server::ServerConfig,
+) -> fiend_core::server::Server {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "fiend-daemon-test-{}-{}.json",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut state = fiend_core::node::DesiredState::initial(&config);
+    state.users.push(fiend_core::node::User {
+        id: "test".into(),
+        secret: secret.iter().map(|byte| format!("{byte:02x}")).collect(),
+        enabled: true,
+        allowed: true,
+        expire_at: None,
+        traffic_limit: None,
+        used_traffic: 0,
+        usage_epoch: 0,
+    });
+    let node = fiend_core::node::Node::load(&path, vec![0x5c; 32], state).unwrap();
+    fiend_core::server::Server::managed(config, node)
+}
+
 async fn fiend_server() -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = fiend_core::server::Server::new(fiend_core::server::ServerConfig::new(
-        SECRET,
-        "127.0.0.1",
-        443,
-    ));
+    let server = managed_server(
+        &SECRET,
+        fiend_core::server::ServerConfig::new("127.0.0.1", 443),
+    );
     tokio::spawn(async move {
         let _ = server.serve(listener).await;
     });

@@ -8,7 +8,6 @@ use zeroize::Zeroizing;
 use super::error::{Error, Result};
 use super::freshness::FreshnessCheck;
 use super::originprofile::OriginProfile;
-use super::passthrough::bridge_passthrough;
 use super::serverhello::{
     REC_APPDATA, REC_HANDSHAKE, TLS_VERSION, build_server_hello, choose_cipher_suite,
     choose_server_share, client_shared_secret, finished_record_wire_size, generate_server_share,
@@ -266,26 +265,6 @@ where
         read_cipher,
         template.record_max,
     ))))
-}
-
-pub async fn serve_connection<S>(
-    stream: S,
-    secret: &[u8],
-    replay: &FreshnessCheck,
-    profile: &OriginProfile,
-    origin_host: &str,
-    origin_port: u16,
-) -> Result<Option<Session<S>>>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    match accept(stream, secret, replay, profile).await? {
-        AcceptOutcome::Session(session) => Ok(Some(*session)),
-        AcceptOutcome::Passthrough { stream, buffered } => {
-            bridge_passthrough(stream, buffered, origin_host, origin_port).await?;
-            Ok(None)
-        }
-    }
 }
 
 fn passthrough<S>(stream: S, buffered: Vec<u8>) -> Result<AcceptOutcome<S>> {

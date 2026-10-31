@@ -6,9 +6,6 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const TEMPLATE_JSON: &str = include_str!("../testdata/template.json");
-const SECRET_HEX: &str = "4242424242424242424242424242424242424242424242424242424242424242";
-
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_fiend-core")
 }
@@ -72,78 +69,6 @@ fn wait_for_exit(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
     }
 }
 
-fn assert_clean_shutdown(mode: &str, name: &str, config: &str) {
-    let dir = temp_dir(name);
-    fs::write(dir.join("template.json"), TEMPLATE_JSON).expect("write template");
-    let port = free_port();
-    let config = config.replace("PORT", &port.to_string());
-    let path = write(&dir, "config.toml", &config);
-
-    let mut child = Command::new(bin())
-        .arg(mode)
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start process");
-    let mut stderr = child.stderr.take();
-
-    wait_for_port(port, &mut child, &mut stderr);
-    thread::sleep(Duration::from_millis(50));
-
-    let killed = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-        .expect("send SIGTERM");
-    assert!(killed.success(), "kill command failed");
-
-    let Some(status) = wait_for_exit(&mut child, Duration::from_secs(5)) else {
-        let _ = child.kill();
-        let text = read_stderr(&mut stderr);
-        panic!("process did not stop on SIGTERM; stderr: {text}");
-    };
-    let text = read_stderr(&mut stderr);
-    assert!(status.success(), "process failed: {status}; stderr: {text}");
-    assert!(
-        text.contains("stopped"),
-        "shutdown was not logged; stderr: {text}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn client_starts_and_stops_cleanly() {
-    assert_clean_shutdown(
-        "client",
-        "client-lifecycle",
-        &format!(
-            r#"
-listen = "127.0.0.1:PORT"
-server = "127.0.0.1:1"
-secret = "{SECRET_HEX}"
-template = "template.json"
-"#
-        ),
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn server_starts_and_stops_cleanly() {
-    assert_clean_shutdown(
-        "server",
-        "server-lifecycle",
-        &format!(
-            r#"
-listen = "127.0.0.1:PORT"
-secret = "{SECRET_HEX}"
-origin_host = "127.0.0.1"
-origin_port = 1
-"#
-        ),
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn managed_node_starts_checks_saved_state_and_stops_cleanly() {
@@ -158,7 +83,7 @@ fn managed_node_starts_checks_saved_state_and_stops_cleanly() {
         &dir,
         "node.toml",
         &format!(
-            "listen = \"127.0.0.1:{port}\"\nsecret = \"{SECRET_HEX}\"\norigin_host = \"127.0.0.1\"\norigin_port = 1\n[origin]\nrecord_sizes = [35, 3400, 286, 74]\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"{}\"\nupdates_dir = \"updates\"\n",
+            "listen = \"127.0.0.1:{port}\"\norigin_host = \"127.0.0.1\"\norigin_port = 1\n[origin]\nrecord_sizes = [35, 3400, 286, 74]\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"{}\"\nupdates_dir = \"updates\"\n",
             socket.display()
         ),
     );
@@ -199,57 +124,6 @@ fn managed_node_starts_checks_saved_state_and_stops_cleanly() {
 }
 
 #[test]
-fn prepare_import_keeps_settings_and_does_not_replace_config() {
-    let dir = temp_dir("prepare-import");
-    fs::write(dir.join("secret.bin"), [0x91; 32]).unwrap();
-    let source = write(
-        &dir,
-        "server.toml",
-        "listen = \"127.0.0.1:9443\"\nsecret_file = \"secret.bin\"\norigin_host = \"example.com\"\n[origin]\nrecord_sizes = [100, 200]\n",
-    );
-    let destination = dir.join("installed");
-    let output = Command::new(bin())
-        .arg("prepare")
-        .arg(&destination)
-        .arg("--import")
-        .arg(&source)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let path = destination.join("node.toml");
-    let settings = fiend_core::config::load_server(&path).unwrap();
-    assert_eq!(settings.listen.to_string(), "127.0.0.1:9443");
-    assert_eq!(settings.config.secret, vec![0x91; 32]);
-    assert_eq!(settings.config.origin.record_sizes, vec![100, 200]);
-    let before = fs::read(&path).unwrap();
-    let output = Command::new(bin())
-        .arg("prepare")
-        .arg(&destination)
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert_eq!(before, fs::read(&path).unwrap());
-    let output = Command::new(bin())
-        .arg("check")
-        .arg(&path)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-}
-
-#[test]
 fn prepare_new_node_and_reject_invalid_input() {
     let dir = temp_dir("prepare-new");
     let destination = dir.join("installed");
@@ -262,7 +136,24 @@ fn prepare_new_node_and_reject_invalid_input() {
     assert!(output.status.success());
     let settings = fiend_core::config::load_server(destination.join("node.toml")).unwrap();
     assert_eq!(settings.listen.port(), 8443);
-    assert_eq!(settings.config.secret.len(), 32);
+    let path = destination.join("node.toml");
+    assert!(!fs::read_to_string(&path).unwrap().contains("secret"));
+    let before = fs::read(&path).unwrap();
+    let output = Command::new(bin())
+        .arg("prepare")
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(before, fs::read(&path).unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     for port in ["0", "65536", "abc"] {
         let output = Command::new(bin())
             .arg("prepare")
@@ -288,24 +179,15 @@ fn prepare_new_node_and_reject_invalid_input() {
 #[test]
 fn invalid_config_exits_with_an_error() {
     let dir = temp_dir("invalid-config");
-    let path = write(
-        &dir,
-        "client.toml",
-        &format!(
-            r#"
-server = "127.0.0.1:1"
-secret = "{SECRET_HEX}"
-"#
-        ),
-    );
+    let path = write(&dir, "server.toml", "listen = \"127.0.0.1:0\"\n");
     let output = Command::new(bin())
-        .args(["client", path.to_str().expect("config path")])
+        .args(["check", path.to_str().expect("config path")])
         .output()
         .expect("run process");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("client template is required"),
+        stderr.contains("server origin_host is required"),
         "stderr: {stderr}"
     );
 }

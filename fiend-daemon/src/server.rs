@@ -368,12 +368,6 @@ where
                     subscribe(&daemon, &writer, &forwarder, &shutdown);
                     Ok(fiend_ipc::Reply::Ok)
                 }
-                fiend_ipc::Request::Unsubscribe => {
-                    if let Some(handle) = lock(&forwarder).take() {
-                        handle.abort();
-                    }
-                    Ok(fiend_ipc::Reply::Ok)
-                }
                 request => daemon.handle(request).await,
             };
             if send(&writer, &ServerMessage::Response { id, result })

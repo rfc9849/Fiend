@@ -9,7 +9,7 @@ use gpui_kit::{
     canvas, div, fill, point, px, size,
 };
 
-use crate::app::{AppView, Page};
+use crate::app::AppView;
 use crate::design::{ButtonKind, MONO, Ui};
 use crate::format;
 use crate::menu::{MenuId, MenuOption};
@@ -53,7 +53,7 @@ pub struct ProfileForm {
     pub port: Entity<InputState>,
     pub more_servers: Entity<InputState>,
     pub secret: Entity<InputState>,
-    pub tuning: [Entity<InputState>; 5],
+    pub tuning: [Entity<InputState>; 4],
     pub template: String,
     pub template_json: String,
     pub errors: HashMap<&'static str, String>,
@@ -620,7 +620,6 @@ impl AppView {
                 ),
                 self.new_input(&tuning.max_connections.to_string(), "", false, window, cx),
                 self.new_input(&tuning.udp_idle_ms.to_string(), "", false, window, cx),
-                self.new_input(&tuning.udp_keepalive_ms.to_string(), "", false, window, cx),
                 self.new_input(&tuning.max_udp_flows.to_string(), "", false, window, cx),
             ],
             template,
@@ -884,12 +883,11 @@ impl AppView {
         }
         let numbers: Vec<Option<u32>> = values.iter().map(|v| v.trim().parse().ok()).collect();
         let tuning = match numbers.as_slice() {
-            [Some(a), Some(b), Some(c), Some(d), Some(e)] => Some(Tuning {
+            [Some(a), Some(b), Some(c), Some(d)] => Some(Tuning {
                 handshake_timeout_ms: *a,
                 max_connections: *b,
                 udp_idle_ms: *c,
-                udp_keepalive_ms: *d,
-                max_udp_flows: *e,
+                max_udp_flows: *d,
             }),
             _ => {
                 errors.insert("tuning", "Enter whole numbers.".into());
@@ -1718,7 +1716,6 @@ impl AppView {
                     "Handshake timeout (ms)",
                     "Max connections",
                     "UDP idle timeout (ms)",
-                    "UDP keepalive (ms)",
                     "Max UDP flows",
                 ];
                 let mut grid = div().mt(px(10.)).grid().grid_cols(2).gap(px(12.));
@@ -2392,11 +2389,6 @@ impl AppView {
             settings.active_profile = Some(id);
             self.call_toast(Request::SetSettings { settings }, cx);
         }
-    }
-
-    pub fn go_to_profile(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.selected_profile = Some(id.to_owned());
-        self.navigate(Page::Profiles, cx);
     }
 }
 

@@ -87,10 +87,7 @@ mod tests {
     #[test]
     fn trace_reply() {
         let text = "fl=123\nh=1.1.1.1\nip=9.9.9.9\nts=1\nwarp=off\n";
-        assert_eq!(
-            parse_trace(text),
-            Some(Ipv4Addr::new(9, 9, 9, 9))
-        );
+        assert_eq!(parse_trace(text), Some(Ipv4Addr::new(9, 9, 9, 9)));
         assert_eq!(parse_trace("ip=2001:db8::1\n"), None);
         assert_eq!(parse_trace("h=x\n"), None);
     }

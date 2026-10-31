@@ -37,11 +37,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     match args.as_slice() {
         [flag] if flag == "--version" => println!("fiend-panel {}", env!("CARGO_PKG_VERSION")),
         [command, path] if command == "init" => {
-            let config = Config::init(Path::new(path), false).map_err(io_error)?;
-            print_access(&config);
-        }
-        [command, path, flag] if command == "init" && flag == "--import" => {
-            let config = Config::init(Path::new(path), true).map_err(io_error)?;
+            let config = Config::init(Path::new(path)).map_err(io_error)?;
             print_access(&config);
         }
         [command, path] if command == "renew-setup" => {
@@ -70,7 +66,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "Usage: fiend-panel <init|renew-setup|check|serve> <panel.toml> | init <panel.toml> --import | export-types <folder> | --version"
+                "Usage: fiend-panel <init|renew-setup|check|serve> <panel.toml> | export-types <folder> | --version"
                     .into(),
             );
         }

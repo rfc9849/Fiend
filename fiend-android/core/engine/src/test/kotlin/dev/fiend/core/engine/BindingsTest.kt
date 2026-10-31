@@ -21,7 +21,7 @@ class BindingsTest {
         validateProfile(profile)
         val link = makeShareLink(profile)
         val restored = parseShareLink(link)
-        assertTrue(link.startsWith("fiend://") && !link.startsWith("fiend://v1/"))
+        assertTrue(link.startsWith("fiend://"))
         assertTrue(link.length < 1200)
         assertEquals(profile.name, restored.name)
         assertEquals(profile.servers, restored.servers)

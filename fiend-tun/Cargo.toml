@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 fiend-core = { path = "../fiend-core" }
 fiend-rules = { path = "../fiend-rules" }
-flate2 = "1"
 hickory-proto = "0.26.3"
 lru = "0.19"
 rand = "0.10"

@@ -16,7 +16,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 
 const TOKEN: &str = "abababababababababababababababababababababababababababababababab";
-const LEGACY: [u8; 32] = [0x5a; 32];
 const CONTROL: [u8; 32] = [0x6b; 32];
 
 struct Temp(PathBuf);
@@ -43,10 +42,6 @@ struct Panel {
 
 impl Panel {
     async fn new(dir: &Path) -> Self {
-        Self::open(dir, true).await
-    }
-
-    async fn open(dir: &Path, import_users: bool) -> Self {
         let config = Config {
             listen: "127.0.0.1:8080".parse().unwrap(),
             setup_token: TOKEN.into(),
@@ -54,7 +49,6 @@ impl Panel {
             database: dir.join("panel.db"),
             bundles: dir.join("bundles"),
             local_node: dir.join("node.toml"),
-            import_users,
         };
         let app = App::open(config).await.unwrap();
         Self {
@@ -350,8 +344,7 @@ fn write_node_files(dir: &Path, port: u16) {
     fs::write(
         dir.join("node.toml"),
         format!(
-            "listen = \"127.0.0.1:{port}\"\nsecret = \"{}\"\norigin_host = \"127.0.0.1\"\norigin_port = 9\n\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"control.sock\"\nupdates_dir = \"updates\"\n",
-            hex::encode(LEGACY)
+            "listen = \"127.0.0.1:{port}\"\norigin_host = \"127.0.0.1\"\norigin_port = 9\n\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"control.sock\"\nupdates_dir = \"updates\"\n",
         ),
     )
     .unwrap();
@@ -368,7 +361,7 @@ async fn start_node(dir: &Path) -> (std::net::SocketAddr, Node) {
     let node = Node::load(
         &settings.node.state_file,
         CONTROL.to_vec(),
-        DesiredState::from_legacy(&config),
+        DesiredState::initial(&config),
     )
     .unwrap();
     node.set_listen_port(address.port());
@@ -410,29 +403,7 @@ async fn wait_for(mut check: impl AsyncFnMut() -> bool) -> bool {
 }
 
 #[tokio::test]
-async fn fresh_local_node_imports_no_users() {
-    let dir = Temp::new();
-    start_node(&dir.0).await;
-    let mut panel = Panel::open(&dir.0, false).await;
-    panel.setup().await;
-    let (status, defaults) = panel.get("/api/wizard/local").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(defaults["available"], true, "{defaults}");
-    assert_eq!(defaults["imported"], false);
-    assert_eq!(defaults["users"], 0);
-    let (status, created) = panel
-        .post(
-            "/api/wizard/local",
-            json!({"name": "main", "address": "127.0.0.1"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{created}");
-    let (_, users) = panel.get("/api/users").await;
-    assert_eq!(users, json!([]));
-}
-
-#[tokio::test]
-async fn local_node_import_sync_links_statistics_and_limits() {
+async fn local_node_sync_links_statistics_and_limits() {
     let dir = Temp::new();
     let (node_address, node) = start_node(&dir.0).await;
     let mut panel = Panel::new(&dir.0).await;
@@ -440,7 +411,6 @@ async fn local_node_import_sync_links_statistics_and_limits() {
     let (status, defaults) = panel.get("/api/wizard/local").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(defaults["available"], true, "{defaults}");
-    assert_eq!(defaults["imported"], true);
     assert_eq!(defaults["port"], node_address.port());
     let (status, body) = panel
         .post(
@@ -459,38 +429,93 @@ async fn local_node_import_sync_links_statistics_and_limits() {
     assert_eq!(status, StatusCode::OK, "{created}");
     let node_id = created["id"].as_i64().unwrap();
     let (_, users) = panel.get("/api/users").await;
-    let imported = users
+    assert_eq!(users, json!([]));
+
+    let upload = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        include_bytes!("../../fiend-core/testdata/template.json"),
+    );
+    let (status, uploaded) = panel
+        .post(
+            "/api/disguises",
+            json!({"preset": null, "template_base64": upload}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    let (_, listed) = panel.get("/api/disguises").await;
+    let item = listed
         .as_array()
         .unwrap()
         .iter()
-        .find(|user| user["name"] == "existing-clients")
+        .find(|item| item["id"] == uploaded["id"])
         .unwrap()
         .clone();
-    let imported_id = imported["id"].as_i64().unwrap();
-    let (_, secret) = panel.get(&format!("/api/users/{imported_id}/secret")).await;
-    assert_eq!(secret["secret"], hex::encode(LEGACY));
-
-    let upload = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, include_bytes!("../../fiend-core/testdata/template.json"));
-    let (status, uploaded) = panel.post("/api/disguises", json!({"preset": null, "template_base64": upload})).await;
-    assert_eq!(status, StatusCode::OK, "{uploaded}");
-    let (_, listed) = panel.get("/api/disguises").await;
-    let item = listed.as_array().unwrap().iter().find(|item| item["id"] == uploaded["id"]).unwrap().clone();
-    assert_eq!((item["name"].as_str(), item["origin_host"].as_str(), item["origin_port"].as_i64()), (Some("www.wikipedia.org"), Some("www.wikipedia.org"), Some(443)));
-    assert!(item["checks"].as_array().unwrap().iter().all(|check| check["name"] != "Domain" || check["ok"] == true), "{item}");
-    let (status, _) = panel.del(&format!("/api/disguises/{}", uploaded["id"])).await;
+    assert_eq!(
+        (
+            item["name"].as_str(),
+            item["origin_host"].as_str(),
+            item["origin_port"].as_i64()
+        ),
+        (
+            Some("www.wikipedia.org"),
+            Some("www.wikipedia.org"),
+            Some(443)
+        )
+    );
+    assert!(
+        item["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["name"] != "Domain" || check["ok"] == true),
+        "{item}"
+    );
+    let (status, _) = panel
+        .del(&format!("/api/disguises/{}", uploaded["id"]))
+        .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, preset) = panel.post("/api/disguises", json!({"preset": "wikipedia", "template_base64": null})).await;
+    let (status, preset) = panel
+        .post(
+            "/api/disguises",
+            json!({"preset": "wikipedia", "template_base64": null}),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK, "{preset}");
     let disguise = preset["id"].as_i64().unwrap();
     let (_, listed) = panel.get("/api/disguises").await;
-    let listed: Vec<_> = listed.as_array().unwrap().iter().map(|item| (item["name"].as_str().unwrap().to_owned(), item["origin_host"].as_str().unwrap().to_owned(), item["origin_port"].as_i64().unwrap())).collect();
-    assert_eq!(listed, vec![("Wikipedia".to_owned(), "www.wikipedia.org".to_owned(), 443)]);
-    for body in [json!({"preset": "wikipedia", "template_base64": null}), json!({"preset": null, "template_base64": upload})] {
+    let listed: Vec<_> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["name"].as_str().unwrap().to_owned(),
+                item["origin_host"].as_str().unwrap().to_owned(),
+                item["origin_port"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![("Wikipedia".to_owned(), "www.wikipedia.org".to_owned(), 443)]
+    );
+    for body in [
+        json!({"preset": "wikipedia", "template_base64": null}),
+        json!({"preset": null, "template_base64": upload}),
+    ] {
         let (status, again) = panel.post("/api/disguises", body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{again}");
-        assert_eq!(again["error"], "This template is already added as Wikipedia.");
+        assert_eq!(
+            again["error"],
+            "This template is already added as Wikipedia."
+        );
     }
-    let (status, body) = panel.post("/api/disguises", json!({"preset": null, "template_base64": "bm90IGEgdGVtcGxhdGU="})).await;
+    let (status, body) = panel
+        .post(
+            "/api/disguises",
+            json!({"preset": null, "template_base64": "bm90IGEgdGVtcGxhdGU="}),
+        )
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["field"], "template");
     let (status, _) = panel.put(&format!("/api/nodes/{node_id}"), json!({"name": "main", "address": "127.0.0.1", "port": node_address.port(), "disguise_id": disguise})).await;
@@ -522,13 +547,6 @@ async fn local_node_import_sync_links_statistics_and_limits() {
             .any(|user| user.id == format!("u{alice}")))
         .await,
         "the panel applies users"
-    );
-    assert!(
-        node.desired_state()
-            .users
-            .iter()
-            .any(|user| user.secret == hex::encode(LEGACY)),
-        "the imported secret stays valid"
     );
     assert_eq!(node.desired_state().origin_host, "www.wikipedia.org");
 
@@ -666,18 +684,32 @@ async fn warp_outbound_turns_on_warp_for_nodes() {
     let second = insert(&panel, "second").await;
     let (status, body) = panel.post("/api/outbounds", json!({"node_id": null, "name": "WARP", "kind": "warp", "server": null, "username": null, "password": null, "udp": false, "link_node_id": null, "udp_fallback": null})).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = panel.post("/api/rules", json!({"node_id": null, "pattern": "domain:resolve.rs", "outbound": "WARP"})).await;
+    let (status, body) = panel
+        .post(
+            "/api/rules",
+            json!({"node_id": null, "pattern": "domain:resolve.rs", "outbound": "WARP"}),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     for id in [first, second] {
-        let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, id).await.unwrap();
+        let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, id)
+            .await
+            .unwrap();
         assert!(warp.enabled, "node {id}");
         assert!(outbounds.iter().any(|outbound| outbound.id == "WARP"));
         assert!(rules.iter().any(|rule| rule.outbound == "WARP"));
     }
 
-    let (status, body) = panel.put(&format!("/api/nodes/{second}/warp"), json!({"enabled": false, "rotate_every": null})).await;
+    let (status, body) = panel
+        .put(
+            &format!("/api/nodes/{second}/warp"),
+            json!({"enabled": false, "rotate_every": null}),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, second).await.unwrap();
+    let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, second)
+        .await
+        .unwrap();
     assert!(!warp.enabled, "an explicit off stays off");
     assert!(outbounds.is_empty() && rules.is_empty());
 
@@ -688,11 +720,18 @@ async fn warp_outbound_turns_on_warp_for_nodes() {
         .await
         .unwrap();
     let before = fiend_panel::db::version(&panel.app.db).await;
-    let (outbounds, _, warp) = fiend_panel::state::routing_for(&panel.app, third).await.unwrap();
+    let (outbounds, _, warp) = fiend_panel::state::routing_for(&panel.app, third)
+        .await
+        .unwrap();
     assert!(warp.enabled, "a new node gets WARP");
     assert!(outbounds.iter().any(|outbound| outbound.id == "WARP"));
-    assert!(fiend_panel::db::version(&panel.app.db).await > before, "the node gets the change");
-    let (_, _, warp) = fiend_panel::state::routing_for(&panel.app, second).await.unwrap();
+    assert!(
+        fiend_panel::db::version(&panel.app.db).await > before,
+        "the node gets the change"
+    );
+    let (_, _, warp) = fiend_panel::state::routing_for(&panel.app, second)
+        .await
+        .unwrap();
     assert!(!warp.enabled, "an explicit off stays off");
 }
 

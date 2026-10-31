@@ -175,14 +175,13 @@ pub async fn import(app: &App, archive: PathBuf) -> ApiResult<BundleView> {
         .bind(now())
         .fetch_one(&app.db)
         .await?;
-    let older: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT id, path FROM bundles WHERE version = ? AND arch = ? AND id != ?",
-    )
-    .bind(&parsed.version)
-    .bind(&parsed.arch)
-    .bind(id)
-    .fetch_all(&app.db)
-    .await?;
+    let older: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, path FROM bundles WHERE version = ? AND arch = ? AND id != ?")
+            .bind(&parsed.version)
+            .bind(&parsed.arch)
+            .bind(id)
+            .fetch_all(&app.db)
+            .await?;
     for (old, path) in older {
         sqlx::query("DELETE FROM bundles WHERE id = ?")
             .bind(old)
@@ -232,13 +231,4 @@ pub async fn find(app: &App, id: i64) -> ApiResult<(String, String, PathBuf, Str
             .await?;
     let (version, arch, path, core) = row.ok_or_else(ApiError::not_found)?;
     Ok((version, arch, PathBuf::from(path), core))
-}
-
-pub async fn latest_for(app: &App, arch: &str) -> ApiResult<Option<i64>> {
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM bundles WHERE arch = ? ORDER BY uploaded_at DESC, id DESC LIMIT 1",
-    )
-    .bind(arch)
-    .fetch_optional(&app.db)
-    .await?)
 }

@@ -6,6 +6,7 @@ use fiend_core::addr::Address;
 use fiend_core::client::{Client, ClientConfig};
 use fiend_core::fingerprint::Template;
 use fiend_core::net;
+use fiend_core::node::{DesiredState, Node, User};
 use fiend_core::server::{Server, ServerConfig};
 use fiend_core::target::TargetPolicy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,12 +17,36 @@ use tokio::time::timeout;
 const TEMPLATE_JSON: &str = include_str!("../testdata/template.json");
 const SECRET: &[u8] = &[0x24; 32];
 
+static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn managed(secret: &[u8], config: ServerConfig) -> Server {
+    let path = std::env::temp_dir().join(format!(
+        "fiend-core-failover-{}-{}.json",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut state = DesiredState::initial(&config);
+    state.users.push(User {
+        id: "test".into(),
+        secret: hex::encode(secret),
+        enabled: true,
+        allowed: true,
+        expire_at: None,
+        traffic_limit: None,
+        used_traffic: 0,
+        usage_epoch: 0,
+    });
+    let node = Node::load(&path, vec![0x5c; 32], state).unwrap();
+    Server::managed(config, node)
+}
+
 async fn server() -> SocketAddr {
     let listener = net::bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = listener.local_addr().unwrap();
-    let mut config = ServerConfig::new(SECRET, "127.0.0.1", 443);
+    let mut config = ServerConfig::new("127.0.0.1", 443);
     config.target = TargetPolicy::allow_all();
-    let server = Server::new(config);
+    let server = managed(SECRET, config);
     tokio::spawn(async move {
         let _ = server.serve(listener).await;
     });

@@ -98,7 +98,6 @@ pub struct TunOptions {
     pub mtu: u16,
     pub ipv6: bool,
     pub bypass_lan: bool,
-    pub direct_all: bool,
     pub direct_rules: String,
     pub block_rules: String,
     pub proxy_rules: String,
@@ -108,7 +107,6 @@ pub struct TunOptions {
     pub handshake_timeout_ms: u64,
     pub max_connections: u32,
     pub udp_idle_ms: u64,
-    pub udp_keepalive_ms: u64,
     pub max_udp_flows: u32,
 }
 
@@ -234,16 +232,12 @@ impl Tunnel {
         let mut config = profile::client_config(&profile)?;
         numeric_servers(&config)?;
         config.handshake_timeout = Duration::from_millis(options.handshake_timeout_ms);
-        config.max_connections = options.max_connections as usize;
-        config.udp_idle = Duration::from_millis(options.udp_idle_ms);
-        config.udp_keepalive = Duration::from_millis(options.udp_keepalive_ms);
-        config.max_udp_flows = options.max_udp_flows as usize;
         config.protect_socket = protect(platform.clone());
         let config = fiend_core::config::build_client(config).map_err(engine_error)?;
         let direct_protect = config.protect_socket.clone();
-        let max_connections = config.max_connections.min(256);
-        let max_udp_flows = config.max_udp_flows;
-        let udp_idle = config.udp_idle;
+        let max_connections = (options.max_connections as usize).min(256);
+        let max_udp_flows = options.max_udp_flows as usize;
+        let udp_idle = Duration::from_millis(options.udp_idle_ms);
         let client = Client::new(config);
         let engine = Arc::new(
             TunEngine::new(
@@ -252,7 +246,6 @@ impl Tunnel {
                     mtu: options.mtu,
                     ipv6: options.ipv6,
                     bypass_lan: options.bypass_lan,
-                    direct_all: options.direct_all,
                     direct_rules: options.direct_rules,
                     block_rules: options.block_rules,
                     proxy_rules: options.proxy_rules,
@@ -432,7 +425,6 @@ mod tests {
             mtu: 1500,
             ipv6: true,
             bypass_lan: false,
-            direct_all: false,
             direct_rules: String::new(),
             block_rules: String::new(),
             proxy_rules: String::new(),
@@ -442,7 +434,6 @@ mod tests {
             handshake_timeout_ms: 10000,
             max_connections: 256,
             udp_idle_ms: 60000,
-            udp_keepalive_ms: 20000,
             max_udp_flows: 64,
         }
     }
@@ -488,20 +479,46 @@ mod tests {
         assert_eq!(platform.calls.load(Ordering::SeqCst), 1);
     }
 
+    fn managed_server(
+        secret: &[u8],
+        config: fiend_core::server::ServerConfig,
+    ) -> fiend_core::server::Server {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fiend-mobile-test-{}-{}.json",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut state = fiend_core::node::DesiredState::initial(&config);
+        state.users.push(fiend_core::node::User {
+            id: "test".into(),
+            secret: secret.iter().map(|byte| format!("{byte:02x}")).collect(),
+            enabled: true,
+            allowed: true,
+            expire_at: None,
+            traffic_limit: None,
+            used_traffic: 0,
+            usage_epoch: 0,
+        });
+        let node = fiend_core::node::Node::load(&path, vec![0x5c; 32], state).unwrap();
+        fiend_core::server::Server::managed(config, node)
+    }
+
     #[test]
     fn latency_uses_a_real_fiend_handshake() {
-        let address =
-            runtime().unwrap().block_on(async {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let address = listener.local_addr().unwrap();
-                let server = fiend_core::server::Server::new(
-                    fiend_core::server::ServerConfig::new([0x42; 32], "127.0.0.1", 443),
-                );
-                tokio::spawn(async move {
-                    server.serve(listener).await.unwrap();
-                });
-                address
+        let address = runtime().unwrap().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = managed_server(
+                &[0x42; 32],
+                fiend_core::server::ServerConfig::new("127.0.0.1", 443),
+            );
+            tokio::spawn(async move {
+                server.serve(listener).await.unwrap();
             });
+            address
+        });
         let mut profile = profile();
         profile.servers = vec![address.to_string()];
         assert!(measure_latency(profile).unwrap() < 10000);

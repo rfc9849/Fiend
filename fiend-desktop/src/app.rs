@@ -11,7 +11,7 @@ use crate::design::{FONT, Palette, ThemeMode, Ui};
 use crate::dialogs::Dialog;
 use crate::format;
 use crate::menu::OpenMenu;
-use crate::model::{Model, ServiceState, Update};
+use crate::model::{Model, Update};
 use crate::prefs::Prefs;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,16 +461,6 @@ impl AppView {
 
     pub fn is_ready(&self) -> bool {
         self.model.service.is_ready()
-    }
-
-    pub fn service_message(&self) -> Option<&'static str> {
-        match self.model.service {
-            ServiceState::NotInstalled => Some("Service not installed"),
-            ServiceState::NotRunning => Some("Service not running"),
-            ServiceState::Refused(_) => Some("Access denied"),
-            ServiceState::Incompatible(_) => Some("Service version is not supported"),
-            _ => None,
-        }
     }
 }
 

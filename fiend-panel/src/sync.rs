@@ -239,8 +239,13 @@ async fn register_warp(app: &App, node_id: i64, client: &mut ControlClient) -> i
         Err(error) => {
             tracing::warn!(node = node_id, %error, "cannot register WARP");
             let target = node_target(app, node_id).await;
-            app.audit(None, "WARP registration failed", &target, &error.to_string())
-                .await;
+            app.audit(
+                None,
+                "WARP registration failed",
+                &target,
+                &error.to_string(),
+            )
+            .await;
         }
     }
     Ok(())

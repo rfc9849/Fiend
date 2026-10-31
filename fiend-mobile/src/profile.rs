@@ -79,11 +79,6 @@ pub fn parse_share_link(uri: String) -> Result<ProfileConfig, FiendError> {
 }
 
 #[uniffi::export]
-pub fn parse_servers(text: String) -> Result<Vec<String>, FiendError> {
-    Ok(fiend_app::parse_servers(&text)?)
-}
-
-#[uniffi::export]
 pub fn bundled_templates() -> Vec<TemplateInfo> {
     fiend_app::bundled_templates()
         .into_iter()

@@ -71,28 +71,16 @@ pub struct DesiredState {
     pub origin_host: String,
     pub origin_port: u16,
     pub origin_profile: OriginProfile,
-    #[serde(default)]
     pub outbounds: Vec<outbound::Outbound>,
-    #[serde(default)]
     pub rules: Vec<outbound::Rule>,
-    #[serde(default)]
     pub warp: outbound::WarpSettings,
 }
 
 impl DesiredState {
-    pub fn from_legacy(config: &ServerConfig) -> Self {
+    pub fn initial(config: &ServerConfig) -> Self {
         Self {
             version: 1,
-            users: vec![User {
-                id: "legacy".into(),
-                secret: hex::encode(&config.secret),
-                enabled: true,
-                allowed: true,
-                expire_at: None,
-                traffic_limit: None,
-                used_traffic: 0,
-                usage_epoch: 0,
-            }],
+            users: Vec::new(),
             origin_host: config.origin_host.clone(),
             origin_port: config.origin_port,
             origin_profile: config.origin.clone(),
@@ -108,7 +96,7 @@ impl DesiredState {
                 "state needs a nonzero version and at most 4096 users",
             ));
         }
-        let mut config = ServerConfig::new(control_secret, &self.origin_host, self.origin_port);
+        let mut config = ServerConfig::new(&self.origin_host, self.origin_port);
         config.origin = self.origin_profile.clone();
         crate::config::build_server(config).map_err(|_| invalid("invalid state origin profile"))?;
         if self.origin_profile.record_sizes.len() > 64 || self.origin_host.len() > 253 {
@@ -245,7 +233,6 @@ pub struct Stats {
     pub users: Vec<UserStats>,
     pub handshakes_accepted: u64,
     pub handshakes_origin: u64,
-    #[serde(default)]
     pub outbounds: Vec<outbound::OutboundStats>,
 }
 
@@ -257,9 +244,7 @@ pub struct Health {
     pub uptime: u64,
     pub started_at: u64,
     pub state_version: u64,
-    #[serde(default)]
     pub binary_sha256: String,
-    #[serde(default)]
     pub listen_port: u16,
 }
 

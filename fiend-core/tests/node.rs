@@ -54,10 +54,10 @@ fn user(id: &str, secret: &[u8]) -> User {
 }
 
 fn initial() -> (ServerConfig, DesiredState) {
-    let mut config = ServerConfig::new(ALICE, "127.0.0.1", 1);
+    let mut config = ServerConfig::new("127.0.0.1", 1);
     config.origin.record_sizes = vec![35, 3400, 286, 74];
     config.target = TargetPolicy::allow_all();
-    let mut state = DesiredState::from_legacy(&config);
+    let mut state = DesiredState::initial(&config);
     state.users = vec![user("alice", &ALICE), user("bob", &BOB)];
     (config, state)
 }
@@ -345,7 +345,7 @@ async fn expiry_closes_an_open_session_without_panel_access() {
 }
 
 #[test]
-fn prepared_hmac_keys_match_the_legacy_tokens() {
+fn prepared_hmac_keys_match_auth_tokens() {
     use fiend_core::crypto::{AuthKey, auth_token};
     let key = AuthKey::new(&ALICE);
     let random = [0x59; 32];

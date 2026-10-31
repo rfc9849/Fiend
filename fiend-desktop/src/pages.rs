@@ -548,7 +548,7 @@ impl AppView {
                     ui.group()
                         .child(ui.info_row("Handshake timeout", div().child(format!("{} ms", t.handshake_timeout_ms)), true))
                         .child(ui.info_row("Max connections", div().child(t.max_connections.to_string()), false))
-                        .child(ui.info_row("UDP idle / keepalive", div().child(format!("{} / {} ms", t.udp_idle_ms, t.udp_keepalive_ms)), false))
+                        .child(ui.info_row("UDP idle timeout", div().child(format!("{} ms", t.udp_idle_ms)), false))
                         .child(ui.info_row("Max UDP flows", div().child(t.max_udp_flows.to_string()), false)),
                 )
                 .child(

@@ -66,15 +66,12 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(self.current.read_bytes(), b"old binary")
         self.assertFalse((self.bin / "fiend-core.prev").exists())
 
-    def test_entry_supports_managed_and_legacy_binaries(self):
-        for managed in [True, False]:
-            command = "node" if managed else "server"
-            source = f'#!/bin/sh\nif [ "$1" = --help ]; then echo "  {command} <config>"; exit 0; fi\nprintf "%s:%s" "$1" "$2"\n'
-            self.current.write_text(source)
-            self.current.chmod(0o755)
-            result = subprocess.run(["sh", str(ENTRY)], env=self.env, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.decode(), command + ":node.toml")
+    def test_entry_runs_the_node(self):
+        self.current.write_text('#!/bin/sh\nprintf "%s:%s" "$1" "$2"\n')
+        self.current.chmod(0o755)
+        result = subprocess.run(["sh", str(ENTRY)], env=self.env, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.decode(), "node:node.toml")
 
 
 if __name__ == "__main__":

@@ -19,7 +19,6 @@ fiend-core = { path = "../fiend-core" }
 fiend-tun = { path = "../fiend-tun" }
 fiend-app = { path = "../fiend-app" }
 uniffi = "=0.32.2"
-socket2 = "0.6"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 tracing = "0.1"

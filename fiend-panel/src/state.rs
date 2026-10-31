@@ -423,8 +423,7 @@ pub async fn user_link(app: &App, user: &UserRow) -> ApiResult<Link> {
         }
         servers.push(authority(&node.address, node.port));
     }
-    let template = template
-        .ok_or_else(|| ApiError::bad("No node with a disguise."))?;
+    let template = template.ok_or_else(|| ApiError::bad("No node with a disguise."))?;
     if servers.len() > fiend_core::share::MAX_SERVERS {
         servers.truncate(fiend_core::share::MAX_SERVERS);
         warnings.push("Only the first 16 nodes are in the link.".into());

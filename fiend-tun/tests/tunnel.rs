@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use etherparse::{PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
 use fiend_core::client::{Client, ClientConfig};
 use fiend_core::fingerprint::Template;
-use fiend_core::server::{Server, ServerConfig};
+use fiend_core::server::ServerConfig;
 use fiend_core::target::TargetPolicy;
 use fiend_tun::packet::{Packet, Reassembly, Transport, udp_packets};
 use fiend_tun::{PacketIo, TunEngine, TunOptions};
@@ -57,6 +57,32 @@ impl Peer {
     }
 }
 
+fn managed_server(
+    secret: &[u8],
+    config: fiend_core::server::ServerConfig,
+) -> fiend_core::server::Server {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "fiend-tun-test-{}-{}.json",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut state = fiend_core::node::DesiredState::initial(&config);
+    state.users.push(fiend_core::node::User {
+        id: "test".into(),
+        secret: secret.iter().map(|byte| format!("{byte:02x}")).collect(),
+        enabled: true,
+        allowed: true,
+        expire_at: None,
+        traffic_limit: None,
+        used_traffic: 0,
+        usage_epoch: 0,
+    });
+    let node = fiend_core::node::Node::load(&path, vec![0x5c; 32], state).unwrap();
+    fiend_core::server::Server::managed(config, node)
+}
+
 async fn stack(
     options: TunOptions,
 ) -> (
@@ -67,9 +93,9 @@ async fn stack(
 ) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let mut server_config = ServerConfig::new([42; 32], "127.0.0.1", 443);
+    let mut server_config = ServerConfig::new("127.0.0.1", 443);
     server_config.target = TargetPolicy::allow_all();
-    let server = Server::new(server_config);
+    let server = managed_server(&[42; 32], server_config);
     tokio::spawn(async move {
         server.serve(listener).await.unwrap();
     });

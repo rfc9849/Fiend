@@ -149,7 +149,6 @@
       {#if defaults}
         <dl class="facts">
           <dt>Port</dt><dd class="mono">{defaults.port}</dd>
-          {#if defaults.imported}<dt>Imported</dt><dd>{defaults.users} existing secret{defaults.users === 1 ? '' : 's'}</dd>{/if}
         </dl>
         {#if defaults.error}<p class="note error">{defaults.error}</p>{/if}
       {/if}

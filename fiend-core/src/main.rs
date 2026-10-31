@@ -5,7 +5,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use fiend_core::client::Client;
 use fiend_core::config;
 use fiend_core::fingerprint::parse_client_hello;
 use fiend_core::net;
@@ -29,8 +28,6 @@ async fn main() -> ExitCode {
             println!("fiend-core {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Some("client") => run_client(&args[1..]).await,
-        Some("server") => run_server(&args[1..]).await,
         Some("-h" | "--help" | "help") => {
             usage();
             Ok(())
@@ -54,12 +51,10 @@ async fn main() -> ExitCode {
 fn usage() {
     println!("Usage: fiend-core <command> [args]");
     println!("  template <input.bin>");
-    println!("  client <config.toml>");
-    println!("  server <config.toml>");
     println!("  node <config.toml>");
     println!("  check <config.toml> [state.json]");
     println!("  generate-secret");
-    println!("  prepare <directory> [--import <server.toml> | --port <port>]");
+    println!("  prepare <directory> [--port <port>]");
 }
 
 fn run_template(args: &[String]) -> Result<(), String> {
@@ -67,53 +62,6 @@ fn run_template(args: &[String]) -> Result<(), String> {
         return Err("Usage: fiend-core template <input.bin>".to_owned());
     }
     extract_bin(&args[0])
-}
-
-async fn run_client(args: &[String]) -> Result<(), String> {
-    let path = config_path(args, "client")?;
-    let settings = config::load_client(path).map_err(|error| format!("config: {error}"))?;
-    let listener = net::bind_listener(settings.listen)
-        .map_err(|error| format!("listen {}: {error}", settings.listen))?;
-    let listen = listener
-        .local_addr()
-        .map_err(|error| format!("listen address: {error}"))?;
-    tracing::info!(listen = %listen, "client started");
-
-    let client = Client::new(settings.config);
-    tokio::select! {
-        result = client.serve(listener) => {
-            result.map_err(|error| format!("client: {error}"))?;
-        }
-        _ = shutdown_signal() => {
-            tracing::info!("shutdown signal received");
-        }
-    }
-    client.close();
-    tracing::info!("client stopped");
-    Ok(())
-}
-
-async fn run_server(args: &[String]) -> Result<(), String> {
-    let path = config_path(args, "server")?;
-    let settings = config::load_server(path).map_err(|error| format!("config: {error}"))?;
-    let listener = net::bind_listener(settings.listen)
-        .map_err(|error| format!("listen {}: {error}", settings.listen))?;
-    let listen = listener
-        .local_addr()
-        .map_err(|error| format!("listen address: {error}"))?;
-    tracing::info!(listen = %listen, "server started");
-
-    let server = Server::new(settings.config);
-    tokio::select! {
-        result = server.serve(listener) => {
-            result.map_err(|error| format!("server: {error}"))?;
-        }
-        _ = shutdown_signal() => {
-            tracing::info!("shutdown signal received");
-        }
-    }
-    tracing::info!("server stopped");
-    Ok(())
 }
 
 fn run_check(args: &[String]) -> Result<(), String> {
@@ -147,7 +95,7 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     let secret = fs::read_to_string(&settings.node.control_secret_file)
         .map_err(|_| "cannot read control secret")?;
     let secret = decode_secret(&secret).map_err(|error| error.to_string())?;
-    let initial = DesiredState::from_legacy(&settings.config);
+    let initial = DesiredState::initial(&settings.config);
     let node = Node::load_with(
         &settings.node.state_file,
         secret.to_vec(),

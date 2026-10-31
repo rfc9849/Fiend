@@ -140,11 +140,9 @@ async fn local_defaults(
     let settings = fiend_core::config::load_server(&app.config.local_node);
     let mut defaults = LocalNodeDefaults {
         available: false,
-        imported: false,
         port: 443,
         origin_host: "www.wikipedia.org".into(),
         origin_port: 443,
-        users: 0,
         address: crate::address::detect()
             .await
             .map(|address| address.to_string()),
@@ -158,12 +156,6 @@ async fn local_defaults(
             match local_state(&app).await {
                 Ok(desired) => {
                     defaults.available = true;
-                    defaults.users = desired
-                        .users
-                        .iter()
-                        .filter(|user| imports(&app, user))
-                        .count();
-                    defaults.imported = defaults.users > 0;
                     defaults.origin_host = desired.origin_host;
                     defaults.origin_port = desired.origin_port;
                 }
@@ -177,14 +169,6 @@ async fn local_defaults(
         }
     }
     Ok(Json(defaults))
-}
-
-fn imports(app: &App, user: &fiend_core::node::User) -> bool {
-    match user.id.as_str() {
-        "service" => false,
-        "legacy" => app.config.import_users,
-        _ => true,
-    }
 }
 
 async fn local_state(app: &App) -> std::io::Result<fiend_core::node::DesiredState> {
@@ -248,23 +232,6 @@ async fn create_local(
         .bind(now())
         .fetch_one(&mut *transaction)
         .await?;
-    for user in desired.users.iter().filter(|user| imports(&app, user)) {
-        let name = if user.id == "legacy" {
-            "existing-clients".to_owned()
-        } else {
-            user.id.clone()
-        };
-        sqlx::query("INSERT INTO users (name, secret, enabled, note, traffic_limit, expire_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
-            .bind(name)
-            .bind(user.secret.to_ascii_lowercase())
-            .bind(user.enabled)
-            .bind("Imported from the existing server")
-            .bind(user.traffic_limit.map(|value| value as i64))
-            .bind(user.expire_at.map(|value| value as i64))
-            .bind(now())
-            .execute(&mut *transaction)
-            .await?;
-    }
     crate::db::set_setting_tx(&mut transaction, "local_origin", &serde_json::json!({
         "host": desired.origin_host, "port": desired.origin_port, "profile": desired.origin_profile,
     }).to_string()).await?;
@@ -492,9 +459,7 @@ async fn delete_node(
         .fetch_one(&app.db)
         .await?;
     if used > 0 {
-        return Err(ApiError::conflict(
-            "Other nodes chain to this node.",
-        ));
+        return Err(ApiError::conflict("Other nodes chain to this node."));
     }
     app.sync.remove(id);
     sqlx::query("DELETE FROM nodes WHERE id = ?")
@@ -670,7 +635,9 @@ async fn warp_settings(
         &match (input.enabled, input.rotate_every) {
             (false, _) => "off".to_owned(),
             (true, None) => "on".to_owned(),
-            (true, Some(every)) if every % 86400 == 0 => format!("on, New IP every {} d", every / 86400),
+            (true, Some(every)) if every % 86400 == 0 => {
+                format!("on, New IP every {} d", every / 86400)
+            }
             (true, Some(every)) => format!("on, New IP every {} h", every / 3600),
         },
     )
@@ -718,7 +685,11 @@ async fn ensure_warp(app: &App, id: i64) -> ApiResult<()> {
 async fn enable_warp_for(app: &App, node_id: Option<i64>) -> ApiResult<()> {
     let nodes: Vec<i64> = match node_id {
         Some(id) => vec![id],
-        None => state::nodes(app).await?.iter().map(|node| node.id).collect(),
+        None => state::nodes(app)
+            .await?
+            .iter()
+            .map(|node| node.id)
+            .collect(),
     };
     for id in &nodes {
         sqlx::query("INSERT INTO warp (node_id, enabled, chosen) VALUES (?, 1, 1) ON CONFLICT(node_id) DO UPDATE SET enabled = 1, chosen = 1")
@@ -1089,9 +1060,7 @@ async fn update_one(app: &App, node: &NodeRow, binary: &[u8], core: &str) -> Res
                 return Ok(());
             }
             if health["started_at"].as_i64() > node.started_at {
-                return Err(
-                    "Update failed and was rolled back.".into(),
-                );
+                return Err("Update failed and was rolled back.".into());
             }
         }
     }
@@ -1658,10 +1627,11 @@ async fn create_disguise(
     Json(input): Json<DisguiseInput>,
 ) -> ApiResult<Json<Created>> {
     let (raw, origin_host) = template_bytes(&input)?;
-    let same: Option<String> = sqlx::query_scalar("SELECT name FROM disguises WHERE template_raw = ?")
-        .bind(&raw)
-        .fetch_optional(&app.db)
-        .await?;
+    let same: Option<String> =
+        sqlx::query_scalar("SELECT name FROM disguises WHERE template_raw = ?")
+            .bind(&raw)
+            .fetch_optional(&app.db)
+            .await?;
     if let Some(same) = same {
         return Err(ApiError::field(
             "template",
@@ -1714,9 +1684,7 @@ async fn delete_disguise(
         .fetch_one(&app.db)
         .await?;
     if used > 0 {
-        return Err(ApiError::conflict(
-            "Nodes use this disguise.",
-        ));
+        return Err(ApiError::conflict("Nodes use this disguise."));
     }
     sqlx::query("DELETE FROM disguises WHERE id = ?")
         .bind(id)
@@ -2091,9 +2059,7 @@ async fn delete_outbound(
     .fetch_one(&app.db)
     .await?;
     if used > 0 {
-        return Err(ApiError::conflict(
-            "Rules use this outbound.",
-        ));
+        return Err(ApiError::conflict("Rules use this outbound."));
     }
     sqlx::query("DELETE FROM outbounds WHERE id = ?")
         .bind(id)

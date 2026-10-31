@@ -41,7 +41,6 @@ pub enum Request {
     Disconnect,
     Status,
     Subscribe,
-    Unsubscribe,
     ListProfiles,
     SaveProfile {
         profile: ProfileInput,
@@ -69,7 +68,6 @@ pub enum Request {
     AddSubscription {
         url: String,
         kind: RuleKind,
-        #[serde(default)]
         name: String,
     },
     UpdateSubscription {

@@ -9,13 +9,11 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::client::ClientConfig;
-use crate::fingerprint::Template;
 use crate::mux;
 use crate::server::ServerConfig;
 use crate::target::TargetPolicy;
 use crate::transport::{AUTH_WINDOW, OriginProfile};
 
-const DEFAULT_CLIENT_LISTEN: &str = "127.0.0.1:1080";
 const DEFAULT_SERVER_LISTEN: &str = "0.0.0.0:443";
 const DEFAULT_ORIGIN_PORT: u16 = 443;
 const DEFAULT_MAX_CONNECTIONS: usize = 1024;
@@ -31,11 +29,6 @@ pub enum ConfigError {
     Parse { path: PathBuf, message: String },
     #[error("{0}")]
     Invalid(String),
-}
-
-pub struct ClientSettings {
-    pub listen: SocketAddr,
-    pub config: ClientConfig,
 }
 
 pub struct ServerSettings {
@@ -66,67 +59,6 @@ impl Default for NodeSettings {
     }
 }
 
-pub fn load_client(path: impl AsRef<Path>) -> Result<ClientSettings, ConfigError> {
-    let path = path.as_ref();
-    let file: ClientFile = read_config(path)?;
-    let base = path.parent().unwrap_or_else(|| Path::new("."));
-
-    let listen = parse_listen(
-        file.listen.as_deref().unwrap_or(DEFAULT_CLIENT_LISTEN),
-        "client listen",
-    )?;
-    let servers = match (file.server, file.servers) {
-        (Some(server), None) => vec![server],
-        (None, Some(servers)) => servers,
-        _ => {
-            return Err(invalid(
-                "client server is required: set either server or servers",
-            ));
-        }
-    };
-
-    let secret = load_secret(base, file.secret, file.secret_file)?;
-    let template_path = required(file.template, "client template")?;
-    let template = Template::load(resolve(base, &template_path))
-        .map_err(|error| invalid(format!("client template {template_path}: {error}")))?;
-
-    let handshake_timeout = option_duration(
-        file.handshake_timeout_ms,
-        Duration::from_secs(10),
-        "client handshake_timeout_ms",
-    )?;
-    let udp_idle = option_duration(
-        file.udp.idle_ms,
-        Duration::from_secs(60),
-        "client udp idle_ms",
-    )?;
-    let udp_keepalive = option_duration(
-        file.udp.keepalive_ms,
-        Duration::from_secs(20),
-        "client udp keepalive_ms",
-    )?;
-    let max_udp_flows = file.udp.max_flows.unwrap_or(64);
-    let max_connections = file.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
-
-    let mut mux = mux::Config::default();
-    file.mux.apply(&mut mux);
-
-    let mut config = ClientConfig::new(String::new(), secret, template);
-    config.servers = servers;
-    config.mux = mux;
-    config.udp_idle = udp_idle;
-    config.udp_keepalive = udp_keepalive;
-    config.max_udp_flows = max_udp_flows;
-    config.handshake_timeout = handshake_timeout;
-    config.max_connections = max_connections;
-    config.tcp_notsent_lowat = socket_size(file.tcp_notsent_lowat, "client", "tcp_notsent_lowat")?;
-
-    Ok(ClientSettings {
-        listen,
-        config: build_client(config)?,
-    })
-}
-
 pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError> {
     let path = path.as_ref();
     let file: ServerFile = read_config(path)?;
@@ -136,8 +68,6 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
         file.listen.as_deref().unwrap_or(DEFAULT_SERVER_LISTEN),
         "server listen",
     )?;
-    let secret = load_secret(base, file.secret, file.secret_file)?;
-
     let origin_host = required(file.origin_host, "server origin_host")?;
     let origin_host = origin_host.trim().to_owned();
     let origin_port = file.origin_port.unwrap_or(DEFAULT_ORIGIN_PORT);
@@ -158,7 +88,7 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
 
     let max_connections = file.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
 
-    let mut config = ServerConfig::new(secret, origin_host, origin_port);
+    let mut config = ServerConfig::new(origin_host, origin_port);
     config.origin = file.origin.into_profile()?;
     config.replay_ttl = replay_ttl;
     config.mux = mux;
@@ -205,17 +135,6 @@ pub fn build_client(mut config: ClientConfig) -> Result<ClientConfig, ConfigErro
         .map_err(|error| invalid(format!("client template: {error}")))?;
     validate_mux(&config.mux, "client")?;
     validate_duration(config.handshake_timeout, "client handshake_timeout_ms")?;
-    validate_duration(config.udp_idle, "client udp idle_ms")?;
-    validate_duration(config.udp_keepalive, "client udp keepalive_ms")?;
-    if config.udp_keepalive >= config.udp_idle {
-        return Err(invalid("client udp keepalive_ms must be less than idle_ms"));
-    }
-    if config.max_udp_flows == 0 {
-        return Err(invalid("client udp max_flows must be greater than zero"));
-    }
-    if config.max_connections == 0 {
-        return Err(invalid("client max_connections must be greater than zero"));
-    }
     socket_size(
         Some(config.tcp_notsent_lowat),
         "client",
@@ -226,7 +145,6 @@ pub fn build_client(mut config: ClientConfig) -> Result<ClientConfig, ConfigErro
 
 pub fn build_server(mut config: ServerConfig) -> Result<ServerConfig, ConfigError> {
     config.origin_host = config.origin_host.trim().to_owned();
-    validate_secret(&config.secret)?;
     if config.origin_host.is_empty() {
         return Err(invalid("server origin_host must not be empty"));
     }
@@ -276,38 +194,10 @@ fn validate_duration(value: Duration, field: &str) -> Result<(), ConfigError> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ClientFile {
-    listen: Option<String>,
-    server: Option<String>,
-    servers: Option<Vec<String>>,
-    secret: Option<String>,
-    secret_file: Option<String>,
-    template: Option<String>,
-    handshake_timeout_ms: Option<u64>,
-    max_connections: Option<usize>,
-    tcp_notsent_lowat: Option<u32>,
-    #[serde(default)]
-    udp: ClientUdpFile,
-    #[serde(default)]
-    mux: MuxFile,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ClientUdpFile {
-    idle_ms: Option<u64>,
-    keepalive_ms: Option<u64>,
-    max_flows: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ServerFile {
     #[serde(default)]
     node: NodeSettings,
     listen: Option<String>,
-    secret: Option<String>,
-    secret_file: Option<String>,
     origin_host: Option<String>,
     origin_port: Option<u16>,
     replay_ttl_ms: Option<u64>,
@@ -539,49 +429,6 @@ fn read_config<T: DeserializeOwned>(path: &Path) -> Result<T, ConfigError> {
     })
 }
 
-fn load_secret(
-    base: &Path,
-    inline: Option<String>,
-    secret_file: Option<String>,
-) -> Result<Vec<u8>, ConfigError> {
-    match (inline, secret_file) {
-        (Some(_), Some(_)) => Err(invalid("set either secret or secret_file, not both")),
-        (Some(hex), None) => decode_secret(hex.trim()),
-        (None, Some(path)) => {
-            let path = resolve(base, &path);
-            let raw = fs::read(&path).map_err(|source| ConfigError::Read {
-                path: path.clone(),
-                source,
-            })?;
-            if raw.len() == SECRET_LEN {
-                if raw.iter().all(u8::is_ascii_hexdigit) {
-                    return Err(invalid(format!(
-                        "secret file {} has {SECRET_LEN} hex characters; write {SECRET_LEN} raw bytes or {} hex characters",
-                        path.display(),
-                        SECRET_LEN * 2
-                    )));
-                }
-                return Ok(raw);
-            }
-            let text = String::from_utf8(raw).map_err(|_| {
-                invalid(format!(
-                    "secret file {} must contain {SECRET_LEN} raw bytes or hex text",
-                    path.display()
-                ))
-            })?;
-            decode_secret(text.trim())
-        }
-        (None, None) => Err(invalid("secret or secret_file is required")),
-    }
-}
-
-fn decode_secret(text: &str) -> Result<Vec<u8>, ConfigError> {
-    let secret =
-        hex::decode(text).map_err(|error| invalid(format!("secret is not valid hex: {error}")))?;
-    validate_secret(&secret)?;
-    Ok(secret)
-}
-
 fn option_duration(
     value: Option<u64>,
     default: Duration,
@@ -615,15 +462,6 @@ fn required(value: Option<String>, field: &str) -> Result<String, ConfigError> {
     value
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| invalid(format!("{field} is required")))
-}
-
-fn resolve(base: &Path, path: &str) -> PathBuf {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        base.join(path)
-    }
 }
 
 fn line_column(raw: &str, offset: usize) -> (usize, usize) {

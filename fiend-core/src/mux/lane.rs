@@ -36,12 +36,6 @@ impl LaneKind {
     }
 }
 
-pub trait Lane: AsyncRead + AsyncWrite + Unpin + Send + 'static {
-    fn kind(&self) -> LaneKind;
-    fn authority(&self) -> &str;
-    fn reset(&mut self);
-}
-
 pub(crate) struct LaneOptions {
     pub(crate) link_id: u64,
     pub(crate) shared: Option<Arc<LinkShared>>,
@@ -177,16 +171,16 @@ impl H2Lane {
     }
 }
 
-impl Lane for H2Lane {
-    fn kind(&self) -> LaneKind {
+impl H2Lane {
+    pub fn kind(&self) -> LaneKind {
         self.kind
     }
 
-    fn authority(&self) -> &str {
+    pub fn authority(&self) -> &str {
         &self.authority
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.set_blocked(false);
         self.send.send_reset(Reason::CANCEL);
         self.reset = true;

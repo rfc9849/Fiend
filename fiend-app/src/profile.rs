@@ -180,7 +180,7 @@ pub(crate) mod tests {
         let mut profile = profile();
         profile.servers.push("node.example:8443".into());
         let link = make_share_link(profile.clone()).unwrap();
-        assert!(link.starts_with("fiend://") && !link.starts_with("fiend://v1/"));
+        assert!(link.starts_with("fiend://"));
         let restored = parse_share_link(link.clone()).unwrap();
         assert_eq!(restored.name, profile.name);
         assert_eq!(restored.servers, profile.servers);
@@ -193,13 +193,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn links_reject_old_formats_and_bad_input() {
-        for link in [
-            "fiend://v1/eJwrSS0u0U9KzAEAEdMDkg",
-            "https://example.com",
-            "fiend://!",
-            "fiend://AAAA",
-        ] {
+    fn links_reject_bad_input() {
+        for link in ["https://example.com", "fiend://!", "fiend://AAAA"] {
             assert!(parse_share_link(link.into()).is_err());
         }
     }

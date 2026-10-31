@@ -58,7 +58,6 @@ pub struct TunOptions {
     pub mtu: u16,
     pub ipv6: bool,
     pub bypass_lan: bool,
-    pub direct_all: bool,
     pub direct_rules: String,
     pub block_rules: String,
     pub proxy_rules: String,
@@ -80,7 +79,6 @@ impl Default for TunOptions {
             mtu: 1500,
             ipv6: true,
             bypass_lan: false,
-            direct_all: false,
             direct_rules: String::new(),
             block_rules: String::new(),
             proxy_rules: String::new(),
@@ -164,7 +162,7 @@ impl TunEngine {
             }
         }
         rules.finish();
-        let rules = Arc::new(rules.with_all_direct(options.direct_all));
+        let rules = Arc::new(rules);
         let resolver = Resolver::new(
             parse_server(&options.direct_resolver)?,
             options.protect_socket.clone(),

@@ -6,7 +6,6 @@ pub struct Tuning {
     pub handshake_timeout_ms: u32,
     pub max_connections: u32,
     pub udp_idle_ms: u32,
-    pub udp_keepalive_ms: u32,
     pub max_udp_flows: u32,
 }
 
@@ -16,7 +15,6 @@ impl Default for Tuning {
             handshake_timeout_ms: 10_000,
             max_connections: 256,
             udp_idle_ms: 60_000,
-            udp_keepalive_ms: 20_000,
             max_udp_flows: 256,
         }
     }
@@ -33,9 +31,6 @@ impl Tuning {
         if !(1_000..=600_000).contains(&self.udp_idle_ms) {
             return Err("UDP idle time must be from 1000 to 600000 ms");
         }
-        if !(1_000..=600_000).contains(&self.udp_keepalive_ms) {
-            return Err("UDP keepalive must be from 1000 to 600000 ms");
-        }
         if !(1..=4_096).contains(&self.max_udp_flows) {
             return Err("Max UDP flows must be from 1 to 4096");
         }
@@ -47,11 +42,9 @@ impl Tuning {
 pub struct Profile {
     pub id: String,
     pub name: String,
-    #[serde(alias = "server", deserialize_with = "servers")]
     pub servers: Vec<String>,
     pub secret: String,
     pub template_json: String,
-    #[serde(default)]
     pub tuning: Tuning,
 }
 
@@ -64,22 +57,6 @@ pub struct ProfileInput {
     pub template_json: String,
     #[serde(default)]
     pub tuning: Tuning,
-}
-
-fn servers<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Saved {
-        One(String),
-        Many(Vec<String>),
-    }
-    Ok(match Saved::deserialize(deserializer)? {
-        Saved::One(server) => vec![server],
-        Saved::Many(servers) => servers,
-    })
 }
 
 impl Profile {
@@ -117,7 +94,6 @@ impl RuleStats {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
     pub id: String,
-    #[serde(default)]
     pub name: String,
     pub url: String,
     pub kind: RuleKind,
@@ -307,24 +283,5 @@ mod tests {
         assert_eq!(item.title(), "Blocked in Russia");
         assert_eq!(url_title("https://rules.example/"), "rules.example");
         assert_eq!(url_title("https://rules.example/list"), "list");
-        let old: Subscription = serde_json::from_str(
-            r#"{"id":"a","url":"https://x/y.txt","kind":"dpi","updated_at_ms":0,"entries":0,"error":null}"#,
-        )
-        .unwrap();
-        assert_eq!(old.title(), "y");
-    }
-
-    #[test]
-    fn saved_profiles_with_one_server_keep_it() {
-        let old: Profile = serde_json::from_str(
-            r#"{"id":"a","name":"n","server":"192.0.2.1:443","secret":"s","template_json":"{}"}"#,
-        )
-        .unwrap();
-        assert_eq!(old.servers, vec!["192.0.2.1:443"]);
-        let saved = serde_json::to_value(&old).unwrap();
-        assert_eq!(saved["servers"], serde_json::json!(["192.0.2.1:443"]));
-        assert!(saved.get("server").is_none());
-        let many: Profile = serde_json::from_value(saved).unwrap();
-        assert_eq!(many, old);
     }
 }

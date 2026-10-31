@@ -25,7 +25,6 @@ pub struct Journal {
     #[serde(default)]
     pub dns: Vec<DnsEntry>,
     /// Commands that undo earlier changes. They run in reverse order.
-    #[serde(default)]
     pub undo: Vec<Vec<String>>,
 }
 

@@ -5,16 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use fiend_core::fingerprint::Template;
-use fiend_core::mux::{
-    Config, Incoming, LANE_HEADER, Lane, LaneKind, LinkPool, Mux, ServerConnection,
-    serve_tcp_with_policy,
-};
-use fiend_core::target::TargetPolicy;
+use fiend_core::mux::{Config, Incoming, LANE_HEADER, LaneKind, LinkPool, ServerConnection};
 use fiend_core::transport::{
     AcceptOutcome, FreshnessCheck, OriginProfile, Session, accept, connect,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
@@ -440,7 +435,8 @@ async fn concurrent_lane_opens_do_not_serialize_dials() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn h2_lane_round_trip_uses_connect_authority() {
     let pool = test_pool(echo_handler());
-    let mut lane = Mux::open(&pool, "echo.test:7", LaneKind::Tcp)
+    let mut lane = pool
+        .open_lane("echo.test:7", LaneKind::Tcp)
         .await
         .expect("open lane");
     assert_eq!(lane.kind(), LaneKind::Tcp);
@@ -760,52 +756,4 @@ async fn server_rejects_invalid_connect_metadata() {
     driver.abort();
     let accepted = server_task.await.expect("server task").expect("accept");
     assert!(accepted.is_none());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn serve_tcp_reaches_a_real_target() {
-    let target = TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("bind target");
-    let target_port = target.local_addr().expect("target address").port();
-    tokio::spawn(async move {
-        let (mut stream, _) = target.accept().await.expect("accept target");
-        let mut buffer = [0u8; 4];
-        stream.read_exact(&mut buffer).await.expect("target read");
-        assert_eq!(&buffer, b"ping");
-        stream.write_all(b"pong").await.expect("target write");
-    });
-
-    let template = Template::from_json(TEMPLATE_JSON).expect("load sample template");
-    let (client, server) = connect_pair(&template).await.expect("connect pair");
-    let server_task = tokio::spawn(async move {
-        serve_tcp_with_policy(server, Config::default(), TargetPolicy::allow_all()).await
-    });
-
-    let client = Arc::new(tokio::sync::Mutex::new(Some(client)));
-    let pool: LinkPool<DuplexStream> = LinkPool::new(Config::default(), move || {
-        let client = client.clone();
-        Box::pin(async move {
-            client
-                .lock()
-                .await
-                .take()
-                .ok_or_else(|| fiend_core::transport::Error::invalid("client already used"))
-        })
-    });
-    let mut lane = pool
-        .open_lane(&format!("127.0.0.1:{target_port}"), LaneKind::Tcp)
-        .await
-        .expect("open lane");
-    lane.write_all(b"ping").await.expect("lane write");
-    let mut response = [0u8; 4];
-    lane.read_exact(&mut response).await.expect("lane read");
-    assert_eq!(&response, b"pong");
-    drop(lane);
-    drop(pool);
-    timeout(Duration::from_secs(5), server_task)
-        .await
-        .expect("server task timeout")
-        .expect("server task")
-        .expect("serve tcp");
 }

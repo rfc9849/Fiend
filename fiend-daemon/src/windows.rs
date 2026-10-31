@@ -1,6 +1,6 @@
 #![allow(unsafe_code)]
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
@@ -407,10 +407,6 @@ pub fn source_wintun() -> Option<PathBuf> {
         .parent()
         .map(|parent| parent.join("wintun.dll"))
         .filter(|path| path.is_file())
-}
-
-pub fn service_name() -> OsString {
-    OsString::from(SERVICE_NAME)
 }
 
 #[cfg(test)]

@@ -1,23 +1,20 @@
 use std::io;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::split;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
-use crate::addr::Address;
-use crate::mux::{self, Incoming, LaneKind, ServerConnection, handle_tcp};
-use crate::target::{self, TargetPolicy};
+use crate::mux::{self, Incoming, LaneKind, ServerConnection};
+use crate::target::TargetPolicy;
 use crate::transport::{self, FreshnessCheck, OriginProfile, Session};
 use crate::udp;
 
 #[derive(Clone)]
 pub struct ServerConfig {
-    pub secret: Vec<u8>,
     pub origin_host: String,
     pub origin_port: u16,
     pub origin: OriginProfile,
@@ -30,13 +27,8 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn new(
-        secret: impl Into<Vec<u8>>,
-        origin_host: impl Into<String>,
-        origin_port: u16,
-    ) -> Self {
+    pub fn new(origin_host: impl Into<String>, origin_port: u16) -> Self {
         Self {
-            secret: secret.into(),
             origin_host: origin_host.into(),
             origin_port,
             origin: OriginProfile::default(),
@@ -59,38 +51,18 @@ struct ServerInner {
     config: ServerConfig,
     replay: FreshnessCheck,
     connections: Arc<Semaphore>,
-    origin: RwLock<OriginProfile>,
-    node: Option<crate::node::Node>,
-}
-
-impl ServerInner {
-    fn origin(&self) -> OriginProfile {
-        self.origin
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
+    node: crate::node::Node,
 }
 
 impl Server {
-    pub fn new(config: ServerConfig) -> Self {
-        Self::with_optional_node(config, None)
-    }
-
     pub fn managed(config: ServerConfig, node: crate::node::Node) -> Self {
-        Self::with_optional_node(config, Some(node))
-    }
-
-    fn with_optional_node(config: ServerConfig, node: Option<crate::node::Node>) -> Self {
         let replay = FreshnessCheck::new(config.replay_ttl.max(transport::AUTH_WINDOW));
         let connections = Arc::new(Semaphore::new(config.max_connections.max(1)));
-        let origin = RwLock::new(config.origin.clone());
         Self {
             inner: Arc::new(ServerInner {
                 config,
                 replay,
                 connections,
-                origin,
                 node,
             }),
         }
@@ -132,77 +104,16 @@ impl Server {
     }
 
     fn start_origin_probe(&self) {
-        if let Some(node) = &self.inner.node {
-            let node = node.clone();
-            tokio::spawn(async move {
-                node.refresh_origin().await;
-            });
-            return;
-        }
-        if !self.inner.config.origin.record_sizes.is_empty() {
-            return;
-        }
-        let server = self.clone();
+        let node = self.inner.node.clone();
         tokio::spawn(async move {
-            server.probe_origin().await;
+            node.refresh_origin().await;
         });
     }
 
-    async fn probe_origin(&self) {
-        if !self.inner.config.origin.record_sizes.is_empty() {
-            return;
-        }
-        let host = &self.inner.config.origin_host;
-        let hello = transport::build_probe_hello(host);
-        match transport::probe_origin_at(host, self.inner.config.origin_port, &hello).await {
-            Ok(profile) => {
-                let mut origin = self
-                    .inner
-                    .origin
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if origin.cipher_suite == 0 {
-                    origin.cipher_suite = profile.cipher_suite;
-                }
-                if origin.key_share_group == 0 {
-                    origin.key_share_group = profile.key_share_group;
-                }
-                if origin.extension_order.is_empty() {
-                    origin.extension_order = profile.extension_order;
-                }
-                if origin.record_sizes.is_empty() && profile.record_sizes.len() >= 2 {
-                    origin.record_sizes = profile.record_sizes;
-                }
-            }
-            Err(error) => tracing::debug!(%error, "origin probe failed"),
-        }
-    }
-
     async fn handle(&self, stream: TcpStream) -> mux::Result<()> {
-        if let Some(node) = &self.inner.node {
-            return self.handle_managed(stream, node.clone()).await;
-        }
-        let config = &self.inner.config;
-        let origin = self.inner.origin();
-        let outcome = transport::serve_connection(
-            stream,
-            &config.secret,
-            &self.inner.replay,
-            &origin,
-            &config.origin_host,
-            config.origin_port,
-        )
-        .await?;
-
-        if let Some(session) = outcome {
-            serve_mux(session, config.clone(), None).await?;
-        }
-        Ok(())
-    }
-
-    async fn handle_managed(&self, stream: TcpStream, node: crate::node::Node) -> mux::Result<()> {
         use crate::node::Principal;
         use crate::transport::AcceptOutcome;
+        let node = self.inner.node.clone();
         let mut config = self.inner.config.clone();
         (config.origin_host, config.origin_port, config.origin) = node.origin();
         let mut principal = None;
@@ -233,7 +144,7 @@ impl Server {
                             return Ok(());
                         };
                         tokio::select! {
-                            result = serve_mux(*session, config, Some((entry, node.clone()))) => result?,
+                            result = serve_mux(*session, config, entry, node.clone()) => result?,
                             _ = guard.revoked() => {},
                         }
                     }
@@ -248,28 +159,22 @@ impl Server {
 async fn serve_mux(
     session: Session<TcpStream>,
     config: ServerConfig,
-    user: Option<(Arc<crate::node::UserEntry>, crate::node::Node)>,
+    user: Arc<crate::node::UserEntry>,
+    node: crate::node::Node,
 ) -> mux::Result<()> {
     let mut connection = ServerConnection::handshake(session, &config.mux).await?;
     let mut lanes = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             incoming = connection.accept() => {
-                let Some(mut incoming) = incoming? else { return Ok(()); };
-                let mut node = None;
-                if let Some((user, managed)) = &user {
-                    if !user.active(crate::node::unix_time()) { return Ok(()); }
-                    let user = user.clone();
-                    incoming = incoming.with_meter(Arc::new(move |count, inbound| user.note_bytes(count, inbound)));
-                    node = Some(managed.clone());
-                }
+                let Some(incoming) = incoming? else { return Ok(()); };
+                if !user.active(crate::node::unix_time()) { return Ok(()); }
+                let meter = user.clone();
+                let incoming = incoming.with_meter(Arc::new(move |count, inbound| meter.note_bytes(count, inbound)));
                 let config = config.clone();
+                let node = node.clone();
                 lanes.spawn(async move {
-                    let result = match node {
-                        Some(node) => handle_routed(incoming, config, node).await,
-                        None => handle_incoming(incoming, config).await,
-                    };
-                    if let Err(error) = result {
+                    if let Err(error) = handle_routed(incoming, config, node).await {
                         tracing::debug!(%error, "lane handler failed");
                     }
                 });
@@ -334,65 +239,6 @@ async fn handle_routed(
             Ok(())
         }
     }
-}
-
-async fn handle_incoming(incoming: Incoming, config: ServerConfig) -> mux::Result<()> {
-    tracing::debug!(kind = ?incoming.kind, authority = %incoming.address, "server lane request");
-    match incoming.kind {
-        LaneKind::Tcp => handle_tcp(incoming, config.mux.target_timeout, config.target).await,
-        LaneKind::Udp => handle_udp(incoming, &config).await,
-    }
-}
-
-async fn handle_udp(incoming: Incoming, config: &ServerConfig) -> mux::Result<()> {
-    let target = incoming.address.clone();
-    let socket = match timeout(
-        config.mux.target_timeout,
-        connect_udp(&target, config.target),
-    )
-    .await
-    {
-        Ok(Ok(socket)) => socket,
-        Ok(Err(error)) if error.kind() == io::ErrorKind::PermissionDenied => {
-            incoming.reject(http::StatusCode::FORBIDDEN);
-            return Ok(());
-        }
-        Ok(Err(_)) => {
-            incoming.reject(http::StatusCode::BAD_GATEWAY);
-            return Ok(());
-        }
-        Err(_) => {
-            incoming.reject(http::StatusCode::GATEWAY_TIMEOUT);
-            return Ok(());
-        }
-    };
-    let lane = incoming.accept().await?;
-    let socket = Arc::new(socket);
-    let path = crate::node::outbound::UdpPath {
-        tx: crate::node::outbound::UdpTx::Socket(socket.clone()),
-        rx: crate::node::outbound::UdpRx::Socket(socket),
-        guard: None,
-    };
-    bridge_udp(lane, path, config.udp_idle).await?;
-    Ok(())
-}
-
-async fn connect_udp(address: &Address, policy: TargetPolicy) -> io::Result<UdpSocket> {
-    let targets = target::resolve_all(address, &policy).await?;
-    let mut last = None;
-    for target in targets {
-        let bind = if target.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        };
-        let socket = UdpSocket::bind(bind).await?;
-        match socket.connect(target).await {
-            Ok(()) => return Ok(socket),
-            Err(error) => last = Some(error),
-        }
-    }
-    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "target has no addresses")))
 }
 
 async fn bridge_udp(
@@ -478,65 +324,4 @@ fn millis(duration: Duration) -> u64 {
 
 fn touch(activity: &AtomicU64, epoch: Instant) {
     activity.store(elapsed_ms(epoch), Ordering::Relaxed);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[tokio::test]
-    async fn origin_probe_records_the_server_flight_shape() {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind origin");
-        let port = listener.local_addr().expect("origin address").port();
-        let origin = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept probe");
-            let mut header = [0u8; 5];
-            stream.read_exact(&mut header).await.expect("probe header");
-            let length = u16::from_be_bytes([header[3], header[4]]) as usize;
-            let mut body = vec![0u8; length];
-            stream.read_exact(&mut body).await.expect("probe body");
-
-            let mut reply = transport::build_server_hello(
-                [9u8; 32],
-                &[3u8; 32],
-                0x1301,
-                0x001d,
-                &[7u8; 32],
-                &[0x002b, 0x0033],
-            )
-            .expect("build ServerHello");
-            reply.extend_from_slice(&[0x14, 0x03, 0x03, 0, 1, 1]);
-            for size in [111usize, 222, 333] {
-                reply.extend_from_slice(&[0x17, 0x03, 0x03]);
-                reply.extend_from_slice(&(size as u16).to_be_bytes());
-                reply.resize(reply.len() + size, 0x5a);
-            }
-            stream.write_all(&reply).await.expect("origin write");
-            stream.shutdown().await.expect("origin shutdown");
-        });
-
-        let config = ServerConfig::new(vec![0x42u8; 32], "127.0.0.1", port);
-        let server = Server::new(config);
-        server.probe_origin().await;
-
-        let profile = server.inner.origin();
-        assert_eq!(profile.cipher_suite, 0x1301);
-        assert_eq!(profile.key_share_group, 0x001d);
-        assert_eq!(profile.extension_order, vec![0x002b, 0x0033]);
-        assert_eq!(profile.record_sizes, vec![116, 227, 338]);
-        origin.await.expect("origin task");
-    }
-
-    #[tokio::test]
-    async fn explicit_record_sizes_skip_the_origin_probe() {
-        let config = ServerConfig::new(vec![0x42u8; 32], "192.0.2.1", 443);
-        let mut config = config;
-        config.origin.record_sizes = vec![35, 4000, 300];
-        let server = Server::new(config);
-        server.probe_origin().await;
-        assert_eq!(server.inner.origin().record_sizes, vec![35, 4000, 300]);
-    }
 }

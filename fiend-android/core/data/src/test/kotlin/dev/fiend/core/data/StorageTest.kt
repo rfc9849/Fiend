@@ -1,7 +1,6 @@
 package dev.fiend.core.data
 
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import com.google.crypto.tink.Aead
 import com.google.crypto.tink.KeysetHandle
@@ -206,27 +205,5 @@ class StorageTest {
         assertTrue(repository.read(android.net.Uri.fromFile(large).toString()).isFailure)
         val binary = java.io.File(context.cacheDir, "binary.txt").apply { writeBytes(byteArrayOf(0xff.toByte(), 0xfe.toByte(), 0x00)) }
         assertTrue(repository.read(android.net.Uri.fromFile(binary).toString()).isFailure)
-    }
-
-    @Test
-    fun migrationFromVersionOneKeepsEncryptedRows() = runBlocking {
-        val context = RuntimeEnvironment.getApplication() as Context
-        val file = context.getDatabasePath("migration-test.db")
-        file.parentFile!!.mkdirs()
-        val secretCipher = cipher()
-        val encrypted = secretCipher.encrypt("one", "42".repeat(32))
-        SQLiteDatabase.openOrCreateDatabase(file, null).use { database ->
-            database.execSQL("CREATE TABLE profiles (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, encrypted_secret BLOB NOT NULL, template_id TEXT NOT NULL, country_code TEXT, latency_ms INTEGER, last_connected_at INTEGER, handshake_timeout_ms INTEGER NOT NULL, max_connections INTEGER NOT NULL, udp_idle_ms INTEGER NOT NULL, udp_keepalive_ms INTEGER NOT NULL, max_udp_flows INTEGER NOT NULL)")
-            database.execSQL("INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 10000, 1024, 60000, 20000, 64)", arrayOf("one", "Local test", "127.0.0.1", 443, encrypted, "captured-wikipedia-v1"))
-            database.version = 1
-        }
-        val database = Room.databaseBuilder(context, ProfileDatabase::class.java, file.name).addMigrations(ProfileDatabase.MIGRATION_1_2, ProfileDatabase.MIGRATION_2_3).build()
-        try {
-            val restored = database.profiles().get("one")!!
-            assertTrue(restored.encryptedSecret.contentEquals(encrypted))
-            assertEquals("42".repeat(32), secretCipher.decrypt("one", restored.encryptedSecret))
-            assertEquals(null, restored.templateJson)
-            assertEquals("", restored.moreServers)
-        } finally { database.close(); context.deleteDatabase(file.name) }
     }
 }

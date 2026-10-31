@@ -10,11 +10,9 @@ pub use error::{Error, Result};
 pub use freshness::FreshnessCheck;
 pub use handshake::{
     AUTH_WINDOW, AcceptOutcome, HANDSHAKE_VERSION, ServerFlight, accept, accept_with,
-    build_server_flight, connect, default_flight_sizes, serve_connection,
+    build_server_flight, connect, default_flight_sizes,
 };
-pub use originprofile::{
-    OriginProfile, OriginProfileCache, build_probe_hello, probe_origin, probe_origin_at,
-};
+pub use originprofile::{OriginProfile, build_probe_hello, probe_origin_at};
 pub use passthrough::bridge_passthrough;
 pub use serverhello::{
     ServerHello, build_server_hello, choose_cipher_suite, choose_server_share,
