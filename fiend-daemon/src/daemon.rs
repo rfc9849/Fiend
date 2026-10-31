@@ -104,6 +104,7 @@ fn validate_settings(settings: &Settings) -> Result<()> {
     fiend_app::validate_rules(&settings.direct_rules, true).map_err(from_app)?;
     fiend_app::validate_rules(&settings.block_rules, false).map_err(from_app)?;
     fiend_app::validate_rules(&settings.proxy_rules, true).map_err(from_app)?;
+    fiend_app::validate_rules(&settings.dpi_rules, true).map_err(from_app)?;
     fiend_app::validate_resolver(&settings.direct_resolver).map_err(from_app)?;
     Ok(())
 }
@@ -117,6 +118,7 @@ fn app_kind(kind: RuleKind) -> fiend_app::RuleKind {
         RuleKind::Direct => fiend_app::RuleKind::Direct,
         RuleKind::Block => fiend_app::RuleKind::Block,
         RuleKind::Proxy => fiend_app::RuleKind::Proxy,
+        RuleKind::Dpi => fiend_app::RuleKind::Dpi,
     }
 }
 
@@ -139,6 +141,7 @@ fn engine_settings(store: &Store) -> EngineSettings {
         direct_rules: settings.direct_rules.clone(),
         block_rules: settings.block_rules.clone(),
         proxy_rules: settings.proxy_rules.clone(),
+        dpi_rules: settings.dpi_rules.clone(),
         rule_files: settings
             .subscriptions
             .iter()
@@ -756,6 +759,7 @@ impl<P: Platform> Daemon<P> {
                 RuleKind::Direct => settings.direct_rules = text,
                 RuleKind::Block => settings.block_rules = text,
                 RuleKind::Proxy => settings.proxy_rules = text,
+                RuleKind::Dpi => settings.dpi_rules = text,
             })
             .map_err(internal)?;
         self.inner.emit_settings();

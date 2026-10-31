@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod desync;
 pub mod dns;
 mod engine;
 pub mod packet;

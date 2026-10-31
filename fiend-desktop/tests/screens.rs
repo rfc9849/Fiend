@@ -60,6 +60,7 @@ pub fn connected_updates() -> Vec<Update> {
             proxy_rules:
                 "domain:youtube.com\ndomain:github.com\ndomain:wikipedia.org\nfull:api.github.com"
                     .into(),
+            dpi_rules: "domain:googlevideo.com\ndomain:discord.com".into(),
             subscriptions: vec![Subscription {
                 id: "s1".into(),
                 url: "https://rules.example/privacy.txt".into(),

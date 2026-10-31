@@ -18,10 +18,13 @@ use tokio::task::JoinSet;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_util::sync::CancellationToken;
 
+use crate::desync;
 use crate::dns::FakeDns;
 use crate::packet::{FlowKey, Packet, Reassembly, Transport, udp_packets};
 use crate::resolve::{Resolver, parse_server};
 use crate::rules::{Route, RuleFile, Rules, is_blocked_udp_port, is_null_network};
+
+const QUIC_PORT: u16 = 443;
 
 pub trait PacketIo: Send + Sync + 'static {
     fn recv(&self, packet: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send;
@@ -46,6 +49,7 @@ pub struct TunOptions {
     pub direct_rules: String,
     pub block_rules: String,
     pub proxy_rules: String,
+    pub dpi_rules: String,
     pub rule_files: Vec<RuleFile>,
     pub direct_resolver: String,
     pub max_tcp_flows: usize,
@@ -66,6 +70,7 @@ impl Default for TunOptions {
             direct_rules: String::new(),
             block_rules: String::new(),
             proxy_rules: String::new(),
+            dpi_rules: String::new(),
             rule_files: Vec::new(),
             direct_resolver: String::new(),
             max_tcp_flows: 256,
@@ -130,6 +135,7 @@ impl TunEngine {
             &std::mem::take(&mut options.block_rules),
             &std::mem::take(&mut options.proxy_rules),
         )
+        .and_then(|rules| rules.with_dpi(&std::mem::take(&mut options.dpi_rules)))
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         for file in std::mem::take(&mut options.rule_files) {
             match rules.add_file(&file) {
@@ -248,7 +254,10 @@ impl Drop for FlowCount {
 enum Plan {
     Proxy,
     Block,
-    Direct(Vec<SocketAddr>),
+    Direct {
+        addresses: Vec<SocketAddr>,
+        dpi: bool,
+    },
 }
 
 enum Completed {
@@ -415,30 +424,36 @@ impl Context {
             Address::Ip(address) => crate::rules::Host::Ip(address.ip()),
             Address::Domain { host, .. } => crate::rules::Host::Name(host),
         };
-        match self.rules.route(host, self.options.bypass_lan) {
-            Route::Block => Plan::Block,
-            Route::Proxy => Plan::Proxy,
-            Route::Direct => match destination {
-                Address::Ip(address) => Plan::Direct(vec![*address]),
-                Address::Domain { host, port } => {
-                    match self.resolver.lookup(host, self.options.ipv6).await {
-                        Ok(found) if !found.is_empty() => Plan::Direct(
-                            found
-                                .into_iter()
-                                .map(|ip| SocketAddr::new(ip, *port))
-                                .collect(),
-                        ),
-                        Ok(_) => {
-                            tracing::debug!(%host, "direct resolver found no address, using proxy");
-                            Plan::Proxy
-                        }
-                        Err(error) => {
-                            tracing::warn!(%host, %error, "direct resolver failed, using proxy");
-                            Plan::Proxy
-                        }
+        let dpi = match self.rules.route(host, self.options.bypass_lan) {
+            Route::Block => return Plan::Block,
+            Route::Proxy => return Plan::Proxy,
+            Route::Direct => false,
+            Route::Dpi => true,
+        };
+        match destination {
+            Address::Ip(address) => Plan::Direct {
+                addresses: vec![*address],
+                dpi,
+            },
+            Address::Domain { host, port } => {
+                match self.resolver.lookup(host, self.options.ipv6).await {
+                    Ok(found) if !found.is_empty() => Plan::Direct {
+                        addresses: found
+                            .into_iter()
+                            .map(|ip| SocketAddr::new(ip, *port))
+                            .collect(),
+                        dpi,
+                    },
+                    Ok(_) => {
+                        tracing::debug!(%host, "direct resolver found no address, using proxy");
+                        Plan::Proxy
+                    }
+                    Err(error) => {
+                        tracing::warn!(%host, %error, "direct resolver failed, using proxy");
+                        Plan::Proxy
                     }
                 }
-            },
+            }
         }
     }
 
@@ -492,8 +507,8 @@ async fn tcp_flow(
                 "destination is blocked",
             ));
         }
-        Plan::Direct(addresses) => {
-            let mut direct = timeout(Duration::from_secs(10), async {
+        Plan::Direct { addresses, dpi } => {
+            let dial = timeout(Duration::from_secs(10), async {
                 let mut last =
                     io::Error::new(io::ErrorKind::AddrNotAvailable, "no direct addresses");
                 for address in addresses {
@@ -508,8 +523,20 @@ async fn tcp_flow(
                     }
                 }
                 Err(last)
-            })
-            .await??;
+            });
+            if !dpi {
+                let mut direct = dial.await??;
+                copy_bidirectional(&mut stream, &mut direct).await?;
+                return Ok(());
+            }
+            let (direct, first) = tokio::join!(
+                dial,
+                desync::read_first(&mut stream, desync::FIRST_DATA_WAIT)
+            );
+            let mut direct = direct??;
+            let first = first?;
+            direct.set_nodelay(true)?;
+            desync::write_first(&mut direct, &first).await?;
             copy_bidirectional(&mut stream, &mut direct).await?;
         }
         Plan::Proxy => {
@@ -535,7 +562,15 @@ async fn udp_flow(
     if matches!(plan, Plan::Block) {
         return Ok(());
     }
-    if let Plan::Direct(addresses) = plan {
+    if let Plan::Direct { dpi: true, .. } = plan
+        && key.destination.port() == QUIC_PORT
+    {
+        while let Ok(Some(_)) = timeout(context.options.udp_idle, packets.recv()).await {
+            context.drop_packet();
+        }
+        return Ok(());
+    }
+    if let Plan::Direct { addresses, .. } = plan {
         let target = *addresses.first().ok_or_else(|| {
             io::Error::new(io::ErrorKind::AddrNotAvailable, "no direct addresses")
         })?;

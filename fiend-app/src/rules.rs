@@ -5,6 +5,7 @@ pub enum RuleKind {
     Direct,
     Block,
     Proxy,
+    Dpi,
 }
 
 impl From<RuleKind> for fiend_tun::rules::RuleKind {
@@ -13,6 +14,7 @@ impl From<RuleKind> for fiend_tun::rules::RuleKind {
             RuleKind::Direct => Self::Direct,
             RuleKind::Block => Self::Block,
             RuleKind::Proxy => Self::Proxy,
+            RuleKind::Dpi => Self::Dpi,
         }
     }
 }

@@ -86,6 +86,7 @@ pub(crate) fn tun_options(
         direct_rules: engine.direct_rules.clone(),
         block_rules: engine.block_rules.clone(),
         proxy_rules: engine.proxy_rules.clone(),
+        dpi_rules: engine.dpi_rules.clone(),
         rule_files,
         direct_resolver: engine.direct_resolver.clone(),
         max_tcp_flows: 256,

@@ -141,16 +141,19 @@ private fun RuleKind.title() = when (this) {
     RuleKind.Direct -> R.string.routing_direct_rules
     RuleKind.Block -> R.string.routing_block_rules
     RuleKind.Proxy -> R.string.routing_proxy_rules
+    RuleKind.Dpi -> R.string.routing_dpi_rules
 }
 
 private fun RuleKind.example() = when (this) {
     RuleKind.Direct -> R.string.rules_example_direct
     RuleKind.Block -> R.string.rules_example_block
     RuleKind.Proxy -> R.string.rules_example_proxy
+    RuleKind.Dpi -> R.string.rules_example_dpi
 }
 
 private fun RuleKind.syntax() = when (this) {
     RuleKind.Direct -> R.string.rules_syntax_direct
     RuleKind.Block -> R.string.rules_syntax_block
     RuleKind.Proxy -> R.string.rules_syntax_proxy
+    RuleKind.Dpi -> R.string.rules_syntax_dpi
 }

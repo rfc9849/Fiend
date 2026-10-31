@@ -58,6 +58,7 @@ internal class RealSettingsRepository @Inject constructor(
             values[DIRECT_RULES] = next.directRules
             values[BLOCK_RULES] = next.blockRules
             values[PROXY_RULES] = next.proxyRules
+            values[DPI_RULES] = next.dpiRules
             values[SUBSCRIPTIONS] = encodeSubscriptions(next.subscriptions)
             values[DIRECT_RESOLVER] = next.directResolver
             values[MTU] = next.mtu.coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU)
@@ -75,6 +76,7 @@ internal class RealSettingsRepository @Inject constructor(
         directRules = values[DIRECT_RULES] ?: "",
         blockRules = values[BLOCK_RULES] ?: "",
         proxyRules = values[PROXY_RULES] ?: "",
+        dpiRules = values[DPI_RULES] ?: "",
         subscriptions = decodeSubscriptions(values[SUBSCRIPTIONS]),
         directResolver = values[DIRECT_RESOLVER] ?: "",
         mtu = (values[MTU] ?: AppSettings.DEFAULT_MTU).coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU),
@@ -101,6 +103,7 @@ internal class RealSettingsRepository @Inject constructor(
         val DIRECT_RULES = stringPreferencesKey("direct_rules")
         val BLOCK_RULES = stringPreferencesKey("block_rules")
         val PROXY_RULES = stringPreferencesKey("proxy_rules")
+        val DPI_RULES = stringPreferencesKey("dpi_rules")
         val SUBSCRIPTIONS = stringPreferencesKey("subscriptions")
         val DIRECT_RESOLVER = stringPreferencesKey("direct_resolver")
         val MTU = intPreferencesKey("mtu")

@@ -97,11 +97,12 @@ class StorageTest {
             val store = PreferencesStore(context, scope)
             val repository = RealSettingsRepository(store, RealLogRepository(), scope)
             repository.awaitReady()
-            repository.update { it.copy(themeMode = ThemeMode.Dark, dynamicColor = false, connectOnStart = true, ipv6 = false, splitTunnelApps = setOf("dev.fiend.test"), directRules = "domain:ru\nip:1.2.3.0/24", blockRules = "domain:ads.example", proxyRules = "domain:blocked.ru", subscriptions = listOf(RuleSubscription("one", "https://example.com/list.srs", RuleKind.Proxy, updatedAtMs = 5, entries = 7)), directResolver = "1.1.1.1", mtu = 9999) }
+            repository.update { it.copy(themeMode = ThemeMode.Dark, dynamicColor = false, connectOnStart = true, ipv6 = false, splitTunnelApps = setOf("dev.fiend.test"), directRules = "domain:ru\nip:1.2.3.0/24", blockRules = "domain:ads.example", proxyRules = "domain:blocked.ru", dpiRules = "domain:youtube.com", subscriptions = listOf(RuleSubscription("one", "https://example.com/list.srs", RuleKind.Proxy, updatedAtMs = 5, entries = 7)), directResolver = "1.1.1.1", mtu = 9999) }
             val settings = withTimeout(5_000) { repository.settings.first { it.themeMode == ThemeMode.Dark } }
             assertEquals("domain:ru\nip:1.2.3.0/24", settings.directRules)
             assertEquals("domain:ads.example", settings.blockRules)
             assertEquals("domain:blocked.ru", settings.proxyRules)
+            assertEquals("domain:youtube.com", settings.dpiRules)
             assertEquals(listOf(RuleSubscription("one", "https://example.com/list.srs", RuleKind.Proxy, updatedAtMs = 5, entries = 7)), settings.subscriptions)
             assertEquals("1.1.1.1", settings.directResolver)
             assertEquals(9000, settings.mtu)

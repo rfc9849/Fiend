@@ -46,6 +46,7 @@ enum Kind {
     Direct,
     Block,
     Proxy,
+    Dpi,
 }
 
 impl From<Kind> for RuleKind {
@@ -54,6 +55,7 @@ impl From<Kind> for RuleKind {
             Kind::Direct => Self::Direct,
             Kind::Block => Self::Block,
             Kind::Proxy => Self::Proxy,
+            Kind::Dpi => Self::Dpi,
         }
     }
 }

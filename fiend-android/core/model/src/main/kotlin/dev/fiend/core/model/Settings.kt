@@ -7,7 +7,7 @@ enum class ThemeMode { System, Light, Dark }
 enum class SplitTunnelMode { AllApps, OnlySelected, ExceptSelected }
 
 @Serializable
-enum class RuleKind { Direct, Block, Proxy }
+enum class RuleKind { Direct, Block, Proxy, Dpi }
 
 @Serializable
 data class RuleSubscription(
@@ -32,6 +32,7 @@ data class AppSettings(
     val directRules: String = "",
     val blockRules: String = "",
     val proxyRules: String = "",
+    val dpiRules: String = "",
     val subscriptions: List<RuleSubscription> = emptyList(),
     val directResolver: String = "",
     val mtu: Int = DEFAULT_MTU,

@@ -94,6 +94,7 @@ pub enum RuleKind {
     Direct,
     Block,
     Proxy,
+    Dpi,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +146,7 @@ pub struct Settings {
     pub direct_rules: String,
     pub block_rules: String,
     pub proxy_rules: String,
+    pub dpi_rules: String,
     pub subscriptions: Vec<Subscription>,
 }
 
@@ -160,6 +162,7 @@ impl Default for Settings {
             direct_rules: String::new(),
             block_rules: String::new(),
             proxy_rules: String::new(),
+            dpi_rules: String::new(),
             subscriptions: Vec::new(),
         }
     }

@@ -110,6 +110,7 @@ data class RoutingUiState(
     val directRules: Int = 0,
     val blockRules: Int = 0,
     val proxyRules: Int = 0,
+    val dpiRules: Int = 0,
     val subscriptions: List<SubscriptionUi> = emptyList(),
     val directResolver: String = "",
     val mtu: Int = AppSettings.DEFAULT_MTU,
@@ -143,6 +144,7 @@ class RoutingViewModel @Inject constructor(
             directRules = countOf(s.directRules, true),
             blockRules = countOf(s.blockRules, false),
             proxyRules = countOf(s.proxyRules, true),
+            dpiRules = countOf(s.dpiRules, true),
             subscriptions = s.subscriptions.map {
                 SubscriptionUi(it.id, it.url, it.kind, it.entries, it.updatedAtMs, it.error)
             },
@@ -239,12 +241,14 @@ class RuleEditorViewModel @AssistedInject constructor(
         RuleKind.Direct -> settings.directRules
         RuleKind.Block -> settings.blockRules
         RuleKind.Proxy -> settings.proxyRules
+        RuleKind.Dpi -> settings.dpiRules
     }
 
     private fun store(settings: AppSettings, text: String): AppSettings = when (kind) {
         RuleKind.Direct -> settings.copy(directRules = text)
         RuleKind.Block -> settings.copy(blockRules = text)
         RuleKind.Proxy -> settings.copy(proxyRules = text)
+        RuleKind.Dpi -> settings.copy(dpiRules = text)
     }
 
     init {

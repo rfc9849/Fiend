@@ -410,6 +410,30 @@ async fn bad_input_is_refused_with_a_code() {
         ErrorCode::InvalidRules
     );
     assert_eq!(
+        code(
+            client
+                .set_rule_text(RuleKind::Dpi, "bad entry".into())
+                .await
+        ),
+        ErrorCode::InvalidRules
+    );
+    let settings = Settings {
+        dpi_rules: "regexp:x".into(),
+        ..Settings::default()
+    };
+    assert_eq!(
+        code(client.set_settings(settings).await),
+        ErrorCode::InvalidRules
+    );
+    client
+        .set_rule_text(RuleKind::Dpi, "domain:youtube.com\nip:1.2.3.0/24\n".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        client.settings().await.unwrap().dpi_rules,
+        "domain:youtube.com\nip:1.2.3.0/24\n"
+    );
+    assert_eq!(
         code(client.share_link("none".into()).await),
         ErrorCode::NotFound
     );

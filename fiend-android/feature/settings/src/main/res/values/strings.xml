@@ -43,15 +43,17 @@
     <string name="routing_direct_rules">Direct list</string>
     <string name="routing_block_rules">Blocked domains</string>
     <string name="routing_proxy_rules">Always through proxy</string>
+    <string name="routing_dpi_rules">Bypass DPI</string>
     <string name="routing_kind_direct">Direct</string>
     <string name="routing_kind_block">Block</string>
     <string name="routing_kind_proxy">Proxy</string>
+    <string name="routing_kind_dpi">Bypass DPI</string>
     <string name="routing_rules_none">No rules</string>
     <plurals name="routing_rules">
         <item quantity="one">%1$d rule</item>
         <item quantity="other">%1$d rules</item>
     </plurals>
-    <string name="routing_privacy">Blocked domains do not resolve. The proxy list is checked before the direct list, so a domain in both lists uses the tunnel. Direct sites skip the tunnel and see your own network address.</string>
+    <string name="routing_privacy">Blocked domains do not resolve. The proxy list is checked before the direct list, so a domain in both lists uses the tunnel. Direct sites skip the tunnel and see your own network address. Bypass DPI sites also skip the tunnel, but the site name in the TLS hello is sent in parts.</string>
     <string name="routing_resolver">Direct DNS server</string>
     <string name="routing_resolver_default">Default (1.1.1.1)</string>
     <string name="routing_resolver_body">IP address with an optional port. Leave empty for the default.</string>
@@ -85,6 +87,8 @@
     <string name="rules_syntax_direct">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. ip: matches an address range. # starts a comment.</string>
     <string name="rules_syntax_block">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. # starts a comment.</string>
     <string name="rules_example_proxy">domain:example.com\nfull:www.example.org\nkeyword:example\nip:203.0.113.0/24</string>
+    <string name="rules_example_dpi">domain:googlevideo.com\ndomain:youtube.com\nfull:discord.com\nip:203.0.113.0/24</string>
+    <string name="rules_syntax_dpi">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. ip: matches an address range. A proxy rule wins over a bypass DPI rule, and a bypass DPI rule wins over a direct rule. # starts a comment.</string>
     <string name="rules_syntax_proxy">One rule per line. domain: matches the name and its subdomains. full: matches one name. keyword: matches part of a name. ip: matches an address range. A proxy rule wins over a direct rule. # starts a comment.</string>
     <string name="rules_discard_title">Discard changes?</string>
     <string name="rules_discard_body">Your changes to this list will be lost.</string>

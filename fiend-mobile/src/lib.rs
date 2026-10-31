@@ -84,6 +84,7 @@ pub enum RuleKind {
     Direct,
     Block,
     Proxy,
+    Dpi,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -101,6 +102,7 @@ pub struct TunOptions {
     pub direct_rules: String,
     pub block_rules: String,
     pub proxy_rules: String,
+    pub dpi_rules: String,
     pub rule_files: Vec<RuleFile>,
     pub direct_resolver: String,
     pub handshake_timeout_ms: u64,
@@ -124,6 +126,7 @@ impl From<RuleKind> for fiend_app::RuleKind {
             RuleKind::Direct => Self::Direct,
             RuleKind::Block => Self::Block,
             RuleKind::Proxy => Self::Proxy,
+            RuleKind::Dpi => Self::Dpi,
         }
     }
 }
@@ -253,6 +256,7 @@ impl Tunnel {
                     direct_rules: options.direct_rules,
                     block_rules: options.block_rules,
                     proxy_rules: options.proxy_rules,
+                    dpi_rules: options.dpi_rules,
                     rule_files: options
                         .rule_files
                         .into_iter()
@@ -262,6 +266,7 @@ impl Tunnel {
                                 RuleKind::Direct => fiend_tun::rules::RuleKind::Direct,
                                 RuleKind::Block => fiend_tun::rules::RuleKind::Block,
                                 RuleKind::Proxy => fiend_tun::rules::RuleKind::Proxy,
+                                RuleKind::Dpi => fiend_tun::rules::RuleKind::Dpi,
                             },
                         })
                         .collect(),
@@ -430,6 +435,7 @@ mod tests {
             direct_rules: String::new(),
             block_rules: String::new(),
             proxy_rules: String::new(),
+            dpi_rules: String::new(),
             rule_files: Vec::new(),
             direct_resolver: String::new(),
             handshake_timeout_ms: 10000,

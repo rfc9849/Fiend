@@ -152,6 +152,7 @@ class FiendVpnService : VpnService() {
                 directRules = appSettings.directRules,
                 blockRules = appSettings.blockRules,
                 proxyRules = appSettings.proxyRules,
+                dpiRules = appSettings.dpiRules,
                 ruleFiles = subscriptions.ruleFiles().map { spec ->
                     RuleFile(
                         path = spec.path,
@@ -159,6 +160,7 @@ class FiendVpnService : VpnService() {
                             dev.fiend.core.model.RuleKind.Direct -> dev.fiend.core.engine.bindings.RuleKind.DIRECT
                             dev.fiend.core.model.RuleKind.Block -> dev.fiend.core.engine.bindings.RuleKind.BLOCK
                             dev.fiend.core.model.RuleKind.Proxy -> dev.fiend.core.engine.bindings.RuleKind.PROXY
+                            dev.fiend.core.model.RuleKind.Dpi -> dev.fiend.core.engine.bindings.RuleKind.DPI
                         },
                     )
                 },

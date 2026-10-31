@@ -137,6 +137,7 @@ pub fn kind_label(kind: RuleKind) -> &'static str {
     match kind {
         RuleKind::Proxy => "Always use tunnel",
         RuleKind::Direct => "Bypass tunnel",
+        RuleKind::Dpi => "Bypass DPI",
         RuleKind::Block => "Block domains",
     }
 }
@@ -145,6 +146,7 @@ pub fn kind_value(kind: RuleKind) -> &'static str {
     match kind {
         RuleKind::Proxy => "proxy",
         RuleKind::Direct => "direct",
+        RuleKind::Dpi => "dpi",
         RuleKind::Block => "block",
     }
 }
@@ -153,6 +155,7 @@ pub fn kind_from(value: &str) -> RuleKind {
     match value {
         "proxy" => RuleKind::Proxy,
         "direct" => RuleKind::Direct,
+        "dpi" => RuleKind::Dpi,
         _ => RuleKind::Block,
     }
 }
@@ -703,6 +706,7 @@ impl AppView {
         let text = match kind {
             RuleKind::Proxy => self.model.settings.proxy_rules.clone(),
             RuleKind::Direct => self.model.settings.direct_rules.clone(),
+            RuleKind::Dpi => self.model.settings.dpi_rules.clone(),
             RuleKind::Block => self.model.settings.block_rules.clone(),
         };
         let state = self.new_textarea(&text, "", window, cx);
@@ -1999,6 +2003,9 @@ impl AppView {
                                 RuleKind::Direct => {
                                     "# Comment. These sites see your own network address."
                                 }
+                                RuleKind::Dpi => {
+                                    "# Comment. Direct, with the TLS hello sent in parts."
+                                }
                                 RuleKind::Block => "# Comment. Blocked domains do not resolve.",
                             }),
                     )
@@ -2040,6 +2047,7 @@ impl AppView {
                 let options = vec![
                     MenuOption::new("block", "Block domains"),
                     MenuOption::new("direct", "Bypass tunnel"),
+                    MenuOption::new("dpi", "Bypass DPI"),
                     MenuOption::new("proxy", "Always use tunnel"),
                 ];
                 let kind_select = self.select(
@@ -2322,7 +2330,12 @@ mod tests {
 
     #[test]
     fn rule_kind_names_round_trip() {
-        for kind in [RuleKind::Proxy, RuleKind::Direct, RuleKind::Block] {
+        for kind in [
+            RuleKind::Proxy,
+            RuleKind::Direct,
+            RuleKind::Dpi,
+            RuleKind::Block,
+        ] {
             assert_eq!(kind_from(kind_value(kind)), kind);
         }
     }

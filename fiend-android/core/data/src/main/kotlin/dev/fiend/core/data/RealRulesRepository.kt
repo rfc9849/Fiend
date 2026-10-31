@@ -35,6 +35,7 @@ internal class RealRulesRepository @Inject constructor(
                 RuleKind.Direct -> NativeRuleKind.DIRECT
                 RuleKind.Block -> NativeRuleKind.BLOCK
                 RuleKind.Proxy -> NativeRuleKind.PROXY
+                RuleKind.Dpi -> NativeRuleKind.DPI
             },
         )
         RuleCounts(stats.domains.toInt(), stats.exact.toInt(), stats.keywords.toInt(), stats.cidrs.toInt())

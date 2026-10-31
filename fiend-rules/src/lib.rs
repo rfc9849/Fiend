@@ -25,6 +25,7 @@ pub enum Route {
     Direct,
     Block,
     Proxy,
+    Dpi,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +33,7 @@ pub enum RuleKind {
     Direct,
     Block,
     Proxy,
+    Dpi,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,6 +463,7 @@ pub struct Rules {
     direct: RuleList,
     block: RuleList,
     proxy: RuleList,
+    dpi: RuleList,
     all_direct: bool,
     skipped: SrsSkipped,
 }
@@ -471,9 +474,15 @@ impl Rules {
             direct: parse_list(direct, true)?,
             block: parse_list(block, false)?,
             proxy: parse_list(proxy, true)?,
+            dpi: RuleList::default(),
             all_direct: false,
             skipped: SrsSkipped::default(),
         })
+    }
+
+    pub fn with_dpi(mut self, dpi: &str) -> Result<Self, RuleError> {
+        self.dpi = parse_list(dpi, true)?;
+        Ok(self)
     }
 
     pub fn with_all_direct(mut self, all_direct: bool) -> Self {
@@ -505,6 +514,7 @@ impl Rules {
             RuleKind::Direct => &mut self.direct,
             RuleKind::Block => &mut self.block,
             RuleKind::Proxy => &mut self.proxy,
+            RuleKind::Dpi => &mut self.dpi,
         };
         let before = list.counts();
         if srs::is_srs(&bytes) {
@@ -547,6 +557,7 @@ impl Rules {
         self.direct.finish();
         self.block.finish();
         self.proxy.finish();
+        self.dpi.finish();
     }
 
     pub fn direct_counts(&self) -> RuleCounts {
@@ -559,6 +570,10 @@ impl Rules {
 
     pub fn proxy_counts(&self) -> RuleCounts {
         self.proxy.counts()
+    }
+
+    pub fn dpi_counts(&self) -> RuleCounts {
+        self.dpi.counts()
     }
 
     pub fn skipped(&self) -> SrsSkipped {
@@ -578,11 +593,15 @@ impl Rules {
                 if self.block.cidrs.contains(ip) {
                     return Route::Block;
                 }
+                let dpi = self.dpi.cidrs.contains(ip);
                 if self.all_direct {
-                    return Route::Direct;
+                    return if dpi { Route::Dpi } else { Route::Direct };
                 }
                 if self.proxy.cidrs.contains(ip) {
                     return Route::Proxy;
+                }
+                if dpi {
+                    return Route::Dpi;
                 }
                 if self.direct.cidrs.contains(ip) {
                     return Route::Direct;
@@ -594,11 +613,15 @@ impl Rules {
                 if self.block.domains.contains(&host) {
                     return Route::Block;
                 }
+                let dpi = self.dpi.domains.contains(&host);
                 if self.all_direct {
-                    return Route::Direct;
+                    return if dpi { Route::Dpi } else { Route::Direct };
                 }
                 if self.proxy.domains.contains(&host) {
                     return Route::Proxy;
+                }
+                if dpi {
+                    return Route::Dpi;
                 }
                 if self.direct.domains.contains(&host) {
                     return Route::Direct;
@@ -751,6 +774,30 @@ mod tests {
         assert_eq!(rules.route(ip("5.255.255.9:443"), false), Route::Proxy);
         assert_eq!(rules.route(ip("8.8.8.8:443"), false), Route::Proxy);
         assert_eq!(rules.proxy_counts().domains, 1);
+    }
+
+    #[test]
+    fn dpi_list_is_between_the_proxy_and_direct_lists() {
+        let rules = Rules::parse(
+            "domain:example\nip:5.0.0.0/8\n",
+            "domain:ads.example\n",
+            "domain:proxy.example\n",
+        )
+        .unwrap()
+        .with_dpi("domain:example\nip:5.5.0.0/16\n")
+        .unwrap();
+        assert_eq!(rules.route(domain("video.example"), false), Route::Dpi);
+        assert_eq!(rules.route(domain("www.proxy.example"), false), Route::Proxy);
+        assert_eq!(rules.route(domain("ads.example"), false), Route::Block);
+        assert_eq!(rules.route(domain("other.org"), false), Route::Proxy);
+        assert_eq!(rules.route(ip("5.5.1.1:443"), false), Route::Dpi);
+        assert_eq!(rules.route(ip("5.6.1.1:443"), false), Route::Direct);
+        assert_eq!(rules.dpi_counts().total(), 2);
+        let rules = rules.with_all_direct(true);
+        assert_eq!(rules.route(domain("proxy.example"), false), Route::Dpi);
+        assert_eq!(rules.route(domain("other.org"), false), Route::Direct);
+        assert_eq!(rules.route(ip("5.5.1.1:443"), false), Route::Dpi);
+        assert_eq!(rules.route(ip("5.5.1.1:443"), true), Route::Dpi);
     }
 
     #[test]

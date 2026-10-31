@@ -708,6 +708,12 @@ impl AppView {
                 rule_count(&settings.direct_rules),
             ),
             (
+                RuleKind::Dpi,
+                "swap",
+                "Direct, splits the site name",
+                rule_count(&settings.dpi_rules),
+            ),
+            (
                 RuleKind::Block,
                 "block",
                 "No DNS resolution",

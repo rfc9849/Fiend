@@ -9,6 +9,7 @@ pub struct EngineSettings {
     pub direct_rules: String,
     pub block_rules: String,
     pub proxy_rules: String,
+    pub dpi_rules: String,
     pub rule_files: Vec<(String, RuleKind, u64)>,
 }
 
@@ -174,6 +175,7 @@ mod tests {
                 direct_rules: String::new(),
                 block_rules: String::new(),
                 proxy_rules: String::new(),
+                dpi_rules: String::new(),
                 rule_files: Vec::new(),
             },
         }

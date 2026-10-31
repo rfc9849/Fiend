@@ -54,6 +54,7 @@ internal fun RoutingScreen(
     onOpenDirect: () -> Unit,
     onOpenBlock: () -> Unit,
     onOpenProxy: () -> Unit,
+    onOpenDpi: () -> Unit,
     onResolver: (String) -> RoutingInputError?,
     onMtu: (String) -> RoutingInputError?,
     onAddSubscription: (String, RuleKind) -> RoutingInputError?,
@@ -131,6 +132,17 @@ internal fun RoutingScreen(
                             trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
                             enabled = state.loaded,
                             onClick = onOpenProxy,
+                        )
+                    }
+                    item {
+                        ActionItem(
+                            shapes = it,
+                            headline = stringResource(R.string.routing_dpi_rules),
+                            supporting = ruleCount(state.dpiRules),
+                            icon = FiendIcons.Bolt,
+                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
+                            enabled = state.loaded,
+                            onClick = onOpenDpi,
                         )
                     }
                 }
@@ -285,6 +297,7 @@ private fun kindLabel(kind: RuleKind): String = stringResource(
         RuleKind.Direct -> R.string.routing_kind_direct
         RuleKind.Block -> R.string.routing_kind_block
         RuleKind.Proxy -> R.string.routing_kind_proxy
+        RuleKind.Dpi -> R.string.routing_kind_dpi
     },
 )
 

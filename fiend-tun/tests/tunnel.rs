@@ -669,6 +669,81 @@ async fn direct_domain_connects_locally_without_a_lane() {
     task.await.unwrap().unwrap();
 }
 
+fn client_hello(host: &str) -> Vec<u8> {
+    let mut sni = ((host.len() + 3) as u16).to_be_bytes().to_vec();
+    sni.push(0);
+    sni.extend_from_slice(&(host.len() as u16).to_be_bytes());
+    sni.extend_from_slice(host.as_bytes());
+    let mut extensions = vec![0, 0];
+    extensions.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    extensions.extend_from_slice(&sni);
+    let mut body = vec![3, 3];
+    body.extend_from_slice(&[7; 32]);
+    body.push(0);
+    body.extend_from_slice(&[0, 2, 0x13, 0x01, 1, 0]);
+    body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+    body.extend_from_slice(&extensions);
+    let mut handshake = vec![1];
+    handshake.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    handshake.extend_from_slice(&body);
+    let mut record = vec![0x16, 3, 1];
+    record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+    record.extend_from_slice(&handshake);
+    record
+}
+
+#[tokio::test]
+async fn dpi_domain_goes_direct_with_a_split_client_hello() {
+    let hello = client_hello("www.dpi.test");
+    let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    let expected = hello.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = echo.accept().await.unwrap();
+        let mut data = vec![0; expected.len() + 5];
+        stream.read_exact(&mut data).await.unwrap();
+        let mut payload = Vec::new();
+        let mut records = 0;
+        let mut rest = &data[..];
+        while !rest.is_empty() {
+            assert_eq!(rest[0], 0x16);
+            let length = usize::from(u16::from_be_bytes([rest[3], rest[4]]));
+            payload.extend_from_slice(&rest[5..5 + length]);
+            rest = &rest[5 + length..];
+            records += 1;
+        }
+        assert_eq!(records, 2);
+        assert_eq!(payload, expected[5..]);
+        stream.write_all(b"ok").await.unwrap();
+    });
+    let resolver = dns_server(
+        hickory_proto::op::ResponseCode::NoError,
+        std::net::Ipv4Addr::LOCALHOST,
+    )
+    .await;
+    let (engine, client, mut peer, task) = stack(TunOptions {
+        dpi_rules: "domain:dpi.test\n".into(),
+        direct_resolver: resolver.to_string(),
+        ..TunOptions::default()
+    })
+    .await;
+    let (ip, _) = fake_ip(&mut peer, "www.dpi.test").await;
+    let target = SocketAddr::new(ip.into(), port);
+    let answer = tcp_reply(
+        &mut peer,
+        "10.0.0.2:30001".parse().unwrap(),
+        target,
+        &hello,
+        2,
+    )
+    .await;
+    assert_eq!(answer, b"ok");
+    server.await.unwrap();
+    assert_eq!(client.stats().dial_attempts, 0);
+    engine.stop();
+    task.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn proxied_domain_still_uses_a_lane() {
     let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
