@@ -59,6 +59,8 @@ pub struct Config {
     pub bundles: PathBuf,
     #[serde(default = "default_local_node")]
     pub local_node: PathBuf,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub import_users: bool,
 }
 
 impl Config {
@@ -80,7 +82,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn init(path: &Path) -> Result<Self, String> {
+    pub fn init(path: &Path, import_users: bool) -> Result<Self, String> {
         if path.exists() {
             return Self::load(path);
         }
@@ -92,6 +94,7 @@ impl Config {
             database: default_database(),
             bundles: default_bundles(),
             local_node: default_local_node(),
+            import_users,
         };
         let raw = toml::to_string(&config).map_err(|e| e.to_string())?;
         let mut options = OpenOptions::new();

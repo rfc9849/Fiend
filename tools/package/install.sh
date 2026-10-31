@@ -129,7 +129,7 @@ fi
 if [ "$MODE" = panel ]; then
     install -m 0755 "$SOURCE/fiend-panel" /opt/fiend/bin/fiend-panel.new
     mv -f /opt/fiend/bin/fiend-panel.new /opt/fiend/bin/fiend-panel
-    ACCESS=$(/opt/fiend/bin/fiend-panel init /etc/fiend/panel.toml)
+    ACCESS=$(/opt/fiend/bin/fiend-panel init /etc/fiend/panel.toml ${IMPORT:+--import})
     chown fiend:fiend /etc/fiend/panel.toml
     chmod 0600 /etc/fiend/panel.toml
     install -d -o fiend -g fiend -m 0700 /var/lib/fiend/bundles /var/lib/fiend/bundles/inbox

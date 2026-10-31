@@ -43,6 +43,10 @@ struct Panel {
 
 impl Panel {
     async fn new(dir: &Path) -> Self {
+        Self::open(dir, true).await
+    }
+
+    async fn open(dir: &Path, import_users: bool) -> Self {
         let config = Config {
             listen: "127.0.0.1:8080".parse().unwrap(),
             setup_token: TOKEN.into(),
@@ -50,6 +54,7 @@ impl Panel {
             database: dir.join("panel.db"),
             bundles: dir.join("bundles"),
             local_node: dir.join("node.toml"),
+            import_users,
         };
         let app = App::open(config).await.unwrap();
         Self {
@@ -402,6 +407,28 @@ async fn wait_for(mut check: impl AsyncFnMut() -> bool) -> bool {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     false
+}
+
+#[tokio::test]
+async fn fresh_local_node_imports_no_users() {
+    let dir = Temp::new();
+    start_node(&dir.0).await;
+    let mut panel = Panel::open(&dir.0, false).await;
+    panel.setup().await;
+    let (status, defaults) = panel.get("/api/wizard/local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(defaults["available"], true, "{defaults}");
+    assert_eq!(defaults["imported"], false);
+    assert_eq!(defaults["users"], 0);
+    let (status, created) = panel
+        .post(
+            "/api/wizard/local",
+            json!({"name": "main", "address": "127.0.0.1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let (_, users) = panel.get("/api/users").await;
+    assert_eq!(users, json!([]));
 }
 
 #[tokio::test]

@@ -158,8 +158,12 @@ async fn local_defaults(
             match local_state(&app).await {
                 Ok(desired) => {
                     defaults.available = true;
-                    defaults.users = desired.users.len();
-                    defaults.imported = desired.users.iter().any(|user| user.id == "legacy");
+                    defaults.users = desired
+                        .users
+                        .iter()
+                        .filter(|user| imports(&app, user))
+                        .count();
+                    defaults.imported = defaults.users > 0;
                     defaults.origin_host = desired.origin_host;
                     defaults.origin_port = desired.origin_port;
                 }
@@ -173,6 +177,14 @@ async fn local_defaults(
         }
     }
     Ok(Json(defaults))
+}
+
+fn imports(app: &App, user: &fiend_core::node::User) -> bool {
+    match user.id.as_str() {
+        "service" => false,
+        "legacy" => app.config.import_users,
+        _ => true,
+    }
 }
 
 async fn local_state(app: &App) -> std::io::Result<fiend_core::node::DesiredState> {
@@ -236,7 +248,7 @@ async fn create_local(
         .bind(now())
         .fetch_one(&mut *transaction)
         .await?;
-    for user in desired.users.iter().filter(|user| user.id != "service") {
+    for user in desired.users.iter().filter(|user| imports(&app, user)) {
         let name = if user.id == "legacy" {
             "existing-clients".to_owned()
         } else {

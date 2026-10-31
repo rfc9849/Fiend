@@ -26,6 +26,7 @@ fn config(dir: &std::path::Path) -> Config {
         database: dir.join("panel.db"),
         bundles: dir.join("bundles"),
         local_node: dir.join("node.toml"),
+        import_users: false,
     }
 }
 
@@ -88,9 +89,12 @@ fn host_allowlist() {
 fn init_is_private_and_keeps_existing_config() {
     let dir = temp("init");
     let path = dir.join("panel.toml");
-    let first = Config::init(&path).unwrap();
+    let first = Config::init(&path, false).unwrap();
     let raw = fs::read(&path).unwrap();
-    let second = Config::init(&path).unwrap();
+    assert!(!String::from_utf8_lossy(&raw).contains("import_users"));
+    assert!(!first.import_users);
+    let second = Config::init(&path, true).unwrap();
+    assert!(!second.import_users);
     assert_eq!(first.setup_token, second.setup_token);
     assert_eq!(raw, fs::read(&path).unwrap());
     first.validate().unwrap();
