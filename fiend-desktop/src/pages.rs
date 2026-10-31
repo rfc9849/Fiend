@@ -779,18 +779,16 @@ impl AppView {
         let subscriptions: Vec<_> = settings.subscriptions.clone();
         let sub_rows = subscriptions.iter().enumerate().map(|(index, sub)| {
             let id = sub.id.clone();
+            let edit_id = sub.id.clone();
             let remove_id = sub.id.clone();
-            let url = sub
-                .url
-                .replacen("https://", "", 1)
-                .replacen("http://", "", 1);
+            let title = sub.title();
             let when = if sub.updated_at_ms == 0 {
                 "Not downloaded".to_owned()
             } else {
                 relative_time(self.now_ms.saturating_sub(sub.updated_at_ms))
             };
             let detail = match &sub.error {
-                Some(error) => error.clone(),
+                Some(error) => format!("{} · {error}", kind_label(sub.kind)),
                 None if sub.entries > 0 => {
                     format!("{} · {} rules · {when}", kind_label(sub.kind), sub.entries)
                 }
@@ -815,7 +813,7 @@ impl AppView {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .child(url),
+                                .child(title),
                         )
                         .child(
                             div()
@@ -828,6 +826,16 @@ impl AppView {
                                 })
                                 .child(detail),
                         ),
+                )
+                .child(
+                    ui.icon_button(
+                        crate::design::eid(format!("edit-sub-{edit_id}")),
+                        "edit",
+                        "Edit subscription",
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_subscription_edit(&edit_id, window, cx)
+                    })),
                 )
                 .child(
                     ui.icon_button(

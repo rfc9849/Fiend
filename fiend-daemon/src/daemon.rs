@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 
 use fiend_core::client::Client;
 use fiend_ipc::{
-    BackupData, ConnectStep, DEFAULT_MTU, ErrorCode, Event, IpcError, MAX_MTU, MIN_MTU, Profile,
-    ProfileInput, Reply, Request, RuleKind, RuleStats, Settings, Stats, Status, Subscription,
+    BackupData, ConnectStep, DEFAULT_MTU, ErrorCode, Event, IpcError, MAX_MTU,
+    MAX_SUBSCRIPTION_NAME, MIN_MTU, Profile, ProfileInput, Reply, Request, RuleKind, RuleStats,
+    Settings, Stats, Status, Subscription,
 };
 use fiend_tun::TunEngine;
 use tokio::sync::broadcast;
@@ -107,6 +108,17 @@ fn validate_settings(settings: &Settings) -> Result<()> {
     fiend_app::validate_rules(&settings.dpi_rules, true).map_err(from_app)?;
     fiend_app::validate_resolver(&settings.direct_resolver).map_err(from_app)?;
     Ok(())
+}
+
+fn subscription_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.chars().count() > MAX_SUBSCRIPTION_NAME || name.chars().any(char::is_control) {
+        return Err(error(
+            ErrorCode::InvalidRequest,
+            format!("Name must be {MAX_SUBSCRIPTION_NAME} characters or less, on one line"),
+        ));
+    }
+    Ok(name.to_owned())
 }
 
 fn is_backup_id(id: &str) -> bool {
@@ -433,7 +445,12 @@ impl<P: Platform> Daemon<P> {
             Request::SetSettings { settings } => self.set_settings(settings),
             Request::RestoreBackup { data } => self.restore_backup(data).await,
             Request::SetRuleText { kind, text } => self.set_rule_text(kind, text),
-            Request::AddSubscription { url, kind } => self.add_subscription(url, kind).await,
+            Request::AddSubscription { url, kind, name } => {
+                self.add_subscription(url, kind, name).await
+            }
+            Request::UpdateSubscription { id, name, kind } => {
+                self.update_subscription(&id, name, kind).await
+            }
             Request::RemoveSubscription { id } => self.remove_subscription(&id).await,
             Request::RefreshSubscriptions => self.refresh_subscriptions().await,
             Request::MeasureLatency { profile_id } => self.measure_latency(&profile_id).await,
@@ -767,7 +784,8 @@ impl<P: Platform> Daemon<P> {
         Ok(Reply::RuleStats(ipc_stats(stats)))
     }
 
-    async fn add_subscription(&self, url: String, kind: RuleKind) -> Result<Reply> {
+    async fn add_subscription(&self, url: String, kind: RuleKind, name: String) -> Result<Reply> {
+        let name = subscription_name(&name)?;
         let url = fiend_app::subscription::validate_url(&url).map_err(from_app)?;
         if !self
             .inner
@@ -789,6 +807,7 @@ impl<P: Platform> Daemon<P> {
             .update_settings(|settings| {
                 settings.subscriptions.push(Subscription {
                     id: id.clone(),
+                    name,
                     url,
                     kind,
                     updated_at_ms: 0,
@@ -807,6 +826,58 @@ impl<P: Platform> Daemon<P> {
             .find(|item| item.id == id)
             .cloned()
             .ok_or_else(|| error(ErrorCode::Internal, "The subscription was not saved"))?;
+        Ok(Reply::Subscription(subscription))
+    }
+
+    async fn update_subscription(&self, id: &str, name: String, kind: RuleKind) -> Result<Reply> {
+        let name = subscription_name(&name)?;
+        let _guard = self.inner.subscriptions.lock().await;
+        let (changed, path) = {
+            let store = lock(&self.inner.store);
+            let item = store
+                .settings()
+                .subscriptions
+                .iter()
+                .find(|item| item.id == id)
+                .ok_or_else(|| error(ErrorCode::NotFound, "The subscription is not available"))?;
+            (item.kind != kind, store.rule_path(id))
+        };
+        let checked = if changed && path.is_file() {
+            let file = path.to_string_lossy().into_owned();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    fiend_app::inspect_rule_file(&file, app_kind(kind))
+                })
+                .await
+                .map_err(internal)?
+                .map(|stats| ipc_stats(stats).total())
+                .map_err(|error| error.to_string()),
+            )
+        } else {
+            None
+        };
+        let subscription = lock(&self.inner.store)
+            .update_settings(|settings| {
+                let item = settings
+                    .subscriptions
+                    .iter_mut()
+                    .find(|item| item.id == id)?;
+                item.name = name;
+                item.kind = kind;
+                match checked {
+                    Some(Ok(entries)) => {
+                        item.entries = entries;
+                        item.error = None;
+                    }
+                    Some(Err(reason)) => item.error = Some(reason),
+                    None => {}
+                }
+                Some(item.clone())
+            })
+            .map_err(internal)?
+            .ok_or_else(|| error(ErrorCode::NotFound, "The subscription is not available"))?;
+        self.inner.emit_settings();
+        self.inner.emit_state();
         Ok(Reply::Subscription(subscription))
     }
 

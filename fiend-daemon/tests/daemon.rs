@@ -469,14 +469,14 @@ async fn subscriptions_are_downloaded_checked_and_removed() {
     let client = fixture.client().await;
     let url = http_server(b"domain:a.ru\nfull:b.ru\n");
     let subscription = client
-        .add_subscription(url, RuleKind::Direct)
+        .add_subscription(url, RuleKind::Direct, String::new())
         .await
         .unwrap();
     assert_eq!(subscription.entries, 2);
     assert!(subscription.error.is_none() && subscription.updated_at_ms > 0);
     let bad = http_server(b"regexp:x\n");
     let broken = client
-        .add_subscription(bad, RuleKind::Direct)
+        .add_subscription(bad, RuleKind::Direct, String::new())
         .await
         .unwrap();
     assert!(broken.error.is_some() && broken.entries == 0);
@@ -493,7 +493,48 @@ async fn subscriptions_are_downloaded_checked_and_removed() {
     assert!(client.remove_subscription(subscription.id).await.is_err());
     assert!(
         client
-            .add_subscription("ftp://x/y".into(), RuleKind::Direct)
+            .add_subscription("ftp://x/y".into(), RuleKind::Direct, String::new())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn subscriptions_are_renamed_and_rechecked_for_a_new_type() {
+    let fixture = Fixture::allowed("subs-edit").await;
+    let client = fixture.client().await;
+    let url = http_server(b"domain:a.ru\nip:1.2.3.0/24\n");
+    let added = client
+        .add_subscription(url, RuleKind::Proxy, " Mixed ".into())
+        .await
+        .unwrap();
+    assert_eq!((added.name.as_str(), added.entries), ("Mixed", 2));
+    let blocked = client
+        .update_subscription(added.id.clone(), "Mixed".into(), RuleKind::Block)
+        .await
+        .unwrap();
+    assert_eq!(blocked.kind, RuleKind::Block);
+    assert!(blocked.error.is_some());
+    let dpi = client
+        .update_subscription(added.id.clone(), String::new(), RuleKind::Dpi)
+        .await
+        .unwrap();
+    assert_eq!(
+        (dpi.kind, dpi.entries, &dpi.error),
+        (RuleKind::Dpi, 2, &None)
+    );
+    assert_eq!(dpi.title(), "list");
+    let saved = client.settings().await.unwrap().subscriptions;
+    assert_eq!(saved, vec![dpi]);
+    assert!(
+        client
+            .update_subscription(added.id.clone(), "x".repeat(65), RuleKind::Dpi)
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .update_subscription("none".into(), String::new(), RuleKind::Dpi)
             .await
             .is_err()
     );
@@ -597,7 +638,11 @@ async fn rule_lists_on_this_computer_are_refused() {
     .await;
     let client = fixture.client().await;
     let result = client
-        .add_subscription("http://127.0.0.1:9/list".into(), RuleKind::Direct)
+        .add_subscription(
+            "http://127.0.0.1:9/list".into(),
+            RuleKind::Direct,
+            String::new(),
+        )
         .await;
     assert_eq!(code(result), ErrorCode::InvalidRules);
     assert!(client.settings().await.unwrap().subscriptions.is_empty());

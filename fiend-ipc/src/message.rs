@@ -6,7 +6,7 @@ use crate::{
 };
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
@@ -35,25 +35,58 @@ pub struct HelloAck {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    Connect { profile_id: Option<String> },
+    Connect {
+        profile_id: Option<String>,
+    },
     Disconnect,
     Status,
     Subscribe,
     Unsubscribe,
     ListProfiles,
-    SaveProfile { profile: ProfileInput },
-    DeleteProfile { id: String },
-    ImportLink { link: String },
-    ShareLink { id: String },
+    SaveProfile {
+        profile: ProfileInput,
+    },
+    DeleteProfile {
+        id: String,
+    },
+    ImportLink {
+        link: String,
+    },
+    ShareLink {
+        id: String,
+    },
     GetSettings,
-    SetSettings { settings: Settings },
-    RestoreBackup { data: BackupData },
-    SetRuleText { kind: RuleKind, text: String },
-    AddSubscription { url: String, kind: RuleKind },
-    RemoveSubscription { id: String },
+    SetSettings {
+        settings: Settings,
+    },
+    RestoreBackup {
+        data: BackupData,
+    },
+    SetRuleText {
+        kind: RuleKind,
+        text: String,
+    },
+    AddSubscription {
+        url: String,
+        kind: RuleKind,
+        #[serde(default)]
+        name: String,
+    },
+    UpdateSubscription {
+        id: String,
+        name: String,
+        kind: RuleKind,
+    },
+    RemoveSubscription {
+        id: String,
+    },
     RefreshSubscriptions,
-    MeasureLatency { profile_id: String },
-    Logs { limit: u32 },
+    MeasureLatency {
+        profile_id: String,
+    },
+    Logs {
+        limit: u32,
+    },
     ClearLogs,
 }
 

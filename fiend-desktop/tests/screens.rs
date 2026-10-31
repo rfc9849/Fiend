@@ -61,14 +61,26 @@ pub fn connected_updates() -> Vec<Update> {
                 "domain:youtube.com\ndomain:github.com\ndomain:wikipedia.org\nfull:api.github.com"
                     .into(),
             dpi_rules: "domain:googlevideo.com\ndomain:discord.com".into(),
-            subscriptions: vec![Subscription {
-                id: "s1".into(),
-                url: "https://rules.example/privacy.txt".into(),
-                kind: fiend_ipc::RuleKind::Block,
-                updated_at_ms: 1,
-                entries: 1842,
-                error: None,
-            }],
+            subscriptions: vec![
+                Subscription {
+                    id: "s1".into(),
+                    name: String::new(),
+                    url: "https://rules.example/privacy.txt".into(),
+                    kind: fiend_ipc::RuleKind::Block,
+                    updated_at_ms: 1,
+                    entries: 1842,
+                    error: None,
+                },
+                Subscription {
+                    id: "s2".into(),
+                    name: "Blocked in Russia".into(),
+                    url: "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-ru-blocked.srs".into(),
+                    kind: fiend_ipc::RuleKind::Proxy,
+                    updated_at_ms: 1,
+                    entries: 74739,
+                    error: None,
+                },
+            ],
             ..Settings::default()
         }),
         Update::Status(Status {
@@ -307,6 +319,12 @@ fn main() {
         shot(n("subscription"), theme, connected_updates(), |v, w, cx| {
             v.open_subscription(w, cx)
         });
+        shot(
+            n("subscription-edit"),
+            theme,
+            connected_updates(),
+            |v, w, cx| v.open_subscription_edit("s2", w, cx),
+        );
         shot(n("mtu"), theme, connected_updates(), |v, w, cx| {
             v.open_value(ValueKind::Mtu, w, cx)
         });

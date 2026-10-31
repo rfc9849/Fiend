@@ -86,7 +86,10 @@ pub struct RulesForm {
 }
 
 pub struct SubscriptionForm {
+    pub id: Option<String>,
     pub url: Entity<InputState>,
+    pub saved_url: String,
+    pub name: Entity<InputState>,
     pub kind: String,
     pub error: Option<String>,
     pub busy: bool,
@@ -725,10 +728,52 @@ impl AppView {
 
     pub fn open_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.new_input("", "https://example.com/rules.txt", false, window, cx);
+        let name = self.new_input("", "File name from the link", false, window, cx);
         let focus = url.read(cx).focus_handle(cx);
         self.dialog = Some(Dialog::Subscription(SubscriptionForm {
+            id: None,
             url,
+            saved_url: String::new(),
+            name,
             kind: "block".into(),
+            error: None,
+            busy: false,
+        }));
+        window.defer(cx, move |window, cx| window.focus(&focus, cx));
+        cx.notify();
+    }
+
+    pub fn open_subscription_edit(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = self
+            .model
+            .settings
+            .subscriptions
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let url = self.new_input(&item.url, "", false, window, cx);
+        let name = self.new_input(
+            &item.name,
+            &fiend_ipc::url_title(&item.url),
+            false,
+            window,
+            cx,
+        );
+        let focus = name.read(cx).focus_handle(cx);
+        self.dialog = Some(Dialog::Subscription(SubscriptionForm {
+            id: Some(item.id),
+            url,
+            saved_url: item.url,
+            name,
+            kind: kind_value(item.kind).into(),
             error: None,
             busy: false,
         }));
@@ -980,6 +1025,45 @@ impl AppView {
         if form.busy {
             return;
         }
+        let name = form.name.read(cx).value().trim().to_owned();
+        if name.chars().count() > fiend_ipc::MAX_SUBSCRIPTION_NAME {
+            form.error = Some(format!(
+                "Name must be {} characters or less",
+                fiend_ipc::MAX_SUBSCRIPTION_NAME
+            ));
+            cx.notify();
+            return;
+        }
+        let kind = kind_from(&form.kind);
+        if let Some(id) = form.id.clone() {
+            form.busy = true;
+            form.error = None;
+            self.call(
+                Request::UpdateSubscription { id, name, kind },
+                cx,
+                |this, result, cx| match result {
+                    Ok(Reply::Subscription(subscription)) => {
+                        this.dialog = None;
+                        match subscription.error {
+                            Some(error) => this.show_toast(
+                                format!("Saved, but the list check failed: {error}"),
+                                true,
+                                cx,
+                            ),
+                            None => this.show_toast("Subscription saved", false, cx),
+                        }
+                    }
+                    Ok(_) => this.dialog = None,
+                    Err(error) => {
+                        if let Some(Dialog::Subscription(form)) = this.dialog.as_mut() {
+                            form.busy = false;
+                            form.error = Some(error);
+                        }
+                    }
+                },
+            );
+            return;
+        }
         let url = form.url.read(cx).value().trim().to_owned();
         if let Err(error) = check_url(&url) {
             form.error = Some(error);
@@ -988,9 +1072,8 @@ impl AppView {
         }
         form.busy = true;
         form.error = None;
-        let kind = kind_from(&form.kind);
         self.call(
-            Request::AddSubscription { url, kind },
+            Request::AddSubscription { url, kind, name },
             cx,
             |this, result, cx| match result {
                 Ok(Reply::Subscription(subscription)) => {
@@ -2060,22 +2143,53 @@ impl AppView {
                     410.,
                     cx,
                 );
-                let url_box =
-                    self.input_box(ui, &form.url, window, cx, form.error.is_some(), false);
-                let content = div()
-                    .child(self.field(ui, "Rule list URL", url_box, form.error.as_ref(), None))
-                    .child(self.field(ui, "List type", kind_select, None, None));
+                let editing = form.id.is_some();
+                let name_box = self.input_box(ui, &form.name, window, cx, false, false);
+                let content = if editing {
+                    let url_text = div()
+                        .px(px(10.))
+                        .py(px(8.))
+                        .rounded(px(5.))
+                        .bg(ui.p.soft)
+                        .text_size(px(11.))
+                        .text_color(ui.p.muted)
+                        .font_family(MONO)
+                        .child(form.saved_url.clone());
+                    div()
+                        .child(self.field(ui, "Name", name_box, form.error.as_ref(), None))
+                        .child(self.field(ui, "List type", kind_select, None, None))
+                        .child(self.field(ui, "Rule list URL", url_text, None, None))
+                } else {
+                    let url_box =
+                        self.input_box(ui, &form.url, window, cx, form.error.is_some(), false);
+                    div()
+                        .child(self.field(ui, "Rule list URL", url_box, form.error.as_ref(), None))
+                        .child(self.field(ui, "Name", name_box, None, None))
+                        .child(self.field(ui, "List type", kind_select, None, None))
+                };
                 let actions = self.actions(
                     ui,
                     None,
                     "Cancel",
-                    Some(("Add subscription", ButtonKind::Primary, form.busy)),
+                    Some((
+                        if editing { "Save" } else { "Add subscription" },
+                        ButtonKind::Primary,
+                        form.busy,
+                    )),
                     cx,
                 );
                 self.modal(
                     ui,
-                    "Add subscription",
-                    Some("Use an HTTP or HTTPS link to a .srs or text rule list."),
+                    if editing {
+                        "Edit subscription"
+                    } else {
+                        "Add subscription"
+                    },
+                    Some(if editing {
+                        "A new list type applies after reconnect."
+                    } else {
+                        "Use an HTTP or HTTPS link to a .srs or text rule list."
+                    }),
                     content.into_any_element(),
                     actions,
                     false,

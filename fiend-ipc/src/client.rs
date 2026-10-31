@@ -273,8 +273,27 @@ impl Client {
         &self,
         url: String,
         kind: RuleKind,
+        name: String,
     ) -> Result<Subscription, ClientError> {
-        match self.request(Request::AddSubscription { url, kind }).await? {
+        match self
+            .request(Request::AddSubscription { url, kind, name })
+            .await?
+        {
+            Reply::Subscription(subscription) => Ok(subscription),
+            _ => Err(ClientError::Unexpected),
+        }
+    }
+
+    pub async fn update_subscription(
+        &self,
+        id: String,
+        name: String,
+        kind: RuleKind,
+    ) -> Result<Subscription, ClientError> {
+        match self
+            .request(Request::UpdateSubscription { id, name, kind })
+            .await?
+        {
             Reply::Subscription(subscription) => Ok(subscription),
             _ => Err(ClientError::Unexpected),
         }

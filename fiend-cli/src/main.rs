@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use fiend_ipc::{
     Client, ClientError, Event, LogEntry, LogLevel, Profile, RuleKind, Settings, Stats, Status,
-    TunnelState,
+    Subscription, TunnelState,
 };
 use tokio::io::AsyncReadExt;
 
@@ -131,6 +131,17 @@ enum SubscriptionCommand {
         url: String,
         #[arg(long, value_enum, default_value = "direct")]
         kind: Kind,
+        /// Name to show instead of the URL.
+        #[arg(long, default_value = "")]
+        name: String,
+    },
+    /// Change the name or the list type. Keeps the other value.
+    Edit {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, value_enum)]
+        kind: Option<Kind>,
     },
     Remove {
         id: String,
@@ -471,19 +482,20 @@ async fn subscriptions(client: &Client, command: SubscriptionCommand) -> Result<
         SubscriptionCommand::List => {
             for item in client.settings().await.map_err(fail)?.subscriptions {
                 println!(
-                    "{}  {:?}  {} entries  {}{}",
+                    "{}  {:?}  {} entries  {}  {}{}",
                     &item.id[..8],
                     item.kind,
                     item.entries,
+                    item.title(),
                     item.url,
                     item.error
                         .map_or(String::new(), |e| format!("  error: {e}")),
                 );
             }
         }
-        SubscriptionCommand::Add { url, kind } => {
+        SubscriptionCommand::Add { url, kind, name } => {
             let item = client
-                .add_subscription(url, kind.into())
+                .add_subscription(url, kind.into(), name)
                 .await
                 .map_err(fail)?;
             match item.error {
@@ -491,27 +503,43 @@ async fn subscriptions(client: &Client, command: SubscriptionCommand) -> Result<
                 None => println!("added {} ({} entries)", &item.id[..8], item.entries),
             }
         }
-        SubscriptionCommand::Remove { id } => {
-            let settings = client.settings().await.map_err(fail)?;
-            let matches: Vec<_> = settings
-                .subscriptions
-                .iter()
-                .filter(|item| item.id.starts_with(&id))
-                .collect();
-            match matches.as_slice() {
-                [one] => client
-                    .remove_subscription(one.id.clone())
-                    .await
-                    .map_err(fail)?,
-                [] => return Err(format!("no subscription matches \"{id}\"")),
-                _ => return Err(format!("\"{id}\" matches more than one subscription")),
+        SubscriptionCommand::Edit { id, name, kind } => {
+            let item = find_subscription(client, &id).await?;
+            let item = client
+                .update_subscription(
+                    item.id,
+                    name.unwrap_or(item.name),
+                    kind.map_or(item.kind, Into::into),
+                )
+                .await
+                .map_err(fail)?;
+            match item.error {
+                Some(error) => return Err(format!("saved, but the list check failed: {error}")),
+                None => println!("saved {} ({} entries)", item.title(), item.entries),
             }
+        }
+        SubscriptionCommand::Remove { id } => {
+            let item = find_subscription(client, &id).await?;
+            client.remove_subscription(item.id).await.map_err(fail)?;
         }
         SubscriptionCommand::Refresh => {
             client.refresh_subscriptions().await.map_err(fail)?;
         }
     }
     Ok(())
+}
+
+async fn find_subscription(client: &Client, id: &str) -> Result<Subscription, String> {
+    let settings = client.settings().await.map_err(fail)?;
+    let mut matches = settings
+        .subscriptions
+        .into_iter()
+        .filter(|item| item.id.starts_with(id));
+    match (matches.next(), matches.next()) {
+        (Some(one), None) => Ok(one),
+        (None, _) => Err(format!("no subscription matches \"{id}\"")),
+        _ => Err(format!("\"{id}\" matches more than one subscription")),
+    }
 }
 
 #[cfg(test)]

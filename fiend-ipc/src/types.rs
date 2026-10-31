@@ -117,11 +117,45 @@ impl RuleStats {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
     pub id: String,
+    #[serde(default)]
+    pub name: String,
     pub url: String,
     pub kind: RuleKind,
     pub updated_at_ms: u64,
     pub entries: u64,
     pub error: Option<String>,
+}
+
+pub const MAX_SUBSCRIPTION_NAME: usize = 64;
+
+impl Subscription {
+    pub fn title(&self) -> String {
+        let name = self.name.trim();
+        if name.is_empty() {
+            url_title(&self.url)
+        } else {
+            name.to_owned()
+        }
+    }
+}
+
+pub fn url_title(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let path = path.split_once("://").map_or(path, |(_, rest)| rest);
+    let file = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
+    let stem = [".srs", ".txt", ".list", ".json"]
+        .iter()
+        .find_map(|suffix| file.strip_suffix(suffix))
+        .unwrap_or(file);
+    if stem.is_empty() {
+        url.to_owned()
+    } else {
+        stem.to_owned()
+    }
 }
 
 pub const MIN_MTU: u16 = 1280;
@@ -256,6 +290,29 @@ impl IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscription_title_is_the_name_or_the_file_name() {
+        let mut item = Subscription {
+            id: "a".into(),
+            name: String::new(),
+            url: "https://raw.example/rules/geosite-ru-blocked.srs?x=1".into(),
+            kind: RuleKind::Proxy,
+            updated_at_ms: 0,
+            entries: 0,
+            error: None,
+        };
+        assert_eq!(item.title(), "geosite-ru-blocked");
+        item.name = "  Blocked in Russia ".into();
+        assert_eq!(item.title(), "Blocked in Russia");
+        assert_eq!(url_title("https://rules.example/"), "rules.example");
+        assert_eq!(url_title("https://rules.example/list"), "list");
+        let old: Subscription = serde_json::from_str(
+            r#"{"id":"a","url":"https://x/y.txt","kind":"dpi","updated_at_ms":0,"entries":0,"error":null}"#,
+        )
+        .unwrap();
+        assert_eq!(old.title(), "y");
+    }
 
     #[test]
     fn saved_profiles_with_one_server_keep_it() {
