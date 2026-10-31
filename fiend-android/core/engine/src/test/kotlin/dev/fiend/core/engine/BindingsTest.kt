@@ -17,13 +17,14 @@ class BindingsTest {
     @Test
     fun shareLinkRoundTripUsesRust() {
         val template = bundledTemplates().single()
-        val profile = ProfileConfig("Local test", "127.0.0.1:443", "42".repeat(32), template.templateJson)
+        val profile = ProfileConfig("Local test", listOf("127.0.0.1:443", "192.0.2.10:8443"), "42".repeat(32), template.templateJson)
         validateProfile(profile)
         val link = makeShareLink(profile)
         val restored = parseShareLink(link)
-        assertTrue(link.startsWith("fiend://v1/"))
+        assertTrue(link.startsWith("fiend://") && !link.startsWith("fiend://v1/"))
+        assertTrue(link.length < 1200)
         assertEquals(profile.name, restored.name)
-        assertEquals(profile.server, restored.server)
+        assertEquals(profile.servers, restored.servers)
         assertEquals(profile.secret, restored.secret)
         assertEquals(link, makeShareLink(restored))
     }
@@ -35,7 +36,7 @@ class BindingsTest {
         val loaded = loadTemplate(template.templateJson.toByteArray())
         assertEquals(template.domain, loaded.domain)
         assertEquals(template.domain, templateDomain(loaded.templateJson))
-        validateProfile(ProfileConfig("Local test", "127.0.0.1:443", "42".repeat(32), loaded.templateJson))
+        validateProfile(ProfileConfig("Local test", listOf("127.0.0.1:443"), "42".repeat(32), loaded.templateJson))
         assertThrows(FiendException::class.java) { loadTemplate("not a template".toByteArray()) }
     }
 }

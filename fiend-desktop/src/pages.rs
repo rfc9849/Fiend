@@ -219,7 +219,7 @@ impl AppView {
                 .profiles
                 .iter()
                 .map(|item| {
-                    MenuOption::new(item.id.clone(), item.name.clone()).detail(item.server.clone())
+                    MenuOption::new(item.id.clone(), item.name.clone()).detail(item.server_list())
                 })
                 .collect();
             let select = self.select(
@@ -247,7 +247,7 @@ impl AppView {
                             .font_family(MONO)
                             .text_size(px(10.))
                             .text_color(p.muted)
-                            .child(profile.server.clone()),
+                            .child(profile.server_list()),
                     ),
                 )
         });
@@ -441,7 +441,7 @@ impl AppView {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .child(profile.server.clone()),
+                                .child(profile.server_list()),
                         ),
                 )
                 .child(div().text_size(px(10.)).text_color(p.muted).child(latency))
@@ -469,7 +469,9 @@ impl AppView {
             let is_active = self.model.status.profile_id.as_deref() == Some(id.as_str());
             let connected = matches!(self.model.status.state, TunnelState::Connected { .. } | TunnelState::Connecting { .. });
             let running_here = is_active && connected;
-            let (host, port) = format::host_port(&profile.server);
+            let first = profile.servers.first().cloned().unwrap_or_default();
+            let (host, port) = format::host_port(&first);
+            let more_servers = profile.servers.iter().skip(1).cloned().collect::<Vec<_>>().join(", ");
             let secret_copy = profile.secret.clone();
             let template_name = crate::dialogs::template_label(&profile.template_json);
             let t = profile.tuning;
@@ -522,7 +524,8 @@ impl AppView {
                 .child(
                     ui.group()
                         .child(ui.info_row("Host", ui.mono(host), true))
-                        .child(ui.info_row("Port", ui.mono(port), false))
+                        .child(ui.info_row("Port", ui.mono(port), !more_servers.is_empty()))
+                        .when(!more_servers.is_empty(), |list| list.child(ui.info_row("More servers", ui.mono(more_servers), false)))
                         .child(ui.info_row(
                             "Secret",
                             div()
@@ -620,7 +623,7 @@ impl AppView {
         let input = fiend_ipc::ProfileInput {
             id: None,
             name: format!("{} copy", profile.name),
-            server: profile.server,
+            servers: profile.servers,
             secret: profile.secret,
             template_json: profile.template_json,
             tuning: profile.tuning,

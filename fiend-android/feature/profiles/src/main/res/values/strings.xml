@@ -38,6 +38,7 @@
     <string name="detail_group_tuning">Tuning</string>
     <string name="detail_address">Address</string>
     <string name="detail_port">Port</string>
+    <string name="detail_more_servers">More servers</string>
     <string name="detail_fingerprint">Browser fingerprint</string>
     <string name="detail_secret">Secret</string>
     <string name="detail_secret_hidden">•••• •••• •••• %1$s</string>
@@ -76,6 +77,8 @@
     <string name="edit_name">Name</string>
     <string name="edit_host">Host</string>
     <string name="edit_port">Port</string>
+    <string name="edit_more_servers">More servers</string>
+    <string name="edit_more_servers_hint">Optional. IP:port values, separated by commas. The app uses the fastest server and changes to the next one if a server fails.</string>
     <string name="edit_secret">Secret</string>
     <string name="edit_secret_hint">64 hexadecimal characters</string>
     <string name="edit_template">Browser template</string>
@@ -88,6 +91,7 @@
     <string name="edit_udp_keepalive">UDP keepalive, ms</string>
     <string name="edit_error_required">Required</string>
     <string name="edit_error_port">Use a port from 1 to 65535</string>
+    <string name="edit_error_servers">Use IP:port values with a port from 1 to 65535</string>
     <string name="edit_error_secret">Use exactly 64 hexadecimal characters</string>
     <string name="edit_error_number">Use a positive number</string>
     <string name="edit_error_keepalive">Must be less than UDP idle</string>

@@ -2312,7 +2312,9 @@ name = "fiend-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "base64 0.23.1",
  "bytes",
+ "flate2",
  "h2",
  "hex",
  "hkdf 0.13.0",
@@ -2428,11 +2430,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiend-rules"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hickory-proto",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "fiend-tun"
 version = "0.1.0"
 dependencies = [
  "etherparse 0.20.3",
  "fiend-core",
+ "fiend-rules",
  "flate2",
  "futures",
  "hickory-proto",

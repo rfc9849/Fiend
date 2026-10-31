@@ -3,11 +3,18 @@ use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
-use fiend_core::addr::Address;
 use hickory_proto::rr::Name;
 use thiserror::Error;
 
-use crate::srs::{self, SrsList, SrsSkipped};
+pub mod srs;
+
+use crate::srs::{SrsList, SrsSkipped};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Host<'a> {
+    Ip(IpAddr),
+    Name(&'a str),
+}
 
 pub const MAX_LIST_BYTES: usize = 16 << 20;
 pub const MAX_ENTRIES: usize = 1_000_000;
@@ -264,6 +271,19 @@ impl RuleList {
             self.counts.cidrs += 1;
         }
         Ok(())
+    }
+
+    pub fn matches(&self, host: Host<'_>) -> bool {
+        match host {
+            Host::Ip(ip) => self.cidrs.contains(ip),
+            Host::Name(host) => {
+                let host = host.trim_end_matches('.').to_ascii_lowercase();
+                if let Ok(ip) = host.parse::<IpAddr>() {
+                    return self.cidrs.contains(ip);
+                }
+                self.domains.contains(&host)
+            }
+        }
     }
 
     pub fn finish(&mut self) {
@@ -549,10 +569,9 @@ impl Rules {
         self.block.domains.contains(domain)
     }
 
-    pub fn route(&self, address: &Address, bypass_lan: bool) -> Route {
-        match address {
-            Address::Ip(address) => {
-                let ip = address.ip();
+    pub fn route(&self, host: Host<'_>, bypass_lan: bool) -> Route {
+        match host {
+            Host::Ip(ip) => {
                 if bypass_lan && is_local(ip) {
                     return Route::Direct;
                 }
@@ -570,7 +589,7 @@ impl Rules {
                 }
                 Route::Proxy
             }
-            Address::Domain { host, .. } => {
+            Host::Name(host) => {
                 let host = host.trim_end_matches('.').to_ascii_lowercase();
                 if self.block.domains.contains(&host) {
                     return Route::Block;
@@ -603,12 +622,12 @@ impl SrsSkipped {
 mod tests {
     use super::*;
 
-    fn domain(host: &str) -> Address {
-        Address::domain(host, 443)
+    fn domain(host: &str) -> Host<'_> {
+        Host::Name(host)
     }
 
-    fn ip(address: &str) -> Address {
-        Address::Ip(address.parse().unwrap())
+    fn ip(address: &str) -> Host<'static> {
+        Host::Ip(address.parse::<std::net::SocketAddr>().unwrap().ip())
     }
 
     fn fixture(name: &str) -> String {
@@ -623,30 +642,30 @@ mod tests {
     fn suffix_matches_on_label_boundaries() {
         let rules = Rules::parse("domain:ru\nyandex.net\n", "", "").unwrap();
         for host in ["yandex.ru", "ru", "a.b.yandex.net", "yandex.net"] {
-            assert_eq!(rules.route(&domain(host), false), Route::Direct, "{host}");
+            assert_eq!(rules.route(domain(host), false), Route::Direct, "{host}");
         }
         for host in ["peru", "notyandex.net", "yandex.net.example.com", "ru.com"] {
-            assert_eq!(rules.route(&domain(host), false), Route::Proxy, "{host}");
+            assert_eq!(rules.route(domain(host), false), Route::Proxy, "{host}");
         }
     }
 
     #[test]
     fn full_entry_matches_only_the_exact_name() {
         let rules = Rules::parse("full:Example.com.\n", "", "").unwrap();
-        assert_eq!(rules.route(&domain("example.com"), false), Route::Direct);
-        assert_eq!(rules.route(&domain("EXAMPLE.com."), false), Route::Direct);
-        assert_eq!(rules.route(&domain("www.example.com"), false), Route::Proxy);
+        assert_eq!(rules.route(domain("example.com"), false), Route::Direct);
+        assert_eq!(rules.route(domain("EXAMPLE.com."), false), Route::Direct);
+        assert_eq!(rules.route(domain("www.example.com"), false), Route::Proxy);
     }
 
     #[test]
     fn keyword_matches_a_substring() {
         let rules = Rules::parse("keyword:Yandex\n", "keyword:track\n", "").unwrap();
         assert_eq!(
-            rules.route(&domain("my-yandex-cdn.net"), false),
+            rules.route(domain("my-yandex-cdn.net"), false),
             Route::Direct
         );
-        assert_eq!(rules.route(&domain("tracker.example"), false), Route::Block);
-        assert_eq!(rules.route(&domain("example.org"), false), Route::Proxy);
+        assert_eq!(rules.route(domain("tracker.example"), false), Route::Block);
+        assert_eq!(rules.route(domain("example.org"), false), Route::Proxy);
     }
 
     #[test]
@@ -677,20 +696,20 @@ mod tests {
         );
         let rules =
             Rules::parse("ip:1.2.3.0/24\nip:2a00:1450::/32\nip:5.5.5.5/32\n", "", "").unwrap();
-        assert_eq!(rules.route(&ip("1.2.3.4:80"), false), Route::Direct);
-        assert_eq!(rules.route(&ip("1.2.4.4:80"), false), Route::Proxy);
-        assert_eq!(rules.route(&ip("1.2.2.255:80"), false), Route::Proxy);
-        assert_eq!(rules.route(&ip("[2a00:1450::1]:80"), false), Route::Direct);
-        assert_eq!(rules.route(&ip("[2a00:1451::1]:80"), false), Route::Proxy);
-        assert_eq!(rules.route(&ip("5.5.5.4:80"), false), Route::Proxy);
-        assert_eq!(rules.route(&ip("5.5.5.6:80"), false), Route::Proxy);
+        assert_eq!(rules.route(ip("1.2.3.4:80"), false), Route::Direct);
+        assert_eq!(rules.route(ip("1.2.4.4:80"), false), Route::Proxy);
+        assert_eq!(rules.route(ip("1.2.2.255:80"), false), Route::Proxy);
+        assert_eq!(rules.route(ip("[2a00:1450::1]:80"), false), Route::Direct);
+        assert_eq!(rules.route(ip("[2a00:1451::1]:80"), false), Route::Proxy);
+        assert_eq!(rules.route(ip("5.5.5.4:80"), false), Route::Proxy);
+        assert_eq!(rules.route(ip("5.5.5.6:80"), false), Route::Proxy);
     }
 
     #[test]
     fn full_range_cidr_does_not_overflow() {
         let rules = Rules::parse("ip:0.0.0.0/0\nip:::/0\nip:255.255.255.255\n", "", "").unwrap();
-        assert_eq!(rules.route(&ip("255.255.255.255:1"), false), Route::Direct);
-        assert_eq!(rules.route(&ip("[ffff::]:1"), false), Route::Direct);
+        assert_eq!(rules.route(ip("255.255.255.255:1"), false), Route::Direct);
+        assert_eq!(rules.route(ip("[ffff::]:1"), false), Route::Direct);
     }
 
     #[test]
@@ -701,17 +720,17 @@ mod tests {
             "",
         )
         .unwrap();
-        assert_eq!(rules.route(&ip("192.168.1.1:80"), true), Route::Direct);
-        assert_eq!(rules.route(&ip("192.168.1.1:80"), false), Route::Direct);
-        assert_eq!(rules.route(&ip("10.0.0.1:80"), true), Route::Direct);
-        assert_eq!(rules.route(&ip("10.0.0.1:80"), false), Route::Proxy);
-        assert_eq!(rules.route(&domain("both.example"), true), Route::Block);
+        assert_eq!(rules.route(ip("192.168.1.1:80"), true), Route::Direct);
+        assert_eq!(rules.route(ip("192.168.1.1:80"), false), Route::Direct);
+        assert_eq!(rules.route(ip("10.0.0.1:80"), true), Route::Direct);
+        assert_eq!(rules.route(ip("10.0.0.1:80"), false), Route::Proxy);
+        assert_eq!(rules.route(domain("both.example"), true), Route::Block);
         assert_eq!(
-            rules.route(&domain("www.both.example"), false),
+            rules.route(domain("www.both.example"), false),
             Route::Block
         );
-        assert_eq!(rules.route(&ip("8.8.8.8:53"), false), Route::Direct);
-        assert_eq!(rules.route(&domain("other.example"), true), Route::Proxy);
+        assert_eq!(rules.route(ip("8.8.8.8:53"), false), Route::Direct);
+        assert_eq!(rules.route(domain("other.example"), true), Route::Proxy);
     }
 
     #[test]
@@ -723,17 +742,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            rules.route(&domain("www.ru-blocked.example"), false),
+            rules.route(domain("www.ru-blocked.example"), false),
             Route::Proxy
         );
         assert_eq!(
-            rules.route(&domain("ru-blocked.example"), false),
+            rules.route(domain("ru-blocked.example"), false),
             Route::Proxy
         );
-        assert_eq!(rules.route(&domain("yandex.ru"), false), Route::Direct);
-        assert_eq!(rules.route(&domain("ads.example"), false), Route::Block);
-        assert_eq!(rules.route(&ip("5.255.255.9:443"), false), Route::Proxy);
-        assert_eq!(rules.route(&ip("8.8.8.8:443"), false), Route::Proxy);
+        assert_eq!(rules.route(domain("yandex.ru"), false), Route::Direct);
+        assert_eq!(rules.route(domain("ads.example"), false), Route::Block);
+        assert_eq!(rules.route(ip("5.255.255.9:443"), false), Route::Proxy);
+        assert_eq!(rules.route(ip("8.8.8.8:443"), false), Route::Proxy);
         assert_eq!(rules.proxy_counts().domains, 1);
     }
 
@@ -742,10 +761,10 @@ mod tests {
         let rules = Rules::parse("", "domain:ads.example\n", "domain:proxy.example\n")
             .unwrap()
             .with_all_direct(true);
-        assert_eq!(rules.route(&domain("example.org"), false), Route::Direct);
-        assert_eq!(rules.route(&ip("1.1.1.1:443"), false), Route::Direct);
-        assert_eq!(rules.route(&domain("ads.example"), false), Route::Block);
-        assert_eq!(rules.route(&domain("proxy.example"), false), Route::Direct);
+        assert_eq!(rules.route(domain("example.org"), false), Route::Direct);
+        assert_eq!(rules.route(ip("1.1.1.1:443"), false), Route::Direct);
+        assert_eq!(rules.route(domain("ads.example"), false), Route::Block);
+        assert_eq!(rules.route(domain("proxy.example"), false), Route::Direct);
     }
 
     #[test]
@@ -830,9 +849,9 @@ mod tests {
     #[test]
     fn empty_rules_route_everything_to_the_proxy() {
         let rules = Rules::default();
-        assert_eq!(rules.route(&domain("yandex.ru"), true), Route::Proxy);
-        assert_eq!(rules.route(&ip("8.8.8.8:53"), true), Route::Proxy);
-        assert_eq!(rules.route(&ip("192.168.0.1:53"), true), Route::Direct);
+        assert_eq!(rules.route(domain("yandex.ru"), true), Route::Proxy);
+        assert_eq!(rules.route(ip("8.8.8.8:53"), true), Route::Proxy);
+        assert_eq!(rules.route(ip("192.168.0.1:53"), true), Route::Direct);
     }
 
     #[test]
@@ -857,9 +876,9 @@ mod tests {
             .unwrap();
         assert!(counts.total() > 0);
         rules.finish();
-        assert_eq!(rules.route(&domain("2gis.ru"), false), Route::Direct);
-        assert_eq!(rules.route(&domain("www.2gis.ru"), false), Route::Direct);
-        assert_eq!(rules.route(&domain("2gis.example"), false), Route::Proxy);
+        assert_eq!(rules.route(domain("2gis.ru"), false), Route::Direct);
+        assert_eq!(rules.route(domain("www.2gis.ru"), false), Route::Direct);
+        assert_eq!(rules.route(domain("2gis.example"), false), Route::Proxy);
         assert_eq!(rules.skipped(), SrsSkipped::default());
     }
 
@@ -874,7 +893,7 @@ mod tests {
             .unwrap();
         rules.finish();
         assert!(rules.direct_counts().cidrs > 1000);
-        assert_eq!(rules.route(&ip("5.255.255.1:443"), false), Route::Direct);
+        assert_eq!(rules.route(ip("5.255.255.1:443"), false), Route::Direct);
     }
 
     #[test]
@@ -889,8 +908,8 @@ mod tests {
             })
             .unwrap();
         rules.finish();
-        assert_eq!(rules.route(&domain("a.example.com"), false), Route::Direct);
-        assert_eq!(rules.route(&ip("10.1.2.3:80"), false), Route::Direct);
+        assert_eq!(rules.route(domain("a.example.com"), false), Route::Direct);
+        assert_eq!(rules.route(ip("10.1.2.3:80"), false), Route::Direct);
         let _ = std::fs::remove_file(path);
     }
 
@@ -904,5 +923,25 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(error, RuleFileError::Read { .. }));
+    }
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::*;
+
+    #[test]
+    fn rule_lists_match_domains_and_addresses() {
+        let list = parse_list("domain:example.com\nfull:exact.test\nkeyword:tracker\nip:10.0.0.0/8", true).unwrap();
+        let domain = Host::Name;
+        assert!(list.matches(domain("a.example.com")));
+        assert!(list.matches(domain("Example.COM.")));
+        assert!(list.matches(domain("exact.test")));
+        assert!(!list.matches(domain("sub.exact.test")));
+        assert!(list.matches(domain("my-tracker.net")));
+        assert!(list.matches(Host::Ip("10.1.2.3".parse().unwrap())));
+        assert!(list.matches(domain("10.1.2.3")));
+        assert!(!list.matches(Host::Ip("11.1.2.3".parse().unwrap())));
+        assert!(!list.matches(domain("other.org")));
     }
 }

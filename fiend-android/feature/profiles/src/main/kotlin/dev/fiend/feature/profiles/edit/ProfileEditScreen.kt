@@ -161,6 +161,15 @@ internal fun ProfileEditScreen(
                     keyboardType = KeyboardType.Number,
                 )
                 FormField(
+                    value = f.moreServers,
+                    onValueChange = { v -> onChange { it.copy(moreServers = v) } },
+                    label = stringResource(R.string.edit_more_servers),
+                    icon = FiendIcons.Public,
+                    error = state.errors[Field.MoreServers],
+                    supporting = stringResource(R.string.edit_more_servers_hint),
+                    keyboardType = KeyboardType.Uri,
+                )
+                FormField(
                     value = f.secret,
                     onValueChange = { v -> onChange { it.copy(secret = v.trim().take(64)) } },
                     label = stringResource(R.string.edit_secret),
@@ -223,6 +232,7 @@ private fun errorText(error: FieldError?): String? = error?.let {
         when (it) {
             FieldError.Required -> R.string.edit_error_required
             FieldError.Port -> R.string.edit_error_port
+            FieldError.Servers -> R.string.edit_error_servers
             FieldError.Secret -> R.string.edit_error_secret
             FieldError.Number -> R.string.edit_error_number
             FieldError.Keepalive -> R.string.edit_error_keepalive

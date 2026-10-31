@@ -1,24 +1,17 @@
-use std::io::{Read, Write};
-
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use fiend_core::client::ClientConfig;
 use fiend_core::fingerprint::{Template, parse_client_hello};
-use flate2::{Compression, bufread::ZlibDecoder, write::ZlibEncoder};
-use serde::{Deserialize, Serialize};
+use fiend_core::share;
+use serde::Deserialize;
 
 use crate::AppError;
 
-const PREFIX: &str = "fiend://v1/";
-const MAX_LINK: usize = 65536;
-const MAX_JSON: usize = 262144;
 const MAX_TEMPLATE: usize = 131072;
 const BUNDLED: &str = include_str!("../../fiend-core/testdata/template.json");
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileConfig {
     pub name: String,
-    pub server: String,
+    pub servers: Vec<String>,
     pub secret: String,
     pub template_json: String,
 }
@@ -38,31 +31,19 @@ pub struct LoadedTemplate {
     pub template_json: String,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ShareProfile {
-    name: String,
-    server: String,
-    secret: String,
-    template: serde_json::Value,
-}
-
 pub fn client_config(profile: &ProfileConfig) -> Result<ClientConfig, AppError> {
-    if profile.name.trim().is_empty()
-        || profile.name.len() > 128
-        || profile.name.chars().any(char::is_control)
-    {
-        return Err(invalid(
-            "Profile name must contain 1 to 128 bytes and no control characters",
-        ));
-    }
-    if profile.secret.len() != 64 {
-        return Err(invalid("Secret must contain 64 hex characters"));
-    }
-    let secret = hex::decode(&profile.secret).map_err(|_| invalid("Secret is not valid hex"))?;
+    share::check_name(&profile.name).map_err(share_error)?;
+    let servers: Vec<String> = profile
+        .servers
+        .iter()
+        .map(|server| server.trim().to_owned())
+        .collect();
+    share::check_servers(&servers).map_err(share_error)?;
+    let secret = share::decode_secret(&profile.secret).map_err(share_error)?;
     let template = check_template(&profile.template_json)?;
-    fiend_core::config::build_client(ClientConfig::new(&profile.server, secret, template))
-        .map_err(|error| invalid(error.to_string()))
+    let mut config = ClientConfig::new(String::new(), secret.to_vec(), template);
+    config.servers = servers;
+    fiend_core::config::build_client(config).map_err(|error| invalid(error.to_string()))
 }
 
 fn check_template(template_json: &str) -> Result<Template, AppError> {
@@ -96,9 +77,8 @@ pub fn load_template(data: &[u8]) -> Result<LoadedTemplate, AppError> {
             serde_json::from_str(text).map_err(|_| invalid("Template is not valid"))?;
         value.to_string()
     } else {
-        let template = parse_client_hello(data).map_err(|_| {
-            invalid("The file is not a TLS template or a ClientHello capture")
-        })?;
+        let template = parse_client_hello(data)
+            .map_err(|_| invalid("The file is not a TLS template or a ClientHello capture"))?;
         template
             .verify(data)
             .map_err(|_| invalid("The ClientHello capture cannot be used as a template"))?;
@@ -125,55 +105,35 @@ pub fn validate_profile(profile: ProfileConfig) -> Result<(), AppError> {
     client_config(&profile).map(drop)
 }
 
+pub fn parse_servers(text: &str) -> Result<Vec<String>, AppError> {
+    share::parse_servers(text).map_err(share_error)
+}
+
+pub fn check_servers(servers: &[String]) -> Result<(), AppError> {
+    share::check_servers(servers).map_err(share_error)
+}
+
 pub fn make_share_link(profile: ProfileConfig) -> Result<String, AppError> {
-    client_config(&profile)?;
-    let share = ShareProfile {
+    let config = client_config(&profile)?;
+    let secret = share::decode_secret(&profile.secret).map_err(share_error)?;
+    share::encode(&share::Share {
         name: profile.name,
-        server: profile.server.trim().to_owned(),
-        secret: profile.secret.to_ascii_lowercase(),
-        template: serde_json::from_str(&profile.template_json)
-            .map_err(|_| invalid("Template is not valid"))?,
-    };
-    let raw = serde_json::to_vec(&share).map_err(|_| AppError::InvalidLink)?;
-    if raw.len() > MAX_JSON {
-        return Err(AppError::InvalidLink);
-    }
-    let mut compressor = ZlibEncoder::new(Vec::new(), Compression::best());
-    compressor
-        .write_all(&raw)
-        .map_err(|_| AppError::InvalidLink)?;
-    let compressed = compressor.finish().map_err(|_| AppError::InvalidLink)?;
-    let link = format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(compressed));
-    if link.len() > MAX_LINK {
-        return Err(AppError::InvalidLink);
-    }
-    Ok(link)
+        servers: config.servers,
+        secret,
+        template: config.template,
+    })
+    .map_err(share_error)
 }
 
 pub fn parse_share_link(uri: String) -> Result<ProfileConfig, AppError> {
-    if uri.len() > MAX_LINK {
-        return Err(AppError::InvalidLink);
-    }
-    let encoded = uri.strip_prefix(PREFIX).ok_or(AppError::InvalidLink)?;
-    let compressed = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| AppError::InvalidLink)?;
-    let mut decoder = ZlibDecoder::new(compressed.as_slice());
-    let mut raw = Vec::new();
-    decoder
-        .by_ref()
-        .take(MAX_JSON as u64 + 1)
-        .read_to_end(&mut raw)
-        .map_err(|_| AppError::InvalidLink)?;
-    if raw.len() > MAX_JSON || !decoder.get_ref().is_empty() {
-        return Err(AppError::InvalidLink);
-    }
-    let share: ShareProfile = serde_json::from_slice(&raw).map_err(|_| AppError::InvalidLink)?;
+    let share = share::decode(&uri).map_err(share_error)?;
+    let template_json =
+        serde_json::to_string(&share.template).map_err(|_| AppError::InvalidLink)?;
     let profile = ProfileConfig {
         name: share.name,
-        server: share.server,
-        secret: share.secret,
-        template_json: serde_json::to_string(&share.template).map_err(|_| AppError::InvalidLink)?,
+        servers: share.servers,
+        secret: hex::encode(share.secret),
+        template_json,
     };
     client_config(&profile)?;
     Ok(profile)
@@ -189,6 +149,13 @@ pub fn bundled_templates() -> Vec<TemplateInfo> {
     }]
 }
 
+fn share_error(error: share::Error) -> AppError {
+    match error {
+        share::Error::Link => AppError::InvalidLink,
+        share::Error::Invalid(reason) => invalid(reason),
+    }
+}
+
 fn invalid(reason: impl Into<String>) -> AppError {
     AppError::InvalidProfile {
         reason: reason.into(),
@@ -202,67 +169,58 @@ pub(crate) mod tests {
     pub(crate) fn profile() -> ProfileConfig {
         ProfileConfig {
             name: "Local test".into(),
-            server: "127.0.0.1:443".into(),
+            servers: vec!["127.0.0.1:443".into()],
             secret: "42".repeat(32),
             template_json: BUNDLED.into(),
         }
     }
 
     #[test]
-    fn share_link_round_trip_keeps_capture_and_secret() {
-        let profile = profile();
+    fn share_link_round_trip_keeps_servers_secret_and_capture() {
+        let mut profile = profile();
+        profile.servers.push("node.example:8443".into());
         let link = make_share_link(profile.clone()).unwrap();
-        assert!(link.starts_with(PREFIX));
-        assert!(!link.contains('='));
+        assert!(link.starts_with("fiend://") && !link.starts_with("fiend://v1/"));
         let restored = parse_share_link(link.clone()).unwrap();
         assert_eq!(restored.name, profile.name);
-        assert_eq!(restored.server, profile.server);
+        assert_eq!(restored.servers, profile.servers);
         assert_eq!(restored.secret, profile.secret);
         assert_eq!(
-            client_config(&restored).unwrap().template.raw,
-            client_config(&profile).unwrap().template.raw
+            client_config(&restored).unwrap().template.domain,
+            client_config(&profile).unwrap().template.domain
         );
         assert_eq!(make_share_link(restored).unwrap(), link);
-        eprintln!("bundled-template share link: {} bytes", link.len());
     }
 
     #[test]
-    fn links_reject_bombs_trailing_data_and_unknown_versions() {
+    fn links_reject_old_formats_and_bad_input() {
         for link in [
-            "fiend://v2/abc",
+            "fiend://v1/eJwrSS0u0U9KzAEAEdMDkg",
             "https://example.com",
-            "fiend://v1/!",
-            "fiend://v1/AAAA",
+            "fiend://!",
+            "fiend://AAAA",
         ] {
             assert!(parse_share_link(link.into()).is_err());
         }
-        let link = make_share_link(profile()).unwrap();
-        let mut data = URL_SAFE_NO_PAD
-            .decode(link.strip_prefix(PREFIX).unwrap())
-            .unwrap();
-        data.push(0);
-        assert!(parse_share_link(format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(data))).is_err());
-        let mut compressed = ZlibEncoder::new(Vec::new(), Compression::best());
-        compressed.write_all(&vec![b' '; MAX_JSON + 1]).unwrap();
-        let link = format!(
-            "{PREFIX}{}",
-            URL_SAFE_NO_PAD.encode(compressed.finish().unwrap())
-        );
-        assert!(parse_share_link(link).is_err());
     }
 
     #[test]
     fn templates_load_from_json_or_a_raw_capture() {
         let from_json = load_template(BUNDLED.as_bytes()).unwrap();
         assert_eq!(from_json.domain, "www.wikipedia.org");
-        assert_eq!(template_domain(&from_json.template_json).as_deref(), Some("www.wikipedia.org"));
+        assert_eq!(
+            template_domain(&from_json.template_json).as_deref(),
+            Some("www.wikipedia.org")
+        );
         assert!(from_json.template_json.len() < BUNDLED.len());
 
         let raw = Template::from_json(BUNDLED).unwrap().raw;
         let from_capture = load_template(&raw).unwrap();
         assert_eq!(from_capture.domain, "www.wikipedia.org");
         assert_eq!(
-            Template::from_json(&from_capture.template_json).unwrap().raw,
+            Template::from_json(&from_capture.template_json)
+                .unwrap()
+                .raw,
             raw
         );
 

@@ -122,7 +122,11 @@ impl Store {
         let profile = Profile {
             id: id.clone(),
             name: input.name,
-            server: input.server.trim().to_owned(),
+            servers: input
+                .servers
+                .iter()
+                .map(|server| server.trim().to_owned())
+                .collect(),
             secret: input.secret.to_ascii_lowercase(),
             template_json: input.template_json,
             tuning: input.tuning,
@@ -188,7 +192,7 @@ mod tests {
         ProfileInput {
             id: None,
             name: name.into(),
-            server: " 127.0.0.1:443 ".into(),
+            servers: vec![" 127.0.0.1:443 ".into()],
             secret: "AB".repeat(32),
             template_json: "{}".into(),
             tuning: Default::default(),
@@ -200,7 +204,7 @@ mod tests {
         let dir = directory("restart");
         let mut store = Store::open(&dir).unwrap();
         let profile = store.upsert_profile(input("One")).unwrap().unwrap();
-        assert_eq!(profile.server, "127.0.0.1:443");
+        assert_eq!(profile.servers, vec!["127.0.0.1:443"]);
         assert_eq!(profile.secret, "ab".repeat(32));
         store
             .update_settings(|settings| settings.active_profile = Some(profile.id.clone()))
@@ -253,7 +257,7 @@ mod tests {
         let replacement = Profile {
             id: "ab".repeat(16),
             name: "Restored".into(),
-            server: "127.0.0.1:8443".into(),
+            servers: vec!["127.0.0.1:8443".into()],
             secret: "cd".repeat(32),
             template_json: "{}".into(),
             tuning: Default::default(),

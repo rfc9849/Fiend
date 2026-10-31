@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn a_fiend_link_is_found_in_a_picture() {
-        let link = "fiend://v1/eJzLSM3JyQcABiwCFQ";
+        let link = "fiend://eJzLSM3JyQcABiwCFQ";
         assert_eq!(find_link(&render(link)).unwrap(), link);
     }
 

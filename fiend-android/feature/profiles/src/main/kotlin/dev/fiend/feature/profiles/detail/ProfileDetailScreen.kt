@@ -337,6 +337,9 @@ private fun ServerGroup(profile: Profile, templateLabel: String, secretVisible: 
     SegmentedGroup(title = stringResource(R.string.detail_group_server)) {
         item { InfoItem(it, stringResource(R.string.detail_address), profile.host, icon = FiendIcons.Public) }
         item { InfoItem(it, stringResource(R.string.detail_port), profile.port.toString(), icon = FiendIcons.Hub) }
+        if (profile.moreServers.isNotEmpty()) {
+            item { InfoItem(it, stringResource(R.string.detail_more_servers), profile.moreServers.joinToString(", "), icon = FiendIcons.Public) }
+        }
         item { InfoItem(it, stringResource(R.string.detail_fingerprint), templateLabel, icon = FiendIcons.Fingerprint) }
         item { shapes ->
             InfoItem(

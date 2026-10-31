@@ -8,7 +8,6 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::addr::Address;
 use crate::client::ClientConfig;
 use crate::fingerprint::Template;
 use crate::mux;
@@ -74,8 +73,11 @@ pub fn load_client(path: impl AsRef<Path>) -> Result<ClientSettings, ConfigError
         file.listen.as_deref().unwrap_or(DEFAULT_CLIENT_LISTEN),
         "client listen",
     )?;
-    let server = required(file.server, "client server")?;
-    let server = server.trim().to_owned();
+    let servers = match (file.server, file.servers) {
+        (Some(server), None) => vec![server],
+        (None, Some(servers)) => servers,
+        _ => return Err(invalid("client server is required: set either server or servers")),
+    };
 
     let secret = load_secret(base, file.secret, file.secret_file)?;
     let template_path = required(file.template, "client template")?;
@@ -103,7 +105,8 @@ pub fn load_client(path: impl AsRef<Path>) -> Result<ClientSettings, ConfigError
     let mut mux = mux::Config::default();
     file.mux.apply(&mut mux);
 
-    let mut config = ClientConfig::new(server, secret, template);
+    let mut config = ClientConfig::new(String::new(), secret, template);
+    config.servers = servers;
     config.mux = mux;
     config.udp_idle = udp_idle;
     config.udp_keepalive = udp_keepalive;
@@ -177,9 +180,11 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
 }
 
 pub fn build_client(mut config: ClientConfig) -> Result<ClientConfig, ConfigError> {
-    config.server = config.server.trim().to_owned();
-    Address::from_authority(&config.server)
-        .map_err(|error| invalid(format!("client server: {error}")))?;
+    for server in &mut config.servers {
+        *server = server.trim().to_owned();
+    }
+    crate::share::check_servers(&config.servers)
+        .map_err(|error| invalid(format!("client servers: {error}")))?;
     validate_secret(&config.secret)?;
     config
         .template
@@ -261,6 +266,7 @@ fn validate_duration(value: Duration, field: &str) -> Result<(), ConfigError> {
 struct ClientFile {
     listen: Option<String>,
     server: Option<String>,
+    servers: Option<Vec<String>>,
     secret: Option<String>,
     secret_file: Option<String>,
     template: Option<String>,

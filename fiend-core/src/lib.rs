@@ -9,6 +9,7 @@ pub mod mux;
 pub mod net;
 pub mod node;
 pub mod server;
+pub mod share;
 pub mod socks5;
 pub mod target;
 pub mod transport;

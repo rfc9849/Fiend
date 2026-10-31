@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, copy_bidirectional};
 
 mod flow;
+mod select;
 pub use flow::{UdpFlow, UdpReceiver, UdpSender};
+pub use select::ServerStatus;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
@@ -18,12 +20,11 @@ use tokio::time::{MissedTickBehavior, interval, timeout};
 use crate::addr::Address;
 use crate::mux::{self, H2Lane, Lane, LaneKind, LinkPool, PoolStats};
 use crate::socks5::{self, Command, REP_CMD_NOT_SUPPORTED, REP_GENERAL_FAILURE, REP_SUCCESS};
-use crate::transport;
 use crate::udp;
 
 #[derive(Clone)]
 pub struct ClientConfig {
-    pub server: String,
+    pub servers: Vec<String>,
     pub secret: Vec<u8>,
     pub template: crate::fingerprint::Template,
     pub mux: mux::Config,
@@ -43,7 +44,7 @@ impl ClientConfig {
         template: crate::fingerprint::Template,
     ) -> Self {
         Self {
-            server: server.into(),
+            servers: vec![server.into()],
             secret: secret.into(),
             template,
             mux: mux::Config::default(),
@@ -65,37 +66,28 @@ pub struct Client {
 
 struct ClientInner {
     pool: LinkPool<TcpStream>,
+    selector: Arc<select::Selector>,
     config: ClientConfig,
     connections: Arc<Semaphore>,
 }
 
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
-        let server = config.server.clone();
-        let secret = Arc::new(config.secret.clone());
-        let template = Arc::new(config.template.clone());
-        let tcp_notsent_lowat = config.tcp_notsent_lowat;
-        let protect_socket = config.protect_socket.clone();
-        let pool = LinkPool::new(config.mux.clone(), move || {
-            let server = server.clone();
-            let secret = secret.clone();
-            let template = template.clone();
-            let protect_socket = protect_socket.clone();
-            Box::pin(async move {
-                let stream = crate::net::dial(&server, &protect_socket)
-                    .await
-                    .map_err(transport::Error::from)?;
-                stream.set_nodelay(true).map_err(transport::Error::from)?;
-                if let Err(error) = crate::net::set_tcp_notsent_lowat(&stream, tcp_notsent_lowat) {
-                    tracing::warn!(%error, "cannot set TCP_NOTSENT_LOWAT");
-                }
-                transport::connect(stream, &secret, &template).await
-            })
-        });
+        let selector = Arc::new(select::Selector::new(
+            config.servers.clone(),
+            config.secret.clone(),
+            config.template.clone(),
+            config.protect_socket.clone(),
+            config.tcp_notsent_lowat,
+            config.handshake_timeout,
+        ));
+        let dial = selector.clone();
+        let pool = LinkPool::new(config.mux.clone(), move || dial.clone().dial());
 
         Self {
             inner: Arc::new(ClientInner {
                 pool,
+                selector,
                 connections: Arc::new(Semaphore::new(config.max_connections.max(1))),
                 config,
             }),
@@ -118,7 +110,12 @@ impl Client {
         self.inner.pool.close();
     }
 
+    pub fn servers(&self) -> Vec<ServerStatus> {
+        self.inner.selector.status()
+    }
+
     pub fn network_changed(&self) {
+        self.inner.selector.reset();
         self.inner.pool.network_changed();
     }
 

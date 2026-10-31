@@ -194,10 +194,13 @@ fn value_config_uses_file_validation_rules() {
             Template::from_json(TEMPLATE).unwrap(),
         )
     };
-    assert_eq!(build_client(valid()).unwrap().server, "example.com:443");
+    assert_eq!(
+        build_client(valid()).unwrap().servers,
+        vec!["example.com:443"]
+    );
     let cases: [fn(&mut ClientConfig); 8] = [
         |config| config.secret.clear(),
-        |config| config.server = "no-port".into(),
+        |config| config.servers = vec!["no-port".into()],
         |config| config.udp_keepalive = config.udp_idle,
         |config| config.max_udp_flows = 0,
         |config| config.max_connections = 0,

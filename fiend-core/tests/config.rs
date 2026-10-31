@@ -48,7 +48,7 @@ template = "template.json"
 
     let settings = config::load_client(&path).expect("load client");
     assert_eq!(settings.listen.to_string(), "127.0.0.1:1080");
-    assert_eq!(settings.config.server, "example.com:443");
+    assert_eq!(settings.config.servers, vec!["example.com:443"]);
     assert_eq!(settings.config.secret, vec![0x42u8; 32]);
     assert!(!settings.config.template.domain.is_empty());
     assert_eq!(settings.config.udp_idle, Duration::from_secs(60));
@@ -94,7 +94,7 @@ max_frame_size = 32768
 
     let settings = config::load_client(&path).expect("load client");
     assert_eq!(settings.listen.to_string(), "0.0.0.0:9050");
-    assert_eq!(settings.config.server, "example.com:8443");
+    assert_eq!(settings.config.servers, vec!["example.com:8443"]);
     assert_eq!(settings.config.secret, vec![0x42u8; 32]);
     assert_eq!(
         settings.config.handshake_timeout,

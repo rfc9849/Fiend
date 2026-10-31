@@ -259,7 +259,7 @@ fn print_status(status: &Status, profiles: &[Profile], json: bool) {
         .as_deref()
         .and_then(|id| profiles.iter().find(|profile| profile.id == id))
     {
-        println!("profile: {} ({})", profile.name, profile.server);
+        println!("profile: {} ({})", profile.name, profile.server_list());
     }
     if let Some(stats) = &status.stats {
         print_stats(stats);
@@ -420,7 +420,7 @@ async fn profiles(client: &Client, command: ProfileCommand, json: bool) -> Resul
             for profile in &profiles {
                 if json {
                     let value = serde_json::json!({
-                        "id": profile.id, "name": profile.name, "server": profile.server,
+                        "id": profile.id, "name": profile.name, "servers": profile.servers,
                         "active": active.as_deref() == Some(profile.id.as_str()),
                     });
                     println!("{value}");
@@ -434,7 +434,7 @@ async fn profiles(client: &Client, command: ProfileCommand, json: bool) -> Resul
                         "{mark} {}  {}  {}",
                         &profile.id[..8],
                         profile.name,
-                        profile.server
+                        profile.server_list()
                     );
                 }
             }
@@ -520,7 +520,7 @@ mod tests {
         Profile {
             id: id.into(),
             name: name.into(),
-            server: String::new(),
+            servers: Vec::new(),
             secret: String::new(),
             template_json: String::new(),
             tuning: Default::default(),

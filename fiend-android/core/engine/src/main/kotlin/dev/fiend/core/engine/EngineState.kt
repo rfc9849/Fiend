@@ -25,7 +25,7 @@ object EngineServiceContract {
 fun Profile.engineConfig(): ProfileConfig {
     val json = templateJson ?: bundledTemplates().firstOrNull { it.id == templateId }?.templateJson
         ?: error("The profile template is not available")
-    return ProfileConfig(name, authority, secret, json)
+    return ProfileConfig(name, servers, secret, json)
 }
 
 @Singleton

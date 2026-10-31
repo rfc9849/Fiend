@@ -3,7 +3,7 @@ use crate::FiendError;
 #[derive(Clone, uniffi::Record)]
 pub struct ProfileConfig {
     pub name: String,
-    pub server: String,
+    pub servers: Vec<String>,
     pub secret: String,
     pub template_json: String,
 }
@@ -27,7 +27,7 @@ impl From<ProfileConfig> for fiend_app::ProfileConfig {
     fn from(profile: ProfileConfig) -> Self {
         Self {
             name: profile.name,
-            server: profile.server,
+            servers: profile.servers,
             secret: profile.secret,
             template_json: profile.template_json,
         }
@@ -38,7 +38,7 @@ impl From<fiend_app::ProfileConfig> for ProfileConfig {
     fn from(profile: fiend_app::ProfileConfig) -> Self {
         Self {
             name: profile.name,
-            server: profile.server,
+            servers: profile.servers,
             secret: profile.secret,
             template_json: profile.template_json,
         }
@@ -76,6 +76,11 @@ pub fn make_share_link(profile: ProfileConfig) -> Result<String, FiendError> {
 #[uniffi::export]
 pub fn parse_share_link(uri: String) -> Result<ProfileConfig, FiendError> {
     Ok(fiend_app::parse_share_link(uri)?.into())
+}
+
+#[uniffi::export]
+pub fn parse_servers(text: String) -> Result<Vec<String>, FiendError> {
+    Ok(fiend_app::parse_servers(&text)?)
 }
 
 #[uniffi::export]

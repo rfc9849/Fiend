@@ -71,7 +71,7 @@ class StorageTest {
             val repository = RoomProfileRepository(database, cipher(), store, RealLogRepository(), scope)
             repository.awaitReady()
             val template = bundledTemplates().single()
-            val original = repository.upsert(Profile("", "Local test", "127.0.0.1", 443, "42".repeat(32), template.id))
+            val original = repository.upsert(Profile("", "Local test", "127.0.0.1", 443, "42".repeat(32), template.id, moreServers = listOf("192.0.2.10:8443", "[2001:db8::1]:443")))
             val entity = database.profiles().get(original.id)!!
             assertFalse(entity.encryptedSecret.toString(Charsets.UTF_8).contains(original.secret))
             assertEquals(original.secret, withTimeout(5_000) { repository.profile(original.id).first { it != null } }!!.secret)
@@ -79,6 +79,8 @@ class StorageTest {
             assertNotEquals(original.id, imported.id)
             assertEquals(original.secret, imported.secret)
             assertEquals(original.authority, imported.authority)
+            assertEquals(original.servers, imported.servers)
+            assertEquals(original.servers, withTimeout(5_000) { repository.profile(imported.id).first { it != null } }!!.servers)
             repository.setActive(imported.id)
             assertEquals(imported.id, repository.activeProfileId.value)
             repository.delete(imported.id)
@@ -185,12 +187,13 @@ class StorageTest {
             database.execSQL("INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 10000, 1024, 60000, 20000, 64)", arrayOf("one", "Local test", "127.0.0.1", 443, encrypted, "captured-wikipedia-v1"))
             database.version = 1
         }
-        val database = Room.databaseBuilder(context, ProfileDatabase::class.java, file.name).addMigrations(ProfileDatabase.MIGRATION_1_2).build()
+        val database = Room.databaseBuilder(context, ProfileDatabase::class.java, file.name).addMigrations(ProfileDatabase.MIGRATION_1_2, ProfileDatabase.MIGRATION_2_3).build()
         try {
             val restored = database.profiles().get("one")!!
             assertTrue(restored.encryptedSecret.contentEquals(encrypted))
             assertEquals("42".repeat(32), secretCipher.decrypt("one", restored.encryptedSecret))
             assertEquals(null, restored.templateJson)
+            assertEquals("", restored.moreServers)
         } finally { database.close(); context.deleteDatabase(file.name) }
     }
 }

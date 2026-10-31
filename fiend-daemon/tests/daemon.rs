@@ -92,7 +92,7 @@ fn input(name: &str, server: &str) -> ProfileInput {
     ProfileInput {
         id: None,
         name: name.into(),
-        server: server.into(),
+        servers: vec![server.into()],
         secret: "42".repeat(32),
         template_json: TEMPLATE.into(),
         tuning: Default::default(),
@@ -294,7 +294,7 @@ async fn backup_restore_replaces_profiles_and_settings() {
     let replacement = Profile {
         id: id.clone(),
         name: "Restored".into(),
-        server: "127.0.0.1:8443".into(),
+        servers: vec!["127.0.0.1:8443".into()],
         secret: "cd".repeat(32),
         template_json: TEMPLATE.into(),
         tuning: Default::default(),
@@ -333,7 +333,7 @@ async fn backup_restore_refuses_invalid_ids_and_keeps_the_old_data() {
     let bad = Profile {
         id: "not-a-profile-id".into(),
         name: "Bad".into(),
-        server: "127.0.0.1:8443".into(),
+        servers: vec!["127.0.0.1:8443".into()],
         secret: "cd".repeat(32),
         template_json: TEMPLATE.into(),
         tuning: Default::default(),
@@ -382,7 +382,7 @@ async fn bad_input_is_refused_with_a_code() {
         ErrorCode::InvalidProfile
     );
     assert_eq!(
-        code(client.import_link("fiend://v1/!".into()).await),
+        code(client.import_link("fiend://!".into()).await),
         ErrorCode::InvalidProfile
     );
     let settings = Settings {
@@ -432,8 +432,8 @@ async fn share_links_round_trip_and_latency_uses_the_server() {
     let imported = client.import_link(link).await.unwrap();
     assert_ne!(imported.id, profile.id);
     assert_eq!(
-        (&imported.name, &imported.server, &imported.secret),
-        (&profile.name, &profile.server, &profile.secret)
+        (&imported.name, &imported.servers, &imported.secret),
+        (&profile.name, &profile.servers, &profile.secret)
     );
     assert_eq!(client.list_profiles().await.unwrap().len(), 2);
     assert!(client.measure_latency(profile.id).await.unwrap() < 10_000);

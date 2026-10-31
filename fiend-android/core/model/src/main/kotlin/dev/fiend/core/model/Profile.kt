@@ -12,8 +12,11 @@ data class Profile(
     val latencyMs: Int? = null,
     val lastConnectedAt: Long? = null,
     val tuning: Tuning = Tuning(),
+    val moreServers: List<String> = emptyList(),
 ) {
     val authority: String get() = if (':' in host && !host.startsWith('[')) "[$host]:$port" else "$host:$port"
+
+    val servers: List<String> get() = listOf(authority) + moreServers
 
     val secretHint: String get() = secret.takeLast(4)
 }

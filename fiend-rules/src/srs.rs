@@ -571,18 +571,18 @@ fn classify(key: &str, parts: &mut Parts) {
         Some(PREFIX_LABEL) => {
             let rest: String = chars.collect();
             let host = rest.trim_start_matches('.');
-            if let Some(host) = crate::rules::normalize(host) {
+            if let Some(host) = crate::normalize(host) {
                 parts.suffixes.push(host);
             }
         }
         Some(ROOT_LABEL) => {
             let rest: String = chars.collect();
-            if let Some(host) = crate::rules::normalize(&rest) {
+            if let Some(host) = crate::normalize(&rest) {
                 parts.suffixes.push(host);
             }
         }
         Some(_) => {
-            if let Some(host) = crate::rules::normalize(&reversed) {
+            if let Some(host) = crate::normalize(&reversed) {
                 parts.exact.push(host);
             }
         }

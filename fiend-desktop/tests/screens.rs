@@ -20,7 +20,7 @@ pub fn profiles() -> Vec<Profile> {
         .map(|(index, name)| Profile {
             id: format!("{index:032x}"),
             name: (*name).into(),
-            server: format!("{}.fiend.example:443", name[..2].to_lowercase()),
+            servers: vec![format!("{}.fiend.example:443", name[..2].to_lowercase())],
             secret: format!("{:02x}", index + 10).repeat(32),
             template_json: TEMPLATE.into(),
             tuning: Tuning::default(),
@@ -388,7 +388,7 @@ fn main() {
                 .iter()
                 .map(|p| {
                     fiend_desktop::MenuOption::new(p.id.clone(), p.name.clone())
-                        .detail(p.server.clone())
+                        .detail(p.server_list())
                 })
                 .collect();
             let selected = v.model.profiles[0].id.clone();

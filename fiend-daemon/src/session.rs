@@ -14,15 +14,34 @@ const RTT_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) fn app_profile(profile: &Profile) -> fiend_app::ProfileConfig {
     fiend_app::ProfileConfig {
         name: profile.name.clone(),
-        server: profile.server.clone(),
+        servers: profile.servers.clone(),
         secret: profile.secret.clone(),
         template_json: profile.template_json.clone(),
     }
 }
 
-/// Resolve the server name one time, before routes change. A later lookup
+/// Resolve the server names one time, before routes change. A later lookup
 /// would go through the tunnel DNS and return a fake address.
-pub(crate) async fn resolve_server(server: &str) -> Result<SocketAddr, String> {
+pub(crate) async fn resolve_servers(servers: &[String]) -> Result<Vec<SocketAddr>, String> {
+    let mut resolved = Vec::new();
+    let mut last = "The profile has no server".to_owned();
+    for server in servers {
+        match resolve_server(server).await {
+            Ok(address) if !resolved.contains(&address) => resolved.push(address),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%server, %error, "cannot resolve a profile server");
+                last = error;
+            }
+        }
+    }
+    if resolved.is_empty() {
+        return Err(last);
+    }
+    Ok(resolved)
+}
+
+async fn resolve_server(server: &str) -> Result<SocketAddr, String> {
     if let Ok(address) = server.parse::<SocketAddr>() {
         return Ok(address);
     }
@@ -38,11 +57,11 @@ pub(crate) async fn resolve_server(server: &str) -> Result<SocketAddr, String> {
 
 pub(crate) fn build_client(
     profile: &Profile,
-    server: SocketAddr,
+    servers: &[SocketAddr],
     protect: ProtectSocket,
 ) -> Result<Client, String> {
     let mut config = fiend_app::client_config(&app_profile(profile)).map_err(|e| e.to_string())?;
-    config.server = server.to_string();
+    config.servers = servers.iter().map(ToString::to_string).collect();
     config.handshake_timeout = Duration::from_millis(profile.tuning.handshake_timeout_ms.into());
     config.max_connections = profile.tuning.max_connections as usize;
     config.udp_idle = Duration::from_millis(profile.tuning.udp_idle_ms.into());

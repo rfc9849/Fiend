@@ -112,7 +112,7 @@ mod tests {
                 profiles: vec![Profile {
                     id: "ab".repeat(16),
                     name: "Home".into(),
-                    server: "127.0.0.1:443".into(),
+                    servers: vec!["127.0.0.1:443".into()],
                     secret: "0123456789abcdef".repeat(4),
                     template_json: "{}".into(),
                     tuning: Default::default(),

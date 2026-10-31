@@ -47,7 +47,8 @@ impl Tuning {
 pub struct Profile {
     pub id: String,
     pub name: String,
-    pub server: String,
+    #[serde(alias = "server", deserialize_with = "servers")]
+    pub servers: Vec<String>,
     pub secret: String,
     pub template_json: String,
     #[serde(default)]
@@ -58,11 +59,33 @@ pub struct Profile {
 pub struct ProfileInput {
     pub id: Option<String>,
     pub name: String,
-    pub server: String,
+    pub servers: Vec<String>,
     pub secret: String,
     pub template_json: String,
     #[serde(default)]
     pub tuning: Tuning,
+}
+
+fn servers<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Saved::deserialize(deserializer)? {
+        Saved::One(server) => vec![server],
+        Saved::Many(servers) => servers,
+    })
+}
+
+impl Profile {
+    pub fn server_list(&self) -> String {
+        self.servers.join(", ")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -224,5 +247,24 @@ impl IpcError {
             code,
             message: message.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_profiles_with_one_server_keep_it() {
+        let old: Profile = serde_json::from_str(
+            r#"{"id":"a","name":"n","server":"192.0.2.1:443","secret":"s","template_json":"{}"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.servers, vec!["192.0.2.1:443"]);
+        let saved = serde_json::to_value(&old).unwrap();
+        assert_eq!(saved["servers"], serde_json::json!(["192.0.2.1:443"]));
+        assert!(saved.get("server").is_none());
+        let many: Profile = serde_json::from_value(saved).unwrap();
+        assert_eq!(many, old);
     }
 }

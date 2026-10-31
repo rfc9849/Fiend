@@ -48,7 +48,7 @@ internal interface DataModule {
         @Provides
         @Singleton
         fun database(@ApplicationContext context: Context): ProfileDatabase = Room.databaseBuilder(context, ProfileDatabase::class.java, "profiles.db")
-            .addMigrations(ProfileDatabase.MIGRATION_1_2).build()
+            .addMigrations(ProfileDatabase.MIGRATION_1_2, ProfileDatabase.MIGRATION_2_3).build()
 
         @Provides
         @Singleton

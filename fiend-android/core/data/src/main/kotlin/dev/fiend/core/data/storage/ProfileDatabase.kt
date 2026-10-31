@@ -29,6 +29,7 @@ internal data class ProfileEntity(
     @ColumnInfo(name = "udp_idle_ms") val udpIdleMs: Int,
     @ColumnInfo(name = "udp_keepalive_ms") val udpKeepaliveMs: Int,
     @ColumnInfo(name = "max_udp_flows") val maxUdpFlows: Int,
+    @ColumnInfo(name = "more_servers", defaultValue = "") val moreServers: String = "",
 )
 
 @Dao
@@ -42,12 +43,15 @@ internal interface ProfileDao {
     @Query("UPDATE profiles SET last_connected_at = :time WHERE id = :id") suspend fun connected(id: String, time: Long)
 }
 
-@Database(entities = [ProfileEntity::class], version = 2, exportSchema = true)
+@Database(entities = [ProfileEntity::class], version = 3, exportSchema = true)
 internal abstract class ProfileDatabase : RoomDatabase() {
     abstract fun profiles(): ProfileDao
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) { db.execSQL("ALTER TABLE profiles ADD COLUMN template_json TEXT") }
+        }
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) { db.execSQL("ALTER TABLE profiles ADD COLUMN more_servers TEXT NOT NULL DEFAULT ''") }
         }
     }
 }

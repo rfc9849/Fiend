@@ -411,7 +411,11 @@ impl Context {
     }
 
     async fn plan(&self, destination: &Address) -> Plan {
-        match self.rules.route(destination, self.options.bypass_lan) {
+        let host = match destination {
+            Address::Ip(address) => crate::rules::Host::Ip(address.ip()),
+            Address::Domain { host, .. } => crate::rules::Host::Name(host),
+        };
+        match self.rules.route(host, self.options.bypass_lan) {
             Route::Block => Plan::Block,
             Route::Proxy => Plan::Proxy,
             Route::Direct => match destination {

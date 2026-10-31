@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn messages_round_trip_and_reject_other_schemes() {
-        for message in [Message::Show, Message::Open("fiend://v1/abc".into())] {
+        for message in [Message::Show, Message::Open("fiend://abc".into())] {
             assert_eq!(Message::decode(&message.encode()), Some(message));
         }
         assert_eq!(Message::decode("open https://example.com"), None);
@@ -284,7 +284,7 @@ mod tests {
         let Role::Primary(mut receiver) = acquire(&path, &Message::Show) else {
             panic!("first instance is not primary");
         };
-        let link = Message::Open("fiend://v1/xyz".into());
+        let link = Message::Open("fiend://xyz".into());
         assert!(matches!(acquire(&path, &link), Role::Secondary));
         let got = futures::executor::block_on(async {
             let first = receiver.next().await;

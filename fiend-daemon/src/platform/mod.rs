@@ -21,7 +21,7 @@ pub type DnsAnswer = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct NetworkRequest {
-    pub server: SocketAddr,
+    pub servers: Vec<SocketAddr>,
     pub mtu: u16,
     pub ipv6: bool,
     pub bypass_lan: bool,

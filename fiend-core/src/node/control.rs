@@ -209,7 +209,11 @@ pub struct Client {
 impl Client {
     pub async fn connect(config: &ClientConfig) -> io::Result<Self> {
         let dial = async {
-            let stream = crate::net::dial(&config.server, &config.protect_socket).await?;
+            let server = config
+                .servers
+                .first()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no node address"))?;
+            let stream = crate::net::dial(server, &config.protect_socket).await?;
             stream.set_nodelay(true)?;
             let session = crate::transport::connect(stream, &config.secret, &config.template)
                 .await

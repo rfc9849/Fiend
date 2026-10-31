@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::logs::{LogBuffer, now_ms};
 use crate::machine::{Applied, EngineSettings, Machine};
 use crate::platform::{NetworkRequest, Platform};
-use crate::session::{app_profile, build_client, resolve_server, tun_options};
+use crate::session::{app_profile, build_client, resolve_servers, tun_options};
 use crate::store::Store;
 
 type Result<T> = std::result::Result<T, IpcError>;
@@ -242,11 +242,11 @@ impl<P: Platform> Inner<P> {
     ) -> std::result::Result<(), String> {
         let protect = self.platform.protect_socket();
         tracing::info!(profile = %profile.name, "tunnel start");
-        let server = tokio::select! {
+        let servers = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            server = resolve_server(&profile.server) => server?,
+            servers = resolve_servers(&profile.servers) => servers?,
         };
-        let client = build_client(profile, server, protect.clone())?;
+        let client = build_client(profile, &servers, protect.clone())?;
         let started = Instant::now();
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -269,7 +269,7 @@ impl<P: Platform> Inner<P> {
         let tun = Arc::new(tun);
 
         let request = NetworkRequest {
-            server,
+            servers,
             mtu: engine.mtu,
             ipv6: engine.ipv6,
             bypass_lan: engine.bypass_lan,
@@ -543,7 +543,7 @@ impl<P: Platform> Daemon<P> {
             .map_err(|reason| error(ErrorCode::InvalidProfile, reason))?;
         fiend_app::validate_profile(fiend_app::ProfileConfig {
             name: input.name.clone(),
-            server: input.server.clone(),
+            servers: input.servers.clone(),
             secret: input.secret.clone(),
             template_json: input.template_json.clone(),
         })
@@ -605,7 +605,7 @@ impl<P: Platform> Daemon<P> {
             .upsert_profile(ProfileInput {
                 id: None,
                 name: parsed.name,
-                server: parsed.server,
+                servers: parsed.servers,
                 secret: parsed.secret,
                 template_json: parsed.template_json,
                 tuning: Default::default(),

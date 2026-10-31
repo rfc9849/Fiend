@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn rule_files_are_inspected() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../fiend-tun/tests/data/geosite-2gis.srs")
+            .join("../fiend-rules/tests/data/geosite-2gis.srs")
             .to_string_lossy()
             .into_owned();
         let stats = inspect_rule_file(&path, RuleKind::Direct).unwrap();

@@ -121,10 +121,11 @@ internal class RoomProfileRepository @Inject constructor(
     override suspend fun import(link: String): Result<Profile> = withContext(Dispatchers.IO) {
         runCatching {
             val native = parseShareLink(link.trim())
-            val address = URI("tcp://${native.server}")
+            val address = URI("tcp://${native.servers.first()}")
             require(address.userInfo == null && address.host != null && address.port in 1..65535) { "Server address is not valid" }
             val templateId = templateId(native.templateJson)
-            upsert(Profile("", native.name, address.host.removeSurrounding("[", "]"), address.port, native.secret, templateId, templateJson = native.templateJson))
+            upsert(Profile("", native.name, address.host.removeSurrounding("[", "]"), address.port, native.secret, templateId,
+                templateJson = native.templateJson, moreServers = native.servers.drop(1)))
         }
     }
 
@@ -153,10 +154,12 @@ internal class RoomProfileRepository @Inject constructor(
     }
 
     private fun Profile.entity() = ProfileEntity(id, name, host, port, cipher.encrypt(id, secret), templateId, templateJson,
-        countryCode, latencyMs, lastConnectedAt, tuning.handshakeTimeoutMs, tuning.maxConnections, tuning.udpIdleMs, tuning.udpKeepaliveMs, tuning.maxUdpFlows)
+        countryCode, latencyMs, lastConnectedAt, tuning.handshakeTimeoutMs, tuning.maxConnections, tuning.udpIdleMs, tuning.udpKeepaliveMs, tuning.maxUdpFlows,
+        moreServers.joinToString("\n"))
     private fun ProfileEntity.model() = Profile(id, name, host, port, cipher.decrypt(id, encryptedSecret), templateId,
         templateJson = templateJson, countryCode = countryCode, latencyMs = latencyMs, lastConnectedAt = lastConnectedAt,
-        tuning = Tuning(handshakeTimeoutMs, maxConnections, udpIdleMs, udpKeepaliveMs, maxUdpFlows))
+        tuning = Tuning(handshakeTimeoutMs, maxConnections, udpIdleMs, udpKeepaliveMs, maxUdpFlows),
+        moreServers = moreServers.split('\n').filter { it.isNotBlank() })
 
     private companion object {
         const val CUSTOM = "custom-"

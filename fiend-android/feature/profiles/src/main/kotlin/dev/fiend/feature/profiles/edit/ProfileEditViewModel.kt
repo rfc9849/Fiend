@@ -21,14 +21,15 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class Field { Name, Host, Port, Secret, Handshake, Connections, UdpIdle, UdpKeepalive }
+enum class Field { Name, Host, Port, MoreServers, Secret, Handshake, Connections, UdpIdle, UdpKeepalive }
 
-enum class FieldError { Required, Port, Secret, Number, Keepalive }
+enum class FieldError { Required, Port, Servers, Secret, Number, Keepalive }
 
 data class ProfileForm(
     val name: String = "",
     val host: String = "",
     val port: String = "443",
+    val moreServers: String = "",
     val secret: String = "",
     val templateId: String = "",
     val templateJson: String? = null,
@@ -131,6 +132,7 @@ class ProfileEditViewModel @AssistedInject constructor(
                     name = f.name.trim(),
                     host = f.host.trim(),
                     port = f.port.toInt(),
+                    moreServers = serverList(f.moreServers),
                     secret = f.secret.trim().lowercase(),
                     templateId = f.templateId,
                     templateJson = f.templateJson ?: base.templateJson,
@@ -155,6 +157,7 @@ class ProfileEditViewModel @AssistedInject constructor(
         if (f.name.isBlank()) put(Field.Name, FieldError.Required)
         if (f.host.isBlank()) put(Field.Host, FieldError.Required)
         if (f.port.toIntOrNull()?.takeIf { it in 1..65535 } == null) put(Field.Port, FieldError.Port)
+        if (serverList(f.moreServers).any { !validServer(it) }) put(Field.MoreServers, FieldError.Servers)
         if (!HEX_SECRET.matches(f.secret.trim())) put(Field.Secret, FieldError.Secret)
         listOf(
             Field.Handshake to f.handshake,
@@ -175,6 +178,7 @@ class ProfileEditViewModel @AssistedInject constructor(
         name = name,
         host = host,
         port = port.toString(),
+        moreServers = moreServers.joinToString(", "),
         secret = secret,
         templateId = templateId,
         templateJson = templateJson,
@@ -186,5 +190,11 @@ class ProfileEditViewModel @AssistedInject constructor(
 
     private companion object {
         val HEX_SECRET = Regex("^[0-9a-fA-F]{64}$")
+        val SERVER = Regex("^(\\[[0-9a-fA-F:.]+\\]|[A-Za-z0-9._-]+):([0-9]{1,5})$")
+
+        fun serverList(text: String): List<String> = text.split(',', ' ', '\n', '\t').map(String::trim).filter(String::isNotEmpty)
+
+        fun validServer(server: String): Boolean =
+            SERVER.matchEntire(server)?.groupValues?.get(2)?.toIntOrNull()?.let { it in 1..65535 } == true
     }
 }

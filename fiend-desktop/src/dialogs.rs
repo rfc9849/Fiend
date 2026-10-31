@@ -10,10 +10,10 @@ use gpui_kit::{
 };
 
 use crate::app::{AppView, Page};
-use crate::model::ServiceState;
 use crate::design::{ButtonKind, MONO, Ui};
 use crate::format;
 use crate::menu::{MenuId, MenuOption};
+use crate::model::ServiceState;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ValueKind {
@@ -51,6 +51,7 @@ pub struct ProfileForm {
     pub name: Entity<InputState>,
     pub host: Entity<InputState>,
     pub port: Entity<InputState>,
+    pub more_servers: Entity<InputState>,
     pub secret: Entity<InputState>,
     pub tuning: [Entity<InputState>; 5],
     pub template: String,
@@ -299,6 +300,7 @@ impl AppView {
             form.name.read(cx).value().to_string(),
             form.host.read(cx).value().to_string(),
             form.port.read(cx).value().to_string(),
+            form.more_servers.read(cx).value().to_string(),
             form.secret.read(cx).value().to_string(),
             form.template_json.clone(),
         ];
@@ -560,13 +562,21 @@ impl AppView {
     ) {
         let existing = id.as_deref().and_then(|id| self.model.profile(id)).cloned();
         let templates = template_options();
-        let (name, host, port, secret, tuning, template_json) = match &existing {
+        let (name, host, port, more, secret, tuning, template_json) = match &existing {
             Some(profile) => {
-                let (host, port) = format::host_port(&profile.server);
+                let first = profile.servers.first().cloned().unwrap_or_default();
+                let (host, port) = format::host_port(&first);
                 (
                     profile.name.clone(),
                     host,
                     port,
+                    profile
+                        .servers
+                        .iter()
+                        .skip(1)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     profile.secret.clone(),
                     profile.tuning,
                     profile.template_json.clone(),
@@ -576,6 +586,7 @@ impl AppView {
                 String::new(),
                 String::new(),
                 "443".to_owned(),
+                String::new(),
                 String::new(),
                 Tuning::default(),
                 templates.first().map(|t| t.2.clone()).unwrap_or_default(),
@@ -591,6 +602,7 @@ impl AppView {
             name: self.new_input(&name, "Home server", false, window, cx),
             host: self.new_input(&host, "vpn.example.com", false, window, cx),
             port: self.new_input(&port, "443", false, window, cx),
+            more_servers: self.new_input(&more, "node2.example.com:443", false, window, cx),
             secret: self.new_input(&secret, "", true, window, cx),
             tuning: [
                 self.new_input(
@@ -631,7 +643,7 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let text = link.unwrap_or_default();
-        let state = self.new_textarea(&text, "fiend://v1/…", window, cx);
+        let state = self.new_textarea(&text, "fiend://…", window, cx);
         let focus = state.read(cx).focus_handle(cx);
         self.dialog = Some(Dialog::Import(ImportForm {
             link: state,
@@ -654,7 +666,7 @@ impl AppView {
                 Ok(Reply::Link { link }) => {
                     let (qr, note) = match qrcode::QrCode::with_error_correction_level(
                         link.as_bytes(),
-                        qrcode::EcLevel::L,
+                        qrcode::EcLevel::M,
                     ) {
                         Ok(code) => {
                             let width = code.width();
@@ -787,6 +799,7 @@ impl AppView {
         let name = read(&form.name).trim().to_owned();
         let host = read(&form.host).trim().to_owned();
         let port = read(&form.port);
+        let more = read(&form.more_servers);
         let secret = read(&form.secret).trim().to_owned();
         let values: Vec<String> = form.tuning.iter().map(read).collect();
         let mut errors: HashMap<&'static str, String> = HashMap::new();
@@ -800,6 +813,22 @@ impl AppView {
         }
         if parse_port(&port).is_none() {
             errors.insert("port", "Enter a port from 1 to 65535.".into());
+        }
+        let mut servers = vec![format::join_host_port(&host, port.trim())];
+        if !more.trim().is_empty() {
+            match fiend_app::parse_servers(&more) {
+                Ok(list) => servers.extend(list),
+                Err(error) => {
+                    errors.insert("more_servers", error.to_string());
+                }
+            }
+        }
+        if !errors.contains_key("host")
+            && !errors.contains_key("port")
+            && !errors.contains_key("more_servers")
+            && let Err(error) = fiend_app::check_servers(&servers)
+        {
+            errors.insert("more_servers", error.to_string());
         }
         if !is_hex_secret(&secret) {
             errors.insert("secret", "Enter 64 hexadecimal characters.".into());
@@ -846,7 +875,7 @@ impl AppView {
         let input = ProfileInput {
             id: form.id.clone(),
             name,
-            server: format::join_host_port(&host, port.trim()),
+            servers,
             secret,
             template_json,
             tuning: tuning.unwrap_or_default(),
@@ -1617,6 +1646,14 @@ impl AppView {
                     self.input_box(ui, &form.host, window, cx, err("host").is_some(), false);
                 let port_box =
                     self.input_box(ui, &form.port, window, cx, err("port").is_some(), true);
+                let more_box = self.input_box(
+                    ui,
+                    &form.more_servers,
+                    window,
+                    cx,
+                    err("more_servers").is_some(),
+                    false,
+                );
                 let content = div()
                     .child(self.field(ui, "Profile name", name_box, err("name"), None))
                     .child(
@@ -1638,6 +1675,13 @@ impl AppView {
                                 None,
                             ))),
                     )
+                    .child(self.field(
+                        ui,
+                        "More servers",
+                        more_box,
+                        err("more_servers"),
+                        Some("Optional. host:port values, separated by commas. The app uses the fastest server and changes to the next server if one fails."),
+                    ))
                     .child(
                         self.field(
                             ui,
@@ -2170,11 +2214,18 @@ impl AppView {
                         "Updating…",
                     ),
                 };
-                let content = div()
-                    .child(ui.notice("info", notice, false))
-                    .when_some(service.error.clone(), |this, error| {
-                        this.child(div().mt(px(12.)).text_size(px(11.)).text_color(p.danger).child(error))
-                    });
+                let content = div().child(ui.notice("info", notice, false)).when_some(
+                    service.error.clone(),
+                    |this, error| {
+                        this.child(
+                            div()
+                                .mt(px(12.))
+                                .text_size(px(11.))
+                                .text_color(p.danger)
+                                .child(error),
+                        )
+                    },
+                );
                 let actions = self.actions(
                     ui,
                     None,

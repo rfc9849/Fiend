@@ -11,7 +11,7 @@ import org.junit.Test
 class QrCodeTest {
     @Test
     fun realQrDecodesToTheOriginalLink() {
-        val link = "fiend://v1/test-payload"
+        val link = "fiend://eJwrSS0u0U9KzAEAEdMDkg"
         val matrix = qrMatrix(link)!!
         val scale = 8
         val width = matrix.width * scale

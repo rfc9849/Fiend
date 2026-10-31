@@ -229,11 +229,7 @@ impl Tunnel {
         let runtime = runtime()?;
         logging::initialize(runtime);
         let mut config = profile::client_config(&profile)?;
-        if config.server.parse::<SocketAddr>().is_err() {
-            return Err(engine_error(
-                "Use a numeric server address to prevent bootstrap DNS leaks",
-            ));
-        }
+        numeric_servers(&config)?;
         config.handshake_timeout = Duration::from_millis(options.handshake_timeout_ms);
         config.max_connections = options.max_connections as usize;
         config.udp_idle = Duration::from_millis(options.udp_idle_ms);
@@ -419,7 +415,7 @@ mod tests {
     fn profile() -> ProfileConfig {
         ProfileConfig {
             name: "Local test".into(),
-            server: "127.0.0.1:443".into(),
+            servers: vec!["127.0.0.1:443".into()],
             secret: "42".repeat(32),
             template_json: bundled_templates().remove(0).template_json,
         }
@@ -500,21 +496,30 @@ mod tests {
                 address
             });
         let mut profile = profile();
-        profile.server = address.to_string();
+        profile.servers = vec![address.to_string()];
         assert!(measure_latency(profile).unwrap() < 10000);
         assert_eq!(runtime().unwrap().metrics().num_workers(), 3);
     }
+}
+
+fn numeric_servers(config: &fiend_core::client::ClientConfig) -> Result<(), FiendError> {
+    if config
+        .servers
+        .iter()
+        .any(|server| server.parse::<SocketAddr>().is_err())
+    {
+        return Err(engine_error(
+            "Use numeric server addresses to prevent bootstrap DNS leaks",
+        ));
+    }
+    Ok(())
 }
 
 #[uniffi::export]
 pub fn measure_latency(profile: ProfileConfig) -> Result<u32, FiendError> {
     let profile: fiend_app::ProfileConfig = profile.into();
     let config = fiend_app::client_config(&profile)?;
-    if config.server.parse::<SocketAddr>().is_err() {
-        return Err(engine_error(
-            "Use a numeric server address to prevent bootstrap DNS leaks",
-        ));
-    }
+    numeric_servers(&config)?;
     let hook = logging::platform()
         .map(protect)
         .unwrap_or_else(|| Arc::new(|_| Ok(())));
