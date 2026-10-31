@@ -2638,6 +2638,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ts-rs",
+ "ureq",
  "zeroize",
 ]
 

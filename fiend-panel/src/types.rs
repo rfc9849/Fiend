@@ -67,6 +67,7 @@ pub struct LocalNodeDefaults {
     pub origin_host: String,
     pub origin_port: u16,
     pub users: usize,
+    pub address: Option<String>,
     pub error: Option<String>,
 }
 

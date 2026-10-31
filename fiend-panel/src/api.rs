@@ -145,6 +145,9 @@ async fn local_defaults(
         origin_host: "www.wikipedia.org".into(),
         origin_port: 443,
         users: 0,
+        address: crate::address::detect()
+            .await
+            .map(|address| address.to_string()),
         error: None,
     };
     match settings {

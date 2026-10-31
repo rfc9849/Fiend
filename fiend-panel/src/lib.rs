@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod address;
 pub mod api;
 pub mod auth;
 pub mod bundle;

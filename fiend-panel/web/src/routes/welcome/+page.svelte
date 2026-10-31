@@ -39,6 +39,7 @@
     try {
       [defaults, presets] = await Promise.all([api.get<LocalNodeDefaults>('/wizard/local'), api.get<PresetView[]>('/disguises/presets')]);
       originHost = defaults.origin_host;
+      if (defaults.address && !address) address = defaults.address;
       originPort = String(defaults.origin_port);
       if (originHost !== 'www.wikipedia.org') {
         preset = 'file';
@@ -174,7 +175,7 @@
       {:else}
         <div class="grid-2">
           <Field label="Name" id="name" error={fields.name}><input id="name" bind:value={nodeName} /></Field>
-          <Field label="Public address" id="address" error={fields.address} help="Clients connect to this IP address or host name."><input id="address" inputmode="url" placeholder="203.0.113.10" bind:value={address} /></Field>
+          <Field label="Public address" id="address" error={fields.address} help={defaults?.address ? 'Found automatically. Change it if clients use a different IP address or host name.' : 'Clients connect to this IP address or host name.'}><input id="address" inputmode="url" placeholder="203.0.113.10" bind:value={address} /></Field>
         </div>
       {/if}
       <div class="row end"><Button kind="primary" type="submit" {busy} disabled={!defaults?.available && !localNode}>Next</Button></div>
