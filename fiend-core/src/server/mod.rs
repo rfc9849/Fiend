@@ -15,8 +15,6 @@ use crate::target::{self, TargetPolicy};
 use crate::transport::{self, FreshnessCheck, OriginProfile, Session};
 use crate::udp;
 
-const UDP_BUFFER: usize = u16::MAX as usize;
-
 #[derive(Clone)]
 pub struct ServerConfig {
     pub secret: Vec<u8>,
@@ -235,7 +233,7 @@ impl Server {
                             return Ok(());
                         };
                         tokio::select! {
-                            result = serve_mux(*session, config, Some(entry)) => result?,
+                            result = serve_mux(*session, config, Some((entry, node.clone()))) => result?,
                             _ = guard.revoked() => {},
                         }
                     }
@@ -250,7 +248,7 @@ impl Server {
 async fn serve_mux(
     session: Session<TcpStream>,
     config: ServerConfig,
-    user: Option<Arc<crate::node::UserEntry>>,
+    user: Option<(Arc<crate::node::UserEntry>, crate::node::Node)>,
 ) -> mux::Result<()> {
     let mut connection = ServerConnection::handshake(session, &config.mux).await?;
     let mut lanes = tokio::task::JoinSet::new();
@@ -258,19 +256,82 @@ async fn serve_mux(
         tokio::select! {
             incoming = connection.accept() => {
                 let Some(mut incoming) = incoming? else { return Ok(()); };
-                if let Some(user) = &user {
+                let mut node = None;
+                if let Some((user, managed)) = &user {
                     if !user.active(crate::node::unix_time()) { return Ok(()); }
                     let user = user.clone();
                     incoming = incoming.with_meter(Arc::new(move |count, inbound| user.note_bytes(count, inbound)));
+                    node = Some(managed.clone());
                 }
                 let config = config.clone();
                 lanes.spawn(async move {
-                    if let Err(error) = handle_incoming(incoming, config).await {
+                    let result = match node {
+                        Some(node) => handle_routed(incoming, config, node).await,
+                        None => handle_incoming(incoming, config).await,
+                    };
+                    if let Err(error) = result {
                         tracing::debug!(%error, "lane handler failed");
                     }
                 });
             }
             _ = lanes.join_next(), if !lanes.is_empty() => {},
+        }
+    }
+}
+
+fn reject_for(incoming: Incoming, error: &io::Error) {
+    let status = match error.kind() {
+        io::ErrorKind::PermissionDenied => http::StatusCode::FORBIDDEN,
+        io::ErrorKind::TimedOut => http::StatusCode::GATEWAY_TIMEOUT,
+        _ => http::StatusCode::BAD_GATEWAY,
+    };
+    incoming.reject(status);
+}
+
+async fn handle_routed(
+    incoming: Incoming,
+    config: ServerConfig,
+    node: crate::node::Node,
+) -> mux::Result<()> {
+    use std::sync::atomic::Ordering;
+    let router = node.router();
+    let context = node.outbound_context(config.target, config.mux.target_timeout);
+    let target = incoming.address.clone();
+    match incoming.kind {
+        LaneKind::Tcp => {
+            let runtime = router.route(&target);
+            tracing::debug!(outbound = %runtime.config.id, authority = %target, "routed TCP lane");
+            let mut upstream = match runtime.connect_tcp(&target, &context).await {
+                Ok(upstream) => {
+                    crate::node::outbound::Metered::new(upstream, runtime.counters.clone())
+                }
+                Err(error) => {
+                    tracing::debug!(outbound = %runtime.config.id, %error, "outbound connect failed");
+                    reject_for(incoming, &error);
+                    return Ok(());
+                }
+            };
+            let mut lane = incoming.accept().await?;
+            let _ = tokio::io::copy_bidirectional(&mut lane, &mut upstream).await;
+            Ok(())
+        }
+        LaneKind::Udp => {
+            let Some(runtime) = router.udp_route(&target) else {
+                incoming.reject(http::StatusCode::FORBIDDEN);
+                return Ok(());
+            };
+            let path = match runtime.open_udp(&target, &context).await {
+                Ok(path) => path,
+                Err(error) => {
+                    reject_for(incoming, &error);
+                    return Ok(());
+                }
+            };
+            let lane = incoming.accept().await?;
+            let (up, down) = bridge_udp(lane, path, config.udp_idle).await?;
+            runtime.counters.up.fetch_add(up, Ordering::Relaxed);
+            runtime.counters.down.fetch_add(down, Ordering::Relaxed);
+            Ok(())
         }
     }
 }
@@ -306,7 +367,13 @@ async fn handle_udp(incoming: Incoming, config: &ServerConfig) -> mux::Result<()
         }
     };
     let lane = incoming.accept().await?;
-    bridge_udp(lane, socket, config.udp_idle).await?;
+    let socket = Arc::new(socket);
+    let path = crate::node::outbound::UdpPath {
+        tx: crate::node::outbound::UdpTx::Socket(socket.clone()),
+        rx: crate::node::outbound::UdpRx::Socket(socket),
+        guard: None,
+    };
+    bridge_udp(lane, path, config.udp_idle).await?;
     Ok(())
 }
 
@@ -330,23 +397,30 @@ async fn connect_udp(address: &Address, policy: TargetPolicy) -> io::Result<UdpS
 
 async fn bridge_udp(
     lane: crate::mux::H2Lane,
-    socket: UdpSocket,
+    path: crate::node::outbound::UdpPath,
     idle_timeout: Duration,
-) -> io::Result<()> {
+) -> io::Result<(u64, u64)> {
+    let crate::node::outbound::UdpPath {
+        mut tx,
+        mut rx,
+        guard,
+    } = path;
+    let _guard = guard;
     let (mut read, mut write) = split(lane);
-    let socket = Arc::new(socket);
     let activity = Arc::new(AtomicU64::new(0));
+    let sent = AtomicU64::new(0);
+    let received = AtomicU64::new(0);
     let epoch = Instant::now();
 
-    let lane_socket = socket.clone();
     let lane_activity = activity.clone();
-    let lane_to_socket = async move {
+    let lane_to_socket = async {
         loop {
             match udp::read_frame(&mut read).await {
                 Ok(Some(payload)) => {
-                    if lane_socket.send(&payload).await.is_err() {
+                    if tx.send(&payload).await.is_err() {
                         break;
                     }
+                    sent.fetch_add(payload.len() as u64, Ordering::Relaxed);
                     touch(&lane_activity, epoch);
                 }
                 Ok(None) => touch(&lane_activity, epoch),
@@ -355,17 +429,16 @@ async fn bridge_udp(
         }
     };
 
-    let socket_lane = socket.clone();
     let socket_activity = activity.clone();
-    let socket_to_lane = async move {
-        let mut buffer = vec![0u8; UDP_BUFFER];
-        while let Ok((length, source)) = socket_lane.recv_from(&mut buffer).await {
-            if udp::write_response(&mut write, &Address::Ip(source), &buffer[..length])
+    let socket_to_lane = async {
+        while let Ok(Some((source, payload))) = rx.recv().await {
+            if udp::write_response(&mut write, &source, &payload)
                 .await
                 .is_err()
             {
                 break;
             }
+            received.fetch_add(payload.len() as u64, Ordering::Relaxed);
             touch(&socket_activity, epoch);
         }
     };
@@ -389,7 +462,10 @@ async fn bridge_udp(
         _ = socket_to_lane => {}
         _ = idle => {}
     }
-    Ok(())
+    Ok((
+        sent.load(Ordering::Relaxed),
+        received.load(Ordering::Relaxed),
+    ))
 }
 
 fn elapsed_ms(epoch: Instant) -> u64 {

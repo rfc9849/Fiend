@@ -1,8 +1,14 @@
 pub mod control;
 pub mod logs;
 pub mod metrics;
+pub mod outbound;
 pub mod update;
 mod usage;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod warp;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[path = "warp_stub.rs"]
+pub mod warp;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -65,6 +71,12 @@ pub struct DesiredState {
     pub origin_host: String,
     pub origin_port: u16,
     pub origin_profile: OriginProfile,
+    #[serde(default)]
+    pub outbounds: Vec<outbound::Outbound>,
+    #[serde(default)]
+    pub rules: Vec<outbound::Rule>,
+    #[serde(default)]
+    pub warp: outbound::WarpSettings,
 }
 
 impl DesiredState {
@@ -84,6 +96,9 @@ impl DesiredState {
             origin_host: config.origin_host.clone(),
             origin_port: config.origin_port,
             origin_profile: config.origin.clone(),
+            outbounds: Vec::new(),
+            rules: Vec::new(),
+            warp: outbound::WarpSettings::default(),
         }
     }
 
@@ -99,6 +114,7 @@ impl DesiredState {
         if self.origin_profile.record_sizes.len() > 64 || self.origin_host.len() > 253 {
             return Err(invalid("origin profile is too large"));
         }
+        outbound::validate(&self.outbounds, &self.rules, &self.warp)?;
         let mut ids = HashSet::new();
         let mut secrets = HashSet::new();
         secrets.insert(control_secret.to_vec());
@@ -169,6 +185,7 @@ struct Counters {
 struct Snapshot {
     state: DesiredState,
     users: Vec<Arc<UserEntry>>,
+    router: Arc<outbound::Router>,
 }
 
 pub enum Principal {
@@ -198,6 +215,8 @@ struct Inner {
     updates: tokio::sync::Mutex<Option<update::Manager>>,
     restart: tokio::sync::Notify,
     origin_cache: Mutex<Option<(u64, OriginProfile)>>,
+    warp: warp::Manager,
+    resolver: Mutex<Option<outbound::Resolver>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -224,6 +243,8 @@ pub struct Stats {
     pub users: Vec<UserStats>,
     pub handshakes_accepted: u64,
     pub handshakes_origin: u64,
+    #[serde(default)]
+    pub outbounds: Vec<outbound::OutboundStats>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -241,6 +262,20 @@ impl Node {
         path: impl AsRef<Path>,
         control_secret: Vec<u8>,
         initial: DesiredState,
+    ) -> io::Result<Self> {
+        Self::load_with(
+            path,
+            control_secret,
+            initial,
+            PathBuf::from("/opt/fiend/bin/wireproxy"),
+        )
+    }
+
+    pub fn load_with(
+        path: impl AsRef<Path>,
+        control_secret: Vec<u8>,
+        initial: DesiredState,
+        wireproxy: PathBuf,
     ) -> io::Result<Self> {
         if control_secret.len() != 32 {
             return Err(invalid("control secret must have 32 bytes"));
@@ -278,6 +313,14 @@ impl Node {
                 updates: tokio::sync::Mutex::new(None),
                 restart: tokio::sync::Notify::new(),
                 origin_cache: Mutex::new(None),
+                warp: warp::Manager::new(
+                    path.parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .unwrap_or(Path::new("."))
+                        .join("warp"),
+                    wireproxy,
+                ),
+                resolver: Mutex::new(None),
             }),
         };
         node.restore_usage()?;
@@ -410,6 +453,45 @@ impl Node {
         self.snapshot().state.clone()
     }
 
+    pub fn router(&self) -> Arc<outbound::Router> {
+        self.snapshot().router.clone()
+    }
+
+    pub fn warp(&self) -> &warp::Manager {
+        &self.inner.warp
+    }
+
+    pub fn outbound_context(
+        &self,
+        policy: crate::target::TargetPolicy,
+        timeout: std::time::Duration,
+    ) -> outbound::Context {
+        outbound::Context {
+            policy,
+            timeout,
+            warp: self.inner.warp.socks(),
+            resolver: self
+                .inner
+                .resolver
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone(),
+        }
+    }
+
+    pub fn set_resolver(&self, resolver: Option<outbound::Resolver>) {
+        *self
+            .inner
+            .resolver
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = resolver;
+    }
+
+    pub async fn start_warp(&self) {
+        let settings = self.snapshot().state.warp.clone();
+        self.inner.warp.apply(settings).await;
+    }
+
     pub fn authenticate(&self, body: &[u8], time: i64) -> Option<(Vec<u8>, Principal)> {
         if body.len() < 71 || body[0] != 1 || body[38] != 32 {
             return None;
@@ -492,7 +574,28 @@ impl Node {
                 entry.revoked.send_replace(true);
             }
         }
+        for runtime in old.router.runtimes() {
+            if !next
+                .router
+                .runtimes()
+                .iter()
+                .any(|new| Arc::ptr_eq(new, runtime))
+                && let Some(client) = runtime.client()
+            {
+                client.close();
+            }
+        }
+        let warp_changed = old.state.warp != next.state.warp;
+        let warp_settings = next.state.warp.clone();
         *live = Arc::new(next);
+        drop(live);
+        if warp_changed {
+            let node = self.clone();
+            tokio::spawn(async move {
+                node.inner.warp.apply(warp_settings).await;
+            });
+        }
+        let live = self.snapshot();
         if live.state.origin_profile.record_sizes.is_empty() {
             let node = self.clone();
             tokio::spawn(async move {
@@ -573,6 +676,7 @@ impl Node {
             users,
             handshakes_accepted: self.inner.accepted.swap(0, Ordering::Relaxed),
             handshakes_origin: self.inner.origin.swap(0, Ordering::Relaxed),
+            outbounds: snapshot.router.stats(),
         }
     }
 
@@ -707,7 +811,16 @@ fn build_snapshot(state: DesiredState, old: Option<&Snapshot>) -> io::Result<Sna
             revoked,
         }));
     }
-    Ok(Snapshot { state, users })
+    let router = Arc::new(outbound::Router::build(
+        &state.outbounds,
+        &state.rules,
+        old.map(|old| old.router.as_ref()),
+    )?);
+    Ok(Snapshot {
+        state,
+        users,
+        router,
+    })
 }
 
 pub fn decode_secret(text: &str) -> io::Result<Zeroizing<Vec<u8>>> {
@@ -724,7 +837,7 @@ pub fn save_state(path: &Path, state: &DesiredState) -> io::Result<()> {
     save_private(path, &raw)
 }
 
-fn save_private(path: &Path, raw: &[u8]) -> io::Result<()> {
+pub(crate) fn save_private(path: &Path, raw: &[u8]) -> io::Result<()> {
     if raw.len() > MAX_STATE_BYTES {
         return Err(invalid("saved document is too large"));
     }

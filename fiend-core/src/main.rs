@@ -148,8 +148,13 @@ async fn run_node(args: &[String]) -> Result<(), String> {
         .map_err(|_| "cannot read control secret")?;
     let secret = decode_secret(&secret).map_err(|error| error.to_string())?;
     let initial = DesiredState::from_legacy(&settings.config);
-    let node = Node::load(&settings.node.state_file, secret.to_vec(), initial)
-        .map_err(|error| format!("node state: {error}"))?;
+    let node = Node::load_with(
+        &settings.node.state_file,
+        secret.to_vec(),
+        initial,
+        settings.node.wireproxy.clone(),
+    )
+    .map_err(|error| format!("node state: {error}"))?;
     let listener =
         net::bind_listener(settings.listen).map_err(|error| format!("listen: {error}"))?;
     node.configure_updates(
@@ -158,11 +163,17 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     )
     .await;
     let server = Server::managed(settings.config, node.clone());
+    {
+        let node = node.clone();
+        tokio::spawn(async move { node.start_warp().await });
+    }
+    let warp = node.warp().clone();
     tracing::info!(listen = %listener.local_addr().map_err(|error| error.to_string())?, "node started");
     tokio::select! {
         result = server.serve(listener) => result.map_err(|error| format!("node: {error}"))?,
         result = control::serve_unix(&settings.node.control_socket, node.clone()) => result.map_err(|error| format!("control socket: {error}"))?,
         _ = node.maintain_usage() => {},
+        _ = warp.maintain() => {},
         _ = node.wait_for_restart() => tracing::info!("binary update restart requested"),
         _ = shutdown_signal() => tracing::info!("shutdown signal received"),
     }

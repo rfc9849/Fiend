@@ -51,6 +51,7 @@ pub struct NodeSettings {
     pub control_secret_file: PathBuf,
     pub control_socket: PathBuf,
     pub updates_dir: PathBuf,
+    pub wireproxy: PathBuf,
 }
 
 impl Default for NodeSettings {
@@ -60,6 +61,7 @@ impl Default for NodeSettings {
             control_secret_file: PathBuf::from("/etc/fiend/control.secret"),
             control_socket: PathBuf::from("/run/fiend/control.sock"),
             updates_dir: PathBuf::from("/var/lib/fiend/updates"),
+            wireproxy: PathBuf::from("/opt/fiend/bin/wireproxy"),
         }
     }
 }
@@ -76,7 +78,11 @@ pub fn load_client(path: impl AsRef<Path>) -> Result<ClientSettings, ConfigError
     let servers = match (file.server, file.servers) {
         (Some(server), None) => vec![server],
         (None, Some(servers)) => servers,
-        _ => return Err(invalid("client server is required: set either server or servers")),
+        _ => {
+            return Err(invalid(
+                "client server is required: set either server or servers",
+            ));
+        }
     };
 
     let secret = load_secret(base, file.secret, file.secret_file)?;
@@ -162,14 +168,21 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     config.tcp_notsent_lowat = socket_size(file.tcp_notsent_lowat, "server", "tcp_notsent_lowat")?;
 
     let mut node = file.node;
+    let node_base = std::fs::canonicalize(if base.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        base
+    })
+    .unwrap_or_else(|_| base.to_path_buf());
     for path in [
         &mut node.state_file,
         &mut node.control_secret_file,
         &mut node.control_socket,
         &mut node.updates_dir,
+        &mut node.wireproxy,
     ] {
         if path.is_relative() {
-            *path = base.join(&path);
+            *path = node_base.join(&path);
         }
     }
     Ok(ServerSettings {

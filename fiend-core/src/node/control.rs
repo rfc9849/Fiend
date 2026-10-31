@@ -13,7 +13,7 @@ use super::{DesiredState, MAX_STATE_BYTES, Node, PROTOCOL_VERSION};
 use crate::client::ClientConfig;
 
 pub const CONTROL_PATH: &str = "/_fiend/control/v1";
-const CALL_TIMEOUT: Duration = Duration::from_secs(15);
+const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_CALLS: usize = 16;
 
 #[derive(Serialize, Deserialize)]
@@ -35,13 +35,30 @@ pub enum Call {
     Health,
     ApplyState(DesiredState),
     Stats,
-    Sessions { user_id: String },
-    KillSessions { user_id: String },
-    ProbeOrigin,
-    Logs { limit: usize },
+    Sessions {
+        user_id: String,
+    },
+    KillSessions {
+        user_id: String,
+    },
+    ProbeOrigin {
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        port: Option<u16>,
+    },
+    Logs {
+        limit: usize,
+    },
+    WarpStatus,
+    WarpRegister,
+    WarpRotate,
+    WarpDelete,
     UpdateBegin(super::update::Begin),
     UpdateChunk(super::update::Chunk),
-    UpdateFinish { upload_id: String },
+    UpdateFinish {
+        upload_id: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,20 +105,39 @@ async fn dispatch(node: Node, request: Request) -> Response {
             Call::KillSessions { user_id } => {
                 Ok(serde_json::json!({"closed": node.kill_sessions(&user_id)}))
             }
-            Call::ProbeOrigin => {
+            Call::ProbeOrigin { host, port } => {
                 let state = node.desired_state();
-                let hello = crate::transport::build_probe_hello(&state.origin_host);
-                match crate::transport::probe_origin_at(
-                    &state.origin_host,
-                    state.origin_port,
-                    &hello,
-                )
-                .await
-                {
-                    Ok(profile) => serde_json::to_value(profile).map_err(io::Error::other),
-                    Err(_) => Err(io::Error::other("origin probe failed")),
+                let host = host.unwrap_or(state.origin_host);
+                let port = port.unwrap_or(state.origin_port);
+                if host.is_empty() || host.len() > 253 || port == 0 {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid origin",
+                    ))
+                } else {
+                    let hello = crate::transport::build_probe_hello(&host);
+                    match crate::transport::probe_origin_at(&host, port, &hello).await {
+                        Ok(profile) => serde_json::to_value(profile).map_err(io::Error::other),
+                        Err(error) => {
+                            Err(io::Error::other(format!("origin probe failed: {error}")))
+                        }
+                    }
                 }
             }
+            Call::WarpStatus => {
+                serde_json::to_value(node.warp().status().await).map_err(io::Error::other)
+            }
+            Call::WarpRegister => {
+                detached(node, |node| async move { node.warp().register().await })
+                    .await
+                    .and_then(|status| serde_json::to_value(status).map_err(io::Error::other))
+            }
+            Call::WarpRotate => detached(node, |node| async move { node.warp().rotate().await })
+                .await
+                .and_then(|rotation| serde_json::to_value(rotation).map_err(io::Error::other)),
+            Call::WarpDelete => detached(node, |node| async move { node.warp().delete().await })
+                .await
+                .map(|()| serde_json::json!({"deleted": true})),
         }
     };
     let (result, error) = match result {
@@ -114,6 +150,17 @@ async fn dispatch(node: Node, request: Request) -> Response {
         result,
         error,
     }
+}
+
+async fn detached<T, F, Fut>(node: Node, operation: F) -> io::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Node) -> Fut,
+    Fut: std::future::Future<Output = io::Result<T>> + Send + 'static,
+{
+    tokio::spawn(operation(node))
+        .await
+        .map_err(io::Error::other)?
 }
 
 pub async fn serve<S>(stream: S, node: Node) -> io::Result<()>

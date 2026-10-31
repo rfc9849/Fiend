@@ -725,10 +725,7 @@ mod tests {
         assert_eq!(rules.route(ip("10.0.0.1:80"), true), Route::Direct);
         assert_eq!(rules.route(ip("10.0.0.1:80"), false), Route::Proxy);
         assert_eq!(rules.route(domain("both.example"), true), Route::Block);
-        assert_eq!(
-            rules.route(domain("www.both.example"), false),
-            Route::Block
-        );
+        assert_eq!(rules.route(domain("www.both.example"), false), Route::Block);
         assert_eq!(rules.route(ip("8.8.8.8:53"), false), Route::Direct);
         assert_eq!(rules.route(domain("other.example"), true), Route::Proxy);
     }
@@ -932,7 +929,11 @@ mod match_tests {
 
     #[test]
     fn rule_lists_match_domains_and_addresses() {
-        let list = parse_list("domain:example.com\nfull:exact.test\nkeyword:tracker\nip:10.0.0.0/8", true).unwrap();
+        let list = parse_list(
+            "domain:example.com\nfull:exact.test\nkeyword:tracker\nip:10.0.0.0/8",
+            true,
+        )
+        .unwrap();
         let domain = Host::Name;
         assert!(list.matches(domain("a.example.com")));
         assert!(list.matches(domain("Example.COM.")));
