@@ -23,8 +23,13 @@ async fn main() -> ExitCode {
 }
 
 fn print_access(config: &Config) {
-    println!("ssh -N -L 8080:127.0.0.1:{} <host>", config.listen.port());
-    println!("http://127.0.0.1:8080/setup/{}", config.setup_token);
+    let port = config.listen.port();
+    if config.listen.ip().is_loopback() {
+        println!("ssh -N -L 8080:127.0.0.1:{port} <host>");
+        println!("http://127.0.0.1:8080/setup/{}", config.setup_token);
+    } else {
+        println!("http://<host>:{port}/setup/{}", config.setup_token);
+    }
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {

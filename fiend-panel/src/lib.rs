@@ -70,8 +70,8 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.listen.ip() != Ipv4Addr::LOCALHOST || self.listen.port() == 0 {
-            return Err("panel listen must be 127.0.0.1 with a nonzero port".into());
+        if self.listen.port() == 0 {
+            return Err("panel listen must have a nonzero port".into());
         }
         if self.setup_token.len() != 64 || !self.setup_token.bytes().all(|b| b.is_ascii_hexdigit())
         {
@@ -84,7 +84,7 @@ impl Config {
         if path.exists() {
             return Self::load(path);
         }
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| e.to_string())?;
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
         let config = Self {
             listen: listener.local_addr().map_err(|e| e.to_string())?,
             setup_token: hex::encode(rand::random::<[u8; 32]>()),
@@ -345,17 +345,43 @@ fn asset(path: &str) -> Response {
 }
 
 pub fn valid_host(host: &str) -> bool {
-    let Some((name, port)) = host.split_once(':') else {
-        return false;
+    let (name_ok, port) = if let Some(rest) = host.strip_prefix('[') {
+        let Some((address, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let port = match after {
+            "" => None,
+            _ => match after.strip_prefix(':') {
+                Some(port) => Some(port),
+                None => return false,
+            },
+        };
+        (address.parse::<std::net::Ipv6Addr>().is_ok(), port)
+    } else {
+        let (name, port) = match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        };
+        let name_ok = !name.is_empty()
+            && name.len() <= 253
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-');
+        (name_ok, port)
     };
-    matches!(name, "127.0.0.1" | "localhost")
-        && !port.is_empty()
-        && port.bytes().all(|byte| byte.is_ascii_digit())
-        && port.parse::<u16>().is_ok_and(|port| port != 0)
+    name_ok
+        && port.is_none_or(|port| {
+            !port.is_empty()
+                && port.bytes().all(|byte| byte.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|port| port != 0)
+        })
 }
 
 fn valid_origin(origin: &str, host: &str) -> bool {
-    origin == format!("http://{host}")
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|rest| rest == host)
 }
 
 async fn security(request: Request, next: Next) -> Response {

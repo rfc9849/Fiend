@@ -159,6 +159,6 @@ fi
 printf '%s\n' 'Server package installed.'
 if [ "$MODE" = panel ]; then
     printf '%s\n' "$ACCESS" | sed "s/<host>/$(hostname)/"
-    printf '%s\n' 'Open the panel only through the SSH tunnel. The setup link works one time and for one hour.'
+    printf '%s\n' 'The setup link works one time and for one hour. Open the panel port in the firewall, or use an SSH tunnel or a reverse proxy.'
     printf '%s\n' 'New setup link: sudo /opt/fiend/bin/fiend-panel renew-setup /etc/fiend/panel.toml && sudo systemctl restart fiend-panel'
 fi

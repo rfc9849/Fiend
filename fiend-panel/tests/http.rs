@@ -30,40 +30,55 @@ fn config(dir: &std::path::Path) -> Config {
 }
 
 #[test]
-fn loopback_only() {
-    let dir = temp("loopback");
+fn listen_address() {
+    let dir = temp("listen");
+    for address in ["0.0.0.0:0", "127.0.0.1:0", "[::]:0"] {
+        let mut config = config(&dir);
+        config.listen = address.parse::<SocketAddr>().unwrap();
+        assert!(config.validate().is_err(), "{address}");
+    }
     for address in [
         "0.0.0.0:8080",
         "192.168.1.1:8080",
         "[::]:8080",
         "[::1]:8080",
-        "127.0.0.2:8080",
-        "127.0.0.1:0",
+        "127.0.0.1:8080",
     ] {
         let mut config = config(&dir);
         config.listen = address.parse::<SocketAddr>().unwrap();
-        assert!(config.validate().is_err(), "{address}");
+        assert!(config.validate().is_ok(), "{address}");
     }
-    assert!(config(&dir).validate().is_ok());
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn host_allowlist() {
-    for host in ["127.0.0.1:8080", "localhost:8080"] {
-        assert!(valid_host(host));
+    for host in [
+        "127.0.0.1:8080",
+        "localhost:8080",
+        "127.0.0.1",
+        "203.0.113.7:8080",
+        "panel.example.com",
+        "panel.example.com:8443",
+        "[::1]:8080",
+        "[2001:db8::1]",
+    ] {
+        assert!(valid_host(host), "{host}");
     }
     for host in [
-        "127.0.0.1",
+        "",
+        ":8080",
         "localhost:",
         "localhost:0",
         "localhost:65536",
         "localhost:+80",
         "localhost:80:90",
-        "127.0.0.1.evil:8080",
-        "evil:8080",
         "localhost@evil:8080",
-        "[::1]:8080",
+        "panel example.com",
+        "[::1",
+        "[::1]8080",
+        "[evil]:8080",
+        "2001:db8::1",
     ] {
         assert!(!valid_host(host), "{host}");
     }
@@ -79,6 +94,8 @@ fn init_is_private_and_keeps_existing_config() {
     assert_eq!(first.setup_token, second.setup_token);
     assert_eq!(raw, fs::read(&path).unwrap());
     first.validate().unwrap();
+    assert!(first.listen.ip().is_unspecified());
+    assert_ne!(first.listen.port(), 0);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -167,7 +184,29 @@ async fn http_security_and_assets() {
             );
         }
     }
-    for host in [None, Some("evil:8080")] {
+    for (origin, status) in [
+        ("http://panel.example.com:8443", StatusCode::NOT_FOUND),
+        ("https://panel.example.com:8443", StatusCode::NOT_FOUND),
+        ("http://evil.example", StatusCode::FORBIDDEN),
+        ("https://panel.example.com", StatusCode::FORBIDDEN),
+        ("ftp://panel.example.com:8443", StatusCode::FORBIDDEN),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/")
+                    .header("host", "panel.example.com:8443")
+                    .header("origin", origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{origin}");
+    }
+    for host in [None, Some("bad host:8080")] {
         let mut builder = Request::builder().uri("/");
         if let Some(host) = host {
             builder = builder.header("host", host);
