@@ -111,7 +111,16 @@ impl Config {
         config.setup_token = hex::encode(rand::random::<[u8; 32]>());
         config.setup_expires_at = now() as u64 + 3600;
         let raw = toml::to_string(&config).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        let owner = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(path).map(|meta| (meta.uid(), meta.gid())).ok()
+        };
         fiend_core::node::save_private(path, raw.as_bytes()).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        if let Some((uid, gid)) = owner {
+            std::os::unix::fs::chown(path, Some(uid), Some(gid)).map_err(|e| e.to_string())?;
+        }
         Ok(config)
     }
 }

@@ -63,7 +63,7 @@
 <Centered wide>
   {#if valid === false}
     <h1>This setup link does not work</h1>
-    <p class="lead">The link works one time and for one hour. On the server, run <code>sudo -u fiend /opt/fiend/bin/fiend-panel renew-setup /etc/fiend/panel.toml</code> to get a new link.</p>
+    <p class="lead">The link works one time and for one hour. On the server, run <code>sudo /opt/fiend/bin/fiend-panel renew-setup /etc/fiend/panel.toml</code> and restart the panel with <code>sudo systemctl restart fiend-panel</code> to get a new link.</p>
   {:else if valid}
     <p class="step">Step 1 of 4</p>
     <h1>Admin account</h1>

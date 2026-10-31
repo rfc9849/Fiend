@@ -52,10 +52,11 @@ for arch in "${ARCHES[@]}"; do
     tar -xzf "$CACHE/$asset" -C "$dir" wireproxy
     cp "$ROOT/tools/package/install.sh" "$ROOT/tools/package/rollback.sh" "$ROOT/tools/package/activate-update.sh" "$ROOT/tools/package/node-entry.sh" "$dir/"
     cp "$ROOT/tools/package/systemd/"*.service "$dir/systemd/"
+    printf 'version=%s\narch=%s\n' "$VERSION" "$arch" > "$dir/VERSION"
     chmod 755 "$dir/fiend-core" "$dir/fiend-panel" "$dir/wireproxy" "$dir/install.sh" "$dir/rollback.sh" "$dir/activate-update.sh" "$dir/node-entry.sh"
     (
         cd "$dir"
-        shasum -a 256 fiend-core fiend-panel wireproxy install.sh rollback.sh activate-update.sh node-entry.sh systemd/*.service > SHA256SUMS
+        shasum -a 256 fiend-core fiend-panel wireproxy install.sh rollback.sh activate-update.sh node-entry.sh VERSION systemd/*.service > SHA256SUMS
         if [ "$(uname -s)" = Darwin ]; then
             tar --no-xattrs --no-mac-metadata -czf "$OUT/fiend-$VERSION-linux-$arch.tar.gz.part" .
         else

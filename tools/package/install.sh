@@ -129,9 +129,18 @@ fi
 if [ "$MODE" = panel ]; then
     install -m 0755 "$SOURCE/fiend-panel" /opt/fiend/bin/fiend-panel.new
     mv -f /opt/fiend/bin/fiend-panel.new /opt/fiend/bin/fiend-panel
-    /opt/fiend/bin/fiend-panel init /etc/fiend/panel.toml
+    ACCESS=$(/opt/fiend/bin/fiend-panel init /etc/fiend/panel.toml)
     chown fiend:fiend /etc/fiend/panel.toml
     chmod 0600 /etc/fiend/panel.toml
+    install -d -o fiend -g fiend -m 0700 /var/lib/fiend/bundles /var/lib/fiend/bundles/inbox
+    INBOX=/var/lib/fiend/bundles/inbox/install-$(date +%s).tar.gz
+    if [ -n "$BUNDLE" ]; then
+        install -o fiend -g fiend -m 0600 "$BUNDLE" "$INBOX"
+    else
+        tar -czf "$INBOX" -C "$SOURCE" .
+        chown fiend:fiend "$INBOX"
+        chmod 0600 "$INBOX"
+    fi
     install -m 0644 "$SOURCE/systemd/fiend-panel.service" /etc/systemd/system/
 fi
 systemctl daemon-reload
@@ -147,4 +156,9 @@ if [ "$MODE" = panel ]; then
     systemctl restart fiend-panel.service
     systemctl is-active --quiet fiend-panel.service
 fi
-printf '%s\n' 'Server package installed. The panel setup wizard is not available yet.'
+printf '%s\n' 'Server package installed.'
+if [ "$MODE" = panel ]; then
+    printf '%s\n' "$ACCESS" | sed "s/<host>/$(hostname)/"
+    printf '%s\n' 'Open the panel only through the SSH tunnel. The setup link works one time and for one hour.'
+    printf '%s\n' 'New setup link: sudo /opt/fiend/bin/fiend-panel renew-setup /etc/fiend/panel.toml && sudo systemctl restart fiend-panel'
+fi
