@@ -3,6 +3,7 @@ package dev.fiend.feature.settings
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -11,18 +12,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,18 +26,21 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import dev.fiend.core.designsystem.component.ActionItem
+import dev.fiend.core.designsystem.component.FiendButton
+import dev.fiend.core.designsystem.component.FiendButtonKind
+import dev.fiend.core.designsystem.component.FiendGroup
+import dev.fiend.core.designsystem.component.FiendTag
+import dev.fiend.core.designsystem.component.FiendTagTone
+import dev.fiend.core.designsystem.component.FiendTopBar
 import dev.fiend.core.designsystem.component.InfoItem
-import dev.fiend.core.designsystem.component.SegmentedGroup
 import dev.fiend.core.designsystem.component.SwitchItem
 import dev.fiend.core.designsystem.icon.FiendIcons
-import dev.fiend.core.designsystem.theme.supportsDynamicColor
+import dev.fiend.core.designsystem.theme.FiendColors
 import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.SplitTunnelMode
 import dev.fiend.core.model.ThemeMode
@@ -54,35 +53,22 @@ internal fun SettingsScreen(
     onTheme: (ThemeMode) -> Unit,
     onOpenSplitTunnel: () -> Unit,
     onOpenRouting: () -> Unit,
-    onOpenLogs: () -> Unit,
 ) {
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val context = LocalContext.current
     var themeDialog by rememberSaveable { mutableStateOf(false) }
 
-    Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
-        topBar = {
-            LargeFlexibleTopAppBar(
-                title = { Text(stringResource(R.string.settings_title)) },
-                scrollBehavior = scrollBehavior,
-            )
-        },
-    ) { padding ->
+    Column(
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        FiendTopBar(title = stringResource(R.string.settings_title))
         LazyColumn(
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = padding.calculateTopPadding(),
-                bottom = padding.calculateBottomPadding() + 24.dp,
-            ),
-            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             item {
-                SegmentedGroup(title = stringResource(R.string.settings_group_connection)) {
+                FiendGroup(title = stringResource(R.string.settings_group_connection)) {
                     item {
                         SwitchItem(
-                            shapes = it,
                             headline = stringResource(R.string.settings_connect_on_start),
                             supporting = stringResource(R.string.settings_connect_on_start_body),
                             icon = FiendIcons.Bolt,
@@ -92,11 +78,10 @@ internal fun SettingsScreen(
                     }
                     item {
                         ActionItem(
-                            shapes = it,
                             headline = stringResource(R.string.settings_always_on),
                             supporting = stringResource(R.string.settings_always_on_body),
                             icon = FiendIcons.Shield,
-                            trailing = { Icon(FiendIcons.OpenInNew, contentDescription = null) },
+                            trailing = { Icon(FiendIcons.OpenInNew, contentDescription = null, tint = FiendColors.muted) },
                             onClick = {
                                 try {
                                     context.startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
@@ -109,10 +94,18 @@ internal fun SettingsScreen(
                 }
             }
             item {
-                SegmentedGroup(title = stringResource(R.string.settings_group_routing)) {
+                FiendGroup(title = stringResource(R.string.settings_group_routing)) {
                     item {
                         ActionItem(
-                            shapes = it,
+                            headline = stringResource(R.string.settings_rules),
+                            supporting = stringResource(R.string.settings_rules_body),
+                            icon = FiendIcons.Policy,
+                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null, tint = FiendColors.muted) },
+                            onClick = onOpenRouting,
+                        )
+                    }
+                    item {
+                        ActionItem(
                             headline = stringResource(R.string.settings_split),
                             supporting = when (settings.splitTunnelMode) {
                                 SplitTunnelMode.AllApps -> stringResource(R.string.settings_split_all)
@@ -128,23 +121,12 @@ internal fun SettingsScreen(
                                 )
                             },
                             icon = FiendIcons.AltRoute,
-                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
+                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null, tint = FiendColors.muted) },
                             onClick = onOpenSplitTunnel,
                         )
                     }
                     item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.settings_rules),
-                            supporting = stringResource(R.string.settings_rules_body),
-                            icon = FiendIcons.Block,
-                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
-                            onClick = onOpenRouting,
-                        )
-                    }
-                    item {
                         SwitchItem(
-                            shapes = it,
                             headline = stringResource(R.string.settings_bypass_lan),
                             supporting = stringResource(R.string.settings_bypass_lan_body),
                             icon = FiendIcons.Lan,
@@ -154,7 +136,6 @@ internal fun SettingsScreen(
                     }
                     item {
                         SwitchItem(
-                            shapes = it,
                             headline = stringResource(R.string.settings_ipv6),
                             supporting = stringResource(R.string.settings_ipv6_body),
                             icon = FiendIcons.Language,
@@ -165,44 +146,26 @@ internal fun SettingsScreen(
                 }
             }
             item {
-                SegmentedGroup(title = stringResource(R.string.settings_group_appearance)) {
+                FiendGroup(title = stringResource(R.string.settings_group_appearance)) {
                     item {
                         ActionItem(
-                            shapes = it,
                             headline = stringResource(R.string.settings_theme),
                             supporting = themeLabel(settings.themeMode),
                             icon = FiendIcons.DarkMode,
+                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null, tint = FiendColors.muted) },
                             onClick = { themeDialog = true },
                         )
-                    }
-                    if (supportsDynamicColor) {
-                        item {
-                            SwitchItem(
-                                shapes = it,
-                                headline = stringResource(R.string.settings_dynamic_color),
-                                supporting = stringResource(R.string.settings_dynamic_color_body),
-                                icon = FiendIcons.Palette,
-                                checked = settings.dynamicColor,
-                                onCheckedChange = { v -> onUpdate { s -> s.copy(dynamicColor = v) } },
-                            )
-                        }
                     }
                 }
             }
             item {
-                SegmentedGroup(title = stringResource(R.string.settings_group_about)) {
+                FiendGroup(title = stringResource(R.string.settings_group_about)) {
                     item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.settings_logs),
-                            supporting = stringResource(R.string.settings_logs_body),
-                            icon = FiendIcons.Article,
-                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
-                            onClick = onOpenLogs,
+                        InfoItem(
+                            headline = stringResource(R.string.settings_version),
+                            value = versionName,
+                            icon = FiendIcons.Info,
                         )
-                    }
-                    item {
-                        InfoItem(it, stringResource(R.string.settings_version), versionName, icon = FiendIcons.Info)
                     }
                 }
             }
@@ -234,26 +197,43 @@ private fun themeLabel(mode: ThemeMode): String = stringResource(
 private fun ThemeDialog(current: ThemeMode, onSelect: (ThemeMode) -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.settings_theme)) },
+        shape = RoundedCornerShape(8.dp),
+        containerColor = FiendColors.panel,
+        titleContentColor = FiendColors.text,
+        textContentColor = FiendColors.text,
+        title = { Text(stringResource(R.string.settings_theme), style = MaterialTheme.typography.titleLarge) },
         text = {
-            Column(Modifier.selectableGroup()) {
+            Column {
                 ThemeMode.entries.forEach { mode ->
+                    val selected = mode == current
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(56.dp)
-                            .selectable(selected = mode == current, onClick = { onSelect(mode) }, role = Role.RadioButton),
+                            .height(48.dp)
+                            .clickable { onSelect(mode) }
+                            .padding(horizontal = 4.dp),
                     ) {
-                        RadioButton(selected = mode == current, onClick = null)
-                        Spacer(Modifier.padding(start = 16.dp))
-                        Text(themeLabel(mode), style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            text = themeLabel(mode),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = FiendColors.text,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (selected) {
+                            FiendTag(stringResource(R.string.settings_theme_current), FiendTagTone.Green)
+                        }
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.settings_cancel)) }
+            FiendButton(
+                label = stringResource(R.string.settings_cancel),
+                onClick = onDismiss,
+                kind = FiendButtonKind.Ghost,
+                compact = true,
+            )
         },
     )
 }

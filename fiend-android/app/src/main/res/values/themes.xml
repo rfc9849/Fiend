@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="brand">#4A45B0</color>
-    <color name="splash_background">#FCF8FE</color>
+    <color name="brand">#365F87</color>
+    <color name="splash_background">#FAFBFB</color>
     <style name="Theme.Fiend" parent="android:Theme.Material.Light.NoActionBar" />
 
     <style name="Theme.Fiend.Starting" parent="Theme.SplashScreen">

@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,35 +21,24 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenu
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeFlexibleTopAppBar
-import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
@@ -58,9 +48,16 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.fiend.core.designsystem.component.FiendListDefaults
-import dev.fiend.core.designsystem.component.GroupHeader
+import dev.fiend.core.designsystem.component.FiendAlertDialog
+import dev.fiend.core.designsystem.component.FiendButton
+import dev.fiend.core.designsystem.component.FiendButtonKind
+import dev.fiend.core.designsystem.component.FiendIconButton
+import dev.fiend.core.designsystem.component.FiendRow
+import dev.fiend.core.designsystem.component.FiendSectionTitle
+import dev.fiend.core.designsystem.component.FiendTextField
+import dev.fiend.core.designsystem.component.FiendTopBar
 import dev.fiend.core.designsystem.icon.FiendIcons
+import dev.fiend.core.designsystem.theme.FiendColors
 import dev.fiend.core.model.FingerprintTemplate
 import dev.fiend.feature.profiles.R
 import kotlinx.coroutines.Dispatchers
@@ -92,49 +89,50 @@ internal fun ProfileEditScreen(
     onTemplateFile: (ByteArray) -> Unit,
     onTemplateFileFailed: (String) -> Unit,
 ) {
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     var confirmDiscard by rememberSaveable { mutableStateOf(false) }
     var advancedOpen by rememberSaveable { mutableStateOf(false) }
     var secretVisible by rememberSaveable { mutableStateOf(false) }
     val requestClose = { if (state.dirty) confirmDiscard = true else onClose() }
     BackHandler(state.dirty) { confirmDiscard = true }
 
-    Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
-        topBar = {
-            LargeFlexibleTopAppBar(
-                title = { Text(stringResource(if (state.isNew) R.string.edit_new_title else R.string.edit_title)) },
-                subtitle = state.form.name.takeIf { !state.isNew && it.isNotBlank() }?.let { { Text(it) } },
-                navigationIcon = {
-                    IconButton(onClick = requestClose) {
-                        Icon(FiendIcons.Close, contentDescription = stringResource(R.string.edit_close))
-                    }
-                },
-                actions = {
-                    Button(
-                        onClick = onSave,
-                        enabled = !state.saving && state.loaded,
-                        modifier = Modifier.padding(end = 12.dp),
-                    ) { Text(stringResource(R.string.edit_save)) }
-                },
-                scrollBehavior = scrollBehavior,
-            )
-        },
-    ) { padding ->
-        if (!state.loaded) return@Scaffold
-        val f = state.form
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(padding)
-                .imePadding()
-                .padding(horizontal = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Column(Modifier.widthIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                state.saveError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
-                GroupHeader(stringResource(R.string.edit_group_general))
+    Column(Modifier.fillMaxSize().background(FiendColors.surface)) {
+        FiendTopBar(
+            title = stringResource(if (state.isNew) R.string.edit_new_title else R.string.edit_title),
+            onBack = requestClose,
+            backLabel = stringResource(R.string.edit_close),
+            navigationIcon = FiendIcons.Close,
+            actions = {
+                FiendButton(
+                    label = stringResource(R.string.edit_save),
+                    onClick = onSave,
+                    kind = FiendButtonKind.Primary,
+                    enabled = !state.saving && state.loaded,
+                    busy = state.saving,
+                    compact = true,
+                )
+            },
+        )
+        if (state.loaded) {
+            val f = state.form
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .imePadding()
+                    .padding(horizontal = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 720.dp)
+                    .padding(bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                state.saveError?.let {
+                    Text(it, color = FiendColors.danger, style = MaterialTheme.typography.bodyMedium)
+                }
+                FiendSectionTitle(stringResource(R.string.edit_group_general))
                 FormField(
                     value = f.name,
                     onValueChange = { v -> onChange { it.copy(name = v) } },
@@ -143,7 +141,7 @@ internal fun ProfileEditScreen(
                     error = state.errors[Field.Name],
                     capitalization = KeyboardCapitalization.Words,
                 )
-                GroupHeader(stringResource(R.string.edit_group_server))
+                FiendSectionTitle(stringResource(R.string.edit_group_server))
                 FormField(
                     value = f.host,
                     onValueChange = { v -> onChange { it.copy(host = v) } },
@@ -179,18 +177,31 @@ internal fun ProfileEditScreen(
                     keyboardType = KeyboardType.Password,
                     visualTransformation = if (secretVisible) VisualTransformation.None else PasswordVisualTransformation(),
                     trailing = {
-                        IconButton(onClick = { secretVisible = !secretVisible }) {
-                            Icon(
-                                if (secretVisible) FiendIcons.VisibilityOff else FiendIcons.Visibility,
-                                contentDescription = stringResource(if (secretVisible) R.string.detail_hide_secret else R.string.detail_show_secret),
-                            )
-                        }
+                        FiendIconButton(
+                            icon = if (secretVisible) FiendIcons.VisibilityOff else FiendIcons.Visibility,
+                            label = stringResource(if (secretVisible) R.string.detail_hide_secret else R.string.detail_show_secret),
+                            onClick = { secretVisible = !secretVisible },
+                        )
                     },
                 )
-                GroupHeader(stringResource(R.string.edit_group_fingerprint))
+                FiendSectionTitle(stringResource(R.string.edit_group_fingerprint))
                 TemplatePicker(state, onSelectTemplate, onTemplateFile, onTemplateFileFailed)
 
-                AdvancedHeader(open = advancedOpen, onToggle = { advancedOpen = !advancedOpen })
+                FiendRow(
+                    headline = stringResource(R.string.edit_group_advanced),
+                    icon = FiendIcons.Tune,
+                    trailing = {
+                        val rotation by animateFloatAsState(if (advancedOpen) 180f else 0f, label = "chevron")
+                        Icon(
+                            FiendIcons.ExpandMore,
+                            contentDescription = null,
+                            tint = FiendColors.muted,
+                            modifier = Modifier.rotate(rotation),
+                        )
+                    },
+                    onClick = { advancedOpen = !advancedOpen },
+                    modifier = Modifier.padding(top = 8.dp),
+                )
                 AnimatedVisibility(visible = advancedOpen) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -203,26 +214,29 @@ internal fun ProfileEditScreen(
                         }
                     }
                 }
-                Spacer(Modifier.height(32.dp))
+                Spacer(Modifier.height(16.dp))
             }
+        }
         }
     }
 
     if (confirmDiscard) {
-        AlertDialog(
-            onDismissRequest = { confirmDiscard = false },
-            title = { Text(stringResource(R.string.edit_discard_title)) },
-            text = { Text(stringResource(R.string.edit_discard_body)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmDiscard = false
-                    onClose()
-                }) { Text(stringResource(R.string.edit_discard)) }
+        FiendAlertDialog(
+            title = stringResource(R.string.edit_discard_title),
+            confirmLabel = stringResource(R.string.edit_discard),
+            onConfirm = {
+                confirmDiscard = false
+                onClose()
             },
-            dismissButton = {
-                TextButton(onClick = { confirmDiscard = false }) { Text(stringResource(R.string.edit_keep)) }
-            },
-        )
+            dismissLabel = stringResource(R.string.edit_keep),
+            onDismiss = { confirmDiscard = false },
+        ) {
+            Text(
+                stringResource(R.string.edit_discard_body),
+                style = MaterialTheme.typography.bodyMedium,
+                color = FiendColors.muted,
+            )
+        }
     }
 }
 
@@ -253,34 +267,30 @@ private fun FormField(
     visualTransformation: VisualTransformation = VisualTransformation.None,
     trailing: @Composable (() -> Unit)? = null,
 ) {
-    val message = errorText(error) ?: supporting
-    OutlinedTextField(
+    FiendTextField(
         value = value,
         onValueChange = onValueChange,
-        label = { Text(label) },
-        leadingIcon = { Icon(icon, contentDescription = null) },
-        trailingIcon = trailing,
+        label = label,
+        leadingIcon = icon,
+        trailing = trailing,
+        supporting = errorText(error) ?: supporting,
         isError = error != null,
-        supportingText = message?.let { { Text(it) } },
         singleLine = true,
         visualTransformation = visualTransformation,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType, capitalization = capitalization),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth(),
     )
 }
 
 @Composable
 private fun NumberField(value: String, onValueChange: (String) -> Unit, label: Int, error: FieldError?, modifier: Modifier) {
-    OutlinedTextField(
+    FiendTextField(
         value = value,
         onValueChange = { onValueChange(it.filter(Char::isDigit).take(7)) },
-        label = { Text(stringResource(label)) },
+        label = stringResource(label),
+        supporting = errorText(error),
         isError = error != null,
-        supportingText = errorText(error)?.let { { Text(it) } },
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        shape = MaterialTheme.shapes.large,
         modifier = modifier,
     )
 }
@@ -305,20 +315,24 @@ private fun TemplatePicker(
         }
     }
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
-        OutlinedTextField(
+        FiendTextField(
             value = selected?.label.orEmpty(),
             onValueChange = {},
             readOnly = true,
-            label = { Text(stringResource(R.string.edit_template)) },
-            leadingIcon = { Icon(FiendIcons.Fingerprint, contentDescription = null) },
-            trailingIcon = { Icon(FiendIcons.ExpandMore, contentDescription = null, modifier = Modifier.rotate(if (expanded) 180f else 0f)) },
+            label = stringResource(R.string.edit_template),
+            leadingIcon = FiendIcons.Fingerprint,
+            trailing = {
+                Icon(
+                    FiendIcons.ExpandMore,
+                    contentDescription = null,
+                    tint = FiendColors.muted,
+                    modifier = Modifier.rotate(if (expanded) 180f else 0f),
+                )
+            },
             isError = state.templateError != null,
-            supportingText = { Text(state.templateError ?: stringResource(R.string.edit_template_hint)) },
+            supporting = state.templateError ?: stringResource(R.string.edit_template_hint),
             singleLine = true,
-            shape = MaterialTheme.shapes.large,
-            modifier = Modifier
-                .fillMaxWidth()
-                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+            modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             state.templates.forEach { template ->
@@ -360,18 +374,3 @@ private fun readTemplateFile(context: Context, uri: Uri): ByteArray = context.co
 } ?: error("Cannot open the template file")
 
 private const val MAX_TEMPLATE_FILE = 131072
-
-@Composable
-private fun AdvancedHeader(open: Boolean, onToggle: () -> Unit) {
-    val rotation by animateFloatAsState(if (open) 180f else 0f, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "chevron")
-    SegmentedListItem(
-        onClick = onToggle,
-        shapes = ListItemDefaults.segmentedShapes(0, 1),
-        colors = FiendListDefaults.colors(),
-        leadingContent = { Icon(FiendIcons.Tune, contentDescription = null) },
-        trailingContent = { Icon(FiendIcons.ExpandMore, contentDescription = null, modifier = Modifier.rotate(rotation)) },
-        modifier = Modifier.padding(top = 12.dp),
-    ) {
-        Text(stringResource(R.string.edit_group_advanced))
-    }
-}

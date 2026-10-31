@@ -1,37 +1,33 @@
 package dev.fiend.core.designsystem.theme
 
-import android.os.Build
-import androidx.annotation.ChecksSdkIntAtLeast
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.MaterialExpressiveTheme
-import androidx.compose.material3.MotionScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.unit.dp
+
+val FiendShapes = Shapes(
+    extraSmall = RoundedCornerShape(4.dp),
+    small = RoundedCornerShape(4.dp),
+    medium = RoundedCornerShape(6.dp),
+    large = RoundedCornerShape(7.dp),
+    extraLarge = RoundedCornerShape(9.dp),
+)
 
 @Composable
 fun FiendTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme: ColorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> FiendDarkColorScheme
-        else -> FiendLightColorScheme
+    val palette = if (darkTheme) FiendDarkPalette else FiendLightPalette
+    CompositionLocalProvider(LocalFiendPalette provides palette) {
+        MaterialTheme(
+            colorScheme = palette.toColorScheme(darkTheme),
+            typography = FiendTypography,
+            shapes = FiendShapes,
+            content = content,
+        )
     }
-    MaterialExpressiveTheme(
-        colorScheme = colorScheme,
-        motionScheme = MotionScheme.expressive(),
-        typography = FiendTypography,
-        content = content,
-    )
 }
-
-@get:ChecksSdkIntAtLeast(api = Build.VERSION_CODES.S)
-val supportsDynamicColor: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S

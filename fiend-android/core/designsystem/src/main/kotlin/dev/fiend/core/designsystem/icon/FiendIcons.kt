@@ -33,6 +33,9 @@ object FiendIcons {
     val Block: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_block)
 
+    val Brand: ImageVector
+        @Composable get() = ImageVector.vectorResource(R.drawable.ic_brand)
+
     val Bolt: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_bolt)
 

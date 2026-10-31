@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="profiles_search">Search profiles</string>
+    <string name="profiles_search_results">Results</string>
+    <string name="profiles_title">Profiles</string>
+    <string name="profiles_add_short">Add</string>
     <string name="profiles_clear_search">Clear search</string>
     <string name="profiles_section_active">Active</string>
     <string name="profiles_section_saved">Saved</string>

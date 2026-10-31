@@ -26,6 +26,7 @@
     <string name="settings_theme_system">System default</string>
     <string name="settings_theme_light">Light</string>
     <string name="settings_theme_dark">Dark</string>
+    <string name="settings_theme_current">Current</string>
     <string name="settings_dynamic_color">Dynamic color</string>
     <string name="settings_dynamic_color_body">Use colors from your wallpaper</string>
     <string name="settings_group_about">About</string>
@@ -33,6 +34,7 @@
     <string name="settings_logs_body">Engine events from this session</string>
     <string name="settings_version">Version</string>
     <string name="settings_cancel">Cancel</string>
+    <string name="settings_back">Back</string>
 
     <string name="settings_rules">Routing rules</string>
     <string name="settings_rules_body">Rule lists, subscriptions, resolver and MTU</string>
@@ -111,7 +113,6 @@
     <string name="split_system">System app</string>
 
     <string name="logs_title">Logs</string>
-    <string name="logs_back">Back</string>
     <string name="logs_copy">Copy logs</string>
     <string name="logs_clear">Clear logs</string>
     <string name="logs_copied">Logs copied</string>

@@ -29,12 +29,15 @@ fun EntryProviderScope<NavKey>.settingsEntries(
     onOpenSplitTunnel: () -> Unit,
     onOpenRouting: () -> Unit,
     onOpenRuleEditor: (RuleKind) -> Unit,
-    onOpenLogs: () -> Unit,
     onBack: () -> Unit,
     versionName: String,
 ) {
     entry<SettingsKey> {
-        SettingsRoute(onOpenSplitTunnel = onOpenSplitTunnel, onOpenRouting = onOpenRouting, onOpenLogs = onOpenLogs, versionName = versionName)
+        SettingsRoute(
+            onOpenSplitTunnel = onOpenSplitTunnel,
+            onOpenRouting = onOpenRouting,
+            versionName = versionName,
+        )
     }
     entry<SplitTunnelKey> {
         SplitTunnelRoute(onBack = onBack)
@@ -54,7 +57,6 @@ fun EntryProviderScope<NavKey>.settingsEntries(
 private fun SettingsRoute(
     onOpenSplitTunnel: () -> Unit,
     onOpenRouting: () -> Unit,
-    onOpenLogs: () -> Unit,
     versionName: String,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
@@ -66,7 +68,6 @@ private fun SettingsRoute(
         onTheme = viewModel::setTheme,
         onOpenSplitTunnel = onOpenSplitTunnel,
         onOpenRouting = onOpenRouting,
-        onOpenLogs = onOpenLogs,
     )
 }
 

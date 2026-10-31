@@ -14,7 +14,7 @@ private val previewTemplate = FingerprintTemplate("preview", "Captured template"
 @Preview(showBackground = true)
 @Composable
 private fun HomeConnectedPreview() {
-    FiendTheme(dynamicColor = false) {
+    FiendTheme {
         HomeScreen(HomeUiState(TunnelState.Connected("preview", System.currentTimeMillis() - 754_000),
             TunnelStats(12_400_000, 1_800_000, 224_000_000, 18_000_000, 38, 21), previewProfiles.first(), previewTemplate, previewProfiles), {}, {}, {}, {})
     }
@@ -23,7 +23,7 @@ private fun HomeConnectedPreview() {
 @Preview(showBackground = true)
 @Composable
 private fun HomeIdlePreview() {
-    FiendTheme(dynamicColor = false) {
+    FiendTheme {
         HomeScreen(HomeUiState(activeProfile = previewProfiles.first(), activeTemplate = previewTemplate, profiles = previewProfiles), {}, {}, {}, {})
     }
 }

@@ -1,30 +1,26 @@
 package dev.fiend.feature.settings
 
 import android.text.format.DateFormat
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -32,16 +28,25 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.fiend.core.designsystem.component.ActionItem
-import dev.fiend.core.designsystem.component.SegmentedGroup
+import dev.fiend.core.designsystem.component.FiendAlertDialog
+import dev.fiend.core.designsystem.component.FiendButton
+import dev.fiend.core.designsystem.component.FiendButtonKind
+import dev.fiend.core.designsystem.component.FiendGroup
+import dev.fiend.core.designsystem.component.FiendIconButton
+import dev.fiend.core.designsystem.component.FiendTextField
+import dev.fiend.core.designsystem.component.FiendTopBar
 import dev.fiend.core.designsystem.icon.FiendIcons
+import dev.fiend.core.designsystem.theme.FiendColors
 import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.RuleKind
 import dev.fiend.core.model.RuleSubscription
@@ -67,7 +72,6 @@ internal fun RoutingScreen(
     onRefreshAll: () -> Unit,
     onMessageShown: () -> Unit,
 ) {
-    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val snackbar = remember { SnackbarHostState() }
     var dialog by rememberSaveable { mutableStateOf<RoutingDialog?>(null) }
     var editing by rememberSaveable { mutableStateOf<String?>(null) }
@@ -80,187 +84,168 @@ internal fun RoutingScreen(
         }
     }
 
-    Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
-        snackbarHost = { SnackbarHost(snackbar) },
-        topBar = {
-            LargeFlexibleTopAppBar(
-                title = { Text(stringResource(R.string.routing_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(FiendIcons.ArrowBack, contentDescription = stringResource(R.string.split_back))
-                    }
-                },
-                scrollBehavior = scrollBehavior,
+    Box(Modifier.fillMaxSize().background(FiendColors.surface)) {
+        Column(Modifier.fillMaxSize()) {
+            FiendTopBar(
+                title = stringResource(R.string.routing_title),
+                onBack = onBack,
+                backLabel = stringResource(R.string.settings_back),
             )
-        },
-    ) { padding ->
-        LazyColumn(
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = padding.calculateTopPadding(),
-                bottom = padding.calculateBottomPadding() + 24.dp,
-            ),
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            item {
-                SegmentedGroup(title = stringResource(R.string.routing_group_rules)) {
-                    item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.routing_direct_rules),
-                            supporting = ruleCount(state.directRules),
-                            icon = FiendIcons.AltRoute,
-                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
-                            enabled = state.loaded,
-                            onClick = onOpenDirect,
-                        )
-                    }
-                    item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.routing_block_rules),
-                            supporting = ruleCount(state.blockRules),
-                            icon = FiendIcons.Block,
-                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
-                            enabled = state.loaded,
-                            onClick = onOpenBlock,
-                        )
-                    }
-                    item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.routing_proxy_rules),
-                            supporting = ruleCount(state.proxyRules),
-                            icon = FiendIcons.NorthEast,
-                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
-                            enabled = state.loaded,
-                            onClick = onOpenProxy,
-                        )
-                    }
-                    item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.routing_dpi_rules),
-                            supporting = ruleCount(state.dpiRules),
-                            icon = FiendIcons.Bolt,
-                            trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null) },
-                            enabled = state.loaded,
-                            onClick = onOpenDpi,
-                        )
-                    }
-                }
-            }
-            item {
-                Text(
-                    text = stringResource(R.string.routing_privacy),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 16.dp),
-                )
-            }
-            item {
-                SegmentedGroup(title = stringResource(R.string.routing_group_subscriptions)) {
-                    state.subscriptions.forEach { subscription ->
-                        item {
-                            ActionItem(
-                                shapes = it,
-                                headline = subscription.title,
-                                supporting = subscriptionSummary(subscription),
-                                icon = FiendIcons.Link,
-                                trailing = {
-                                    Row {
-                                        IconButton(
-                                            onClick = { onRefreshSubscription(subscription.id) },
-                                            enabled = enabled,
-                                        ) {
-                                            Icon(
-                                                FiendIcons.RestartAlt,
-                                                contentDescription = stringResource(R.string.routing_subscription_refresh),
-                                            )
-                                        }
-                                        IconButton(
-                                            onClick = { onRemoveSubscription(subscription.id) },
-                                            enabled = enabled,
-                                        ) {
-                                            Icon(
-                                                FiendIcons.Delete,
-                                                contentDescription = stringResource(R.string.routing_subscription_remove),
-                                            )
-                                        }
-                                    }
-                                },
-                                enabled = enabled,
-                                onClick = { editing = subscription.id },
-                            )
-                        }
-                    }
-                    item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.routing_subscription_add),
-                            supporting = stringResource(R.string.routing_subscription_add_body),
-                            icon = FiendIcons.Add,
-                            enabled = enabled,
-                            onClick = { dialog = RoutingDialog.Subscription },
-                        )
-                    }
-                    if (state.subscriptions.isNotEmpty()) {
-                        item {
-                            ActionItem(
-                                shapes = it,
-                                headline = stringResource(R.string.routing_subscription_refresh_all),
-                                icon = FiendIcons.RestartAlt,
-                                enabled = enabled,
-                                onClick = onRefreshAll,
-                            )
-                        }
-                    }
-                }
-            }
-            if (state.busy) {
+            LazyColumn(
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            ) {
                 item {
-                    LinearProgressIndicator(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 16.dp),
+                    FiendGroup(title = stringResource(R.string.routing_group_rules)) {
+                        item {
+                            ActionItem(
+                                headline = stringResource(R.string.routing_direct_rules),
+                                supporting = ruleCount(state.directRules),
+                                icon = FiendIcons.AltRoute,
+                                trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null, tint = FiendColors.muted) },
+                                enabled = state.loaded,
+                                onClick = onOpenDirect,
+                            )
+                        }
+                        item {
+                            ActionItem(
+                                headline = stringResource(R.string.routing_block_rules),
+                                supporting = ruleCount(state.blockRules),
+                                icon = FiendIcons.Block,
+                                trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null, tint = FiendColors.muted) },
+                                enabled = state.loaded,
+                                onClick = onOpenBlock,
+                            )
+                        }
+                        item {
+                            ActionItem(
+                                headline = stringResource(R.string.routing_proxy_rules),
+                                supporting = ruleCount(state.proxyRules),
+                                icon = FiendIcons.NorthEast,
+                                trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null, tint = FiendColors.muted) },
+                                enabled = state.loaded,
+                                onClick = onOpenProxy,
+                            )
+                        }
+                        item {
+                            ActionItem(
+                                headline = stringResource(R.string.routing_dpi_rules),
+                                supporting = ruleCount(state.dpiRules),
+                                icon = FiendIcons.Bolt,
+                                trailing = { Icon(FiendIcons.ChevronRight, contentDescription = null, tint = FiendColors.muted) },
+                                enabled = state.loaded,
+                                onClick = onOpenDpi,
+                            )
+                        }
+                    }
+                }
+                item {
+                    Text(
+                        text = stringResource(R.string.routing_privacy),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = FiendColors.muted,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp),
+                    )
+                }
+                item {
+                    FiendGroup(title = stringResource(R.string.routing_group_subscriptions)) {
+                        state.subscriptions.forEach { subscription ->
+                            item {
+                                ActionItem(
+                                    headline = subscription.title,
+                                    supporting = subscriptionSummary(subscription),
+                                    icon = FiendIcons.Link,
+                                    trailing = {
+                                        Row {
+                                            FiendIconButton(
+                                                icon = FiendIcons.RestartAlt,
+                                                label = stringResource(R.string.routing_subscription_refresh),
+                                                onClick = { onRefreshSubscription(subscription.id) },
+                                                enabled = enabled,
+                                            )
+                                            FiendIconButton(
+                                                icon = FiendIcons.Delete,
+                                                label = stringResource(R.string.routing_subscription_remove),
+                                                onClick = { onRemoveSubscription(subscription.id) },
+                                                enabled = enabled,
+                                            )
+                                        }
+                                    },
+                                    enabled = enabled,
+                                    onClick = { editing = subscription.id },
+                                )
+                            }
+                        }
+                        item {
+                            ActionItem(
+                                headline = stringResource(R.string.routing_subscription_add),
+                                supporting = stringResource(R.string.routing_subscription_add_body),
+                                icon = FiendIcons.Add,
+                                enabled = enabled,
+                                onClick = { dialog = RoutingDialog.Subscription },
+                            )
+                        }
+                        if (state.subscriptions.isNotEmpty()) {
+                            item {
+                                ActionItem(
+                                    headline = stringResource(R.string.routing_subscription_refresh_all),
+                                    icon = FiendIcons.RestartAlt,
+                                    enabled = enabled,
+                                    onClick = onRefreshAll,
+                                )
+                            }
+                        }
+                    }
+                }
+                if (state.busy) {
+                    item {
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 16.dp),
+                            color = FiendColors.accent,
+                            trackColor = FiendColors.line,
+                        )
+                    }
+                }
+                item {
+                    FiendGroup(title = stringResource(R.string.routing_group_network)) {
+                        item {
+                            ActionItem(
+                                headline = stringResource(R.string.routing_resolver),
+                                supporting = state.directResolver.ifBlank { stringResource(R.string.routing_resolver_default) },
+                                icon = FiendIcons.Dns,
+                                enabled = state.loaded,
+                                onClick = { dialog = RoutingDialog.Resolver },
+                            )
+                        }
+                        item {
+                            ActionItem(
+                                headline = stringResource(R.string.routing_mtu),
+                                supporting = state.mtu.toString(),
+                                icon = FiendIcons.Speed,
+                                enabled = state.loaded,
+                                onClick = { dialog = RoutingDialog.Mtu },
+                            )
+                        }
+                    }
+                }
+                item {
+                    Text(
+                        text = stringResource(R.string.routing_restart),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = FiendColors.muted,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp),
                     )
                 }
             }
-            item {
-                SegmentedGroup(title = stringResource(R.string.routing_group_network)) {
-                    item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.routing_resolver),
-                            supporting = state.directResolver.ifBlank { stringResource(R.string.routing_resolver_default) },
-                            icon = FiendIcons.Dns,
-                            enabled = state.loaded,
-                            onClick = { dialog = RoutingDialog.Resolver },
-                        )
-                    }
-                    item {
-                        ActionItem(
-                            shapes = it,
-                            headline = stringResource(R.string.routing_mtu),
-                            supporting = state.mtu.toString(),
-                            icon = FiendIcons.Speed,
-                            enabled = state.loaded,
-                            onClick = { dialog = RoutingDialog.Mtu },
-                        )
-                    }
-                }
-            }
-            item {
-                Text(
-                    text = stringResource(R.string.routing_restart),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 16.dp),
-                )
-            }
         }
+        SnackbarHost(
+            hostState = snackbar,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 16.dp),
+        )
     }
 
     when (dialog) {
@@ -341,89 +326,72 @@ private fun SubscriptionDialog(
     var name by rememberSaveable(initial?.id) { mutableStateOf(initial?.name ?: "") }
     var kind by rememberSaveable(initial?.id) { mutableStateOf(initial?.kind ?: RuleKind.Direct) }
     var failed by remember { mutableStateOf<RoutingInputError?>(null) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(stringResource(if (initial == null) R.string.routing_subscription_add else R.string.routing_subscription_edit))
+    FiendAlertDialog(
+        title = stringResource(if (initial == null) R.string.routing_subscription_add else R.string.routing_subscription_edit),
+        confirmLabel = stringResource(if (initial == null) R.string.routing_subscription_add_action else R.string.routing_save),
+        onConfirm = {
+            val error = onConfirm(url, kind, name)
+            if (error == null) onDismiss() else failed = error
         },
-        text = {
-            Column {
-                if (initial == null) {
-                    OutlinedTextField(
-                        value = url,
-                        onValueChange = { url = it; failed = null },
-                        label = { Text(stringResource(R.string.routing_subscription_url)) },
-                        isError = failed == RoutingInputError.Link,
-                        supportingText = {
-                            Text(
-                                if (failed == RoutingInputError.Link) {
-                                    stringResource(R.string.routing_error_link)
-                                } else {
-                                    stringResource(R.string.routing_subscription_url_body)
-                                },
-                            )
-                        },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                        shape = MaterialTheme.shapes.large,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it; failed = null },
-                    label = { Text(stringResource(R.string.routing_subscription_name)) },
-                    placeholder = { Text(urlTitle(url.trim()).takeIf { url.isNotBlank() } ?: "") },
-                    isError = failed == RoutingInputError.Name,
-                    supportingText = {
-                        Text(
-                            if (failed == RoutingInputError.Name) {
-                                stringResource(R.string.routing_error_name, RuleSubscription.MAX_NAME)
-                            } else {
-                                stringResource(R.string.routing_subscription_name_body)
-                            },
-                        )
+        dismissLabel = stringResource(R.string.settings_cancel),
+        onDismiss = onDismiss,
+    ) {
+        Column {
+            if (initial == null) {
+                FiendTextField(
+                    value = url,
+                    onValueChange = { url = it; failed = null },
+                    label = stringResource(R.string.routing_subscription_url),
+                    isError = failed == RoutingInputError.Link,
+                    supporting = if (failed == RoutingInputError.Link) {
+                        stringResource(R.string.routing_error_link)
+                    } else {
+                        stringResource(R.string.routing_subscription_url_body)
                     },
                     singleLine = true,
-                    shape = MaterialTheme.shapes.large,
-                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 )
-                Text(
-                    text = stringResource(R.string.routing_subscription_kind),
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 8.dp),
-                )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    RuleKind.entries.forEach { option ->
-                        FilterChip(
-                            selected = kind == option,
-                            onClick = { kind = option },
-                            label = { Text(kindLabel(option)) },
-                        )
-                    }
-                }
-                if (initial != null) {
-                    Text(
-                        text = initial.url,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 16.dp),
+                Spacer(Modifier.height(12.dp))
+            }
+            FiendTextField(
+                value = name,
+                onValueChange = { name = it; failed = null },
+                label = stringResource(R.string.routing_subscription_name),
+                placeholder = urlTitle(url.trim()).takeIf { url.isNotBlank() } ?: "",
+                isError = failed == RoutingInputError.Name,
+                supporting = if (failed == RoutingInputError.Name) {
+                    stringResource(R.string.routing_error_name, RuleSubscription.MAX_NAME)
+                } else {
+                    stringResource(R.string.routing_subscription_name_body)
+                },
+                singleLine = true,
+            )
+            Text(
+                text = stringResource(R.string.routing_subscription_kind),
+                style = MaterialTheme.typography.labelMedium,
+                color = FiendColors.muted,
+                modifier = Modifier.padding(top = 14.dp, bottom = 8.dp),
+            )
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                RuleKind.entries.forEach { option ->
+                    FiendButton(
+                        label = kindLabel(option),
+                        onClick = { kind = option },
+                        kind = if (kind == option) FiendButtonKind.Primary else FiendButtonKind.Default,
+                        compact = true,
                     )
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                val error = onConfirm(url, kind, name)
-                if (error == null) onDismiss() else failed = error
-            }) {
-                Text(stringResource(if (initial == null) R.string.routing_subscription_add_action else R.string.routing_save))
+            if (initial != null) {
+                Text(
+                    text = initial.url,
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                    color = FiendColors.muted,
+                    modifier = Modifier.padding(top = 14.dp),
+                )
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.settings_cancel)) }
-        },
-    )
+        }
+    }
 }
 
 @Composable
@@ -439,29 +407,23 @@ private fun ValueDialog(
 ) {
     var value by rememberSaveable { mutableStateOf(initial) }
     var failed by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            OutlinedTextField(
-                value = value,
-                onValueChange = { value = it; failed = false },
-                label = { Text(label) },
-                isError = failed,
-                supportingText = { Text(if (failed) errorText else hint) },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-                shape = MaterialTheme.shapes.large,
-                modifier = Modifier.fillMaxWidth(),
-            )
+    FiendAlertDialog(
+        title = title,
+        confirmLabel = stringResource(R.string.routing_save),
+        onConfirm = {
+            if (onConfirm(value) == null) onDismiss() else failed = true
         },
-        confirmButton = {
-            TextButton(onClick = {
-                if (onConfirm(value) == null) onDismiss() else failed = true
-            }) { Text(stringResource(R.string.routing_save)) }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.settings_cancel)) }
-        },
-    )
+        dismissLabel = stringResource(R.string.settings_cancel),
+        onDismiss = onDismiss,
+    ) {
+        FiendTextField(
+            value = value,
+            onValueChange = { value = it; failed = false },
+            label = label,
+            isError = failed,
+            supporting = if (failed) errorText else hint,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        )
+    }
 }

@@ -1,45 +1,32 @@
 package dev.fiend.feature.home
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearWavyProgressIndicator
-import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedListItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,18 +35,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.center
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.fiend.core.designsystem.component.FiendListDefaults
+import dev.fiend.core.designsystem.component.FiendIconButton
+import dev.fiend.core.designsystem.component.FiendTopBar
 import dev.fiend.core.designsystem.component.ShapeAvatar
 import dev.fiend.core.designsystem.component.StatTile
 import dev.fiend.core.designsystem.component.avatarLabel
@@ -68,7 +51,7 @@ import dev.fiend.core.designsystem.component.formatBytes
 import dev.fiend.core.designsystem.component.formatElapsed
 import dev.fiend.core.designsystem.component.latencyColor
 import dev.fiend.core.designsystem.icon.FiendIcons
-import dev.fiend.core.designsystem.theme.googleSansFlex
+import dev.fiend.core.designsystem.theme.FiendColors
 import dev.fiend.core.model.ConnectStep
 import dev.fiend.core.model.Profile
 import dev.fiend.core.model.TunnelState
@@ -84,37 +67,39 @@ internal fun HomeScreen(
     onOpenLogs: () -> Unit,
 ) {
     var pickerOpen by rememberSaveable { mutableStateOf(false) }
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Wordmark() },
-                actions = {
-                    IconButton(onClick = onOpenLogs) {
-                        Icon(FiendIcons.Article, contentDescription = stringResource(R.string.home_logs))
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
-            )
-        },
-    ) { padding ->
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(FiendColors.surface),
+    ) {
+        FiendTopBar(
+            brand = stringResource(R.string.home_brand),
+            actions = {
+                FiendIconButton(
+                    icon = FiendIcons.Article,
+                    label = stringResource(R.string.home_logs),
+                    onClick = onOpenLogs,
+                )
+            },
+        )
         Column(
             modifier = Modifier
-                .fillMaxSize()
+                .weight(1f)
+                .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(padding)
                 .padding(horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Column(Modifier.widthIn(max = 560.dp)) {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 680.dp)
+                    .padding(top = 8.dp, bottom = 24.dp),
+            ) {
                 HeroPanel(state = state, onToggle = onToggle)
-                Spacer(Modifier.height(12.dp))
-                ServerCard(
-                    profile = state.activeProfile,
-                    onClick = { pickerOpen = true },
-                )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
+                ServerCard(profile = state.activeProfile, onClick = { pickerOpen = true })
+                Spacer(Modifier.height(16.dp))
                 StatsGrid(state.stats, connected = state.tunnel is TunnelState.Connected)
-                Spacer(Modifier.height(24.dp))
             }
         }
     }
@@ -135,16 +120,6 @@ internal fun HomeScreen(
     }
 }
 
-@Composable
-private fun Wordmark() {
-    Text(
-        text = stringResource(R.string.home_brand),
-        fontFamily = googleSansFlex(weight = FontWeight.SemiBold, opticalSize = 28f, roundness = 100f),
-        fontSize = 26.sp,
-        color = MaterialTheme.colorScheme.onSurface,
-    )
-}
-
 private val TunnelState.phase: ConnectPhase
     get() = when (this) {
         TunnelState.Disconnected -> ConnectPhase.Idle
@@ -155,109 +130,83 @@ private val TunnelState.phase: ConnectPhase
 
 @Composable
 private fun HeroPanel(state: HomeUiState, onToggle: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    val motion = MaterialTheme.motionScheme
     val phase = state.tunnel.phase
-    val panel by animateColorAsState(
-        targetValue = when (phase) {
-            ConnectPhase.Active -> colors.primaryContainer
-            ConnectPhase.Error -> colors.errorContainer
-            else -> colors.surfaceContainer
-        },
-        animationSpec = motion.slowEffectsSpec(),
-        label = "panel",
-    )
-    val onPanel by animateColorAsState(
-        targetValue = when (phase) {
-            ConnectPhase.Active -> colors.onPrimaryContainer
-            ConnectPhase.Error -> colors.onErrorContainer
-            else -> colors.onSurface
-        },
-        animationSpec = motion.slowEffectsSpec(),
-        label = "onPanel",
-    )
-    val glow by animateColorAsState(
-        targetValue = if (phase == ConnectPhase.Active) colors.primary.copy(alpha = 0.32f) else Color.Transparent,
-        animationSpec = motion.slowEffectsSpec(),
-        label = "glow",
-    )
-    val pulse = if (phase == ConnectPhase.Active) {
-        rememberInfiniteTransition(label = "pulse").animateFloat(
-            initialValue = 0.82f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(tween(2_400), RepeatMode.Reverse),
-            label = "pulseScale",
-        ).value
-    } else {
-        1f
-    }
-
+    val failed = phase == ConnectPhase.Error
     Surface(
-        color = panel,
-        contentColor = onPanel,
-        shape = MaterialTheme.shapes.extraExtraLarge,
+        color = FiendColors.hero,
+        contentColor = FiendColors.text,
+        shape = RoundedCornerShape(7.dp),
+        border = BorderStroke(1.dp, if (failed) FiendColors.danger else FiendColors.line),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(top = 28.dp, bottom = 28.dp, start = 24.dp, end = 24.dp),
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 300.dp),
         ) {
-            Box(
-                contentAlignment = Alignment.Center,
-                modifier = Modifier
-                    .size(240.dp)
-                    .drawBehind {
-                        if (glow.alpha > 0f) {
-                            drawCircle(
-                                brush = Brush.radialGradient(
-                                    colors = listOf(glow, Color.Transparent),
-                                    center = size.center,
-                                    radius = size.minDimension / 2 * pulse,
-                                ),
-                                radius = size.minDimension / 2,
-                            )
-                        }
-                    },
-            ) {
-                val description = stringResource(
-                    if (phase == ConnectPhase.Idle || phase == ConnectPhase.Error) R.string.home_action_connect else R.string.home_action_disconnect,
-                )
+            val horizontal = maxWidth >= 430.dp
+            val horizontalPadding = if (horizontal) 36.dp else 24.dp
+            val description = stringResource(
+                if (phase == ConnectPhase.Idle || phase == ConnectPhase.Error) R.string.home_action_connect else R.string.home_action_disconnect,
+            )
+            val button = @Composable {
                 ConnectButton(
                     phase = phase,
                     onClick = onToggle,
                     contentDescription = description,
                     stateDescription = statusTitle(state.tunnel),
+                    size = if (horizontal) 176.dp else 168.dp,
                 )
             }
-            Spacer(Modifier.height(12.dp))
-            AnimatedContent(
-                targetState = statusTitle(state.tunnel),
-                transitionSpec = {
-                    (fadeIn(motion.defaultEffectsSpec()) + slideInVertically(motion.defaultSpatialSpec()) { it / 2 })
-                        .togetherWith(fadeOut(motion.fastEffectsSpec()) + slideOutVertically(motion.fastSpatialSpec()) { -it / 2 })
-                },
-                label = "status",
-            ) { title ->
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.headlineMediumEmphasized,
-                    textAlign = TextAlign.Center,
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            StatusDetail(state)
-            AnimatedVisibility(
-                visible = phase == ConnectPhase.Busy,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically(),
-            ) {
-                LinearWavyProgressIndicator(
+            if (horizontal) {
+                Row(
                     modifier = Modifier
-                        .padding(top = 16.dp)
-                        .width(160.dp),
-                )
+                        .fillMaxSize()
+                        .padding(horizontal = horizontalPadding, vertical = 24.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    button()
+                    Spacer(Modifier.width(38.dp))
+                    StateText(state, phase, Modifier.weight(1f))
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = horizontalPadding, vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    button()
+                    Spacer(Modifier.height(16.dp))
+                    StateText(state, phase, Modifier.fillMaxWidth(), centered = true)
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun StateText(state: HomeUiState, phase: ConnectPhase, modifier: Modifier, centered: Boolean = false) {
+    val alignment = if (centered) TextAlign.Center else TextAlign.Start
+    Column(
+        modifier = modifier,
+        horizontalAlignment = if (centered) Alignment.CenterHorizontally else Alignment.Start,
+    ) {
+        AnimatedContent(
+            targetState = statusTitle(state.tunnel),
+            transitionSpec = { fadeIn().togetherWith(fadeOut()) },
+            label = "status",
+        ) { title ->
+            Text(
+                text = title,
+                style = MaterialTheme.typography.displayLarge.copy(fontWeight = FontWeight.Medium),
+                color = if (phase == ConnectPhase.Error) FiendColors.danger else FiendColors.text,
+                textAlign = alignment,
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        StatusDetail(state, alignment)
     }
 }
 
@@ -273,10 +222,13 @@ private fun statusTitle(tunnel: TunnelState): String = stringResource(
 )
 
 @Composable
-private fun StatusDetail(state: HomeUiState) {
+private fun StatusDetail(state: HomeUiState, alignment: TextAlign) {
     val tunnel = state.tunnel
-    val style = MaterialTheme.typography.bodyLarge
-    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val style = MaterialTheme.typography.bodySmall.copy(
+        fontFamily = FontFamily.Monospace,
+        fontSize = 13.sp,
+        lineHeight = 20.sp,
+    )
     when (tunnel) {
         is TunnelState.Connected -> {
             val elapsed by produceState(0L, tunnel.sinceEpochMs) {
@@ -285,18 +237,12 @@ private fun StatusDetail(state: HomeUiState) {
                     delay(1_000)
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = formatElapsed(elapsed),
-                    style = MaterialTheme.typography.titleLargeEmphasized.copy(fontFeatureSettings = "tnum"),
-                )
-                state.activeProfile?.let {
-                    Text(
-                        text = "  ·  " + stringResource(R.string.home_via, it.name),
-                        style = style,
-                    )
-                }
-            }
+            Text(
+                text = formatElapsed(elapsed),
+                style = style,
+                color = FiendColors.muted,
+                textAlign = alignment,
+            )
         }
         is TunnelState.Connecting -> Text(
             text = stringResource(
@@ -307,65 +253,90 @@ private fun StatusDetail(state: HomeUiState) {
                 },
             ),
             style = style,
-            color = muted,
+            color = FiendColors.muted,
+            textAlign = alignment,
         )
-        is TunnelState.Failed -> Text(tunnel.reason, style = style)
+        is TunnelState.Failed -> Text(
+            text = tunnel.reason,
+            style = style,
+            color = FiendColors.danger,
+            textAlign = alignment,
+        )
         else -> Text(
             text = state.activeProfile?.let { stringResource(R.string.home_hint_off, it.name) }
                 ?: stringResource(R.string.home_hint_no_profile),
             style = style,
-            color = muted,
-            textAlign = TextAlign.Center,
+            color = FiendColors.muted,
+            textAlign = alignment,
         )
     }
 }
 
 @Composable
 private fun ServerCard(profile: Profile?, onClick: () -> Unit) {
-    SegmentedListItem(
+    val shape = RoundedCornerShape(6.dp)
+    Surface(
         onClick = onClick,
-        shapes = ListItemDefaults.segmentedShapes(index = 0, count = 1),
-        colors = FiendListDefaults.colors(),
-        leadingContent = {
-            if (profile != null) {
-                ShapeAvatar(label = avatarLabel(profile.name, profile.countryCode), seed = profile.id, size = 44.dp)
-            }
-        },
-        overlineContent = { Text(stringResource(R.string.home_server)) },
-        supportingContent = {
-            if (profile != null) {
-                Text(profile.host, maxLines = 1)
-            }
-        },
-        trailingContent = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                profile?.latencyMs?.let {
-                    Text(
-                        text = stringResource(R.string.home_latency, it),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = latencyColor(it),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                }
-                Icon(FiendIcons.UnfoldMore, contentDescription = stringResource(R.string.home_change_server))
-            }
-        },
+        color = FiendColors.panel,
+        contentColor = FiendColors.text,
+        shape = shape,
+        border = BorderStroke(1.dp, FiendColors.line),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(
-            text = profile?.name ?: stringResource(R.string.home_no_server),
-            style = MaterialTheme.typography.titleMedium,
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 76.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (profile != null) {
+                ShapeAvatar(label = avatarLabel(profile.name, profile.countryCode), seed = profile.id, size = 48.dp)
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(FiendColors.soft, RoundedCornerShape(4.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(FiendIcons.Dns, contentDescription = null, tint = FiendColors.muted, modifier = Modifier.size(20.dp))
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = profile?.name ?: stringResource(R.string.home_no_server),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = FiendColors.text,
+                    maxLines = 1,
+                )
+                Text(
+                    text = profile?.authority ?: stringResource(R.string.home_server),
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+                    color = FiendColors.muted,
+                    maxLines = 1,
+                )
+            }
+            profile?.latencyMs?.let { latency ->
+                Text(
+                    text = stringResource(R.string.home_latency, latency),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = latencyColor(latency),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            Icon(
+                FiendIcons.KeyboardArrowDown,
+                contentDescription = stringResource(R.string.home_change_server),
+                tint = FiendColors.muted,
+                modifier = Modifier.size(20.dp),
+            )
+        }
     }
 }
 
 @Composable
 private fun StatsGrid(stats: TunnelStats, connected: Boolean) {
-    val c = MaterialTheme.colorScheme
-    val dark = c.surface.luminance() < 0.5f
-    val downContainer = if (dark) lerp(c.surfaceContainerHigh, c.secondary, 0.24f) else c.secondaryContainer
-    val upContainer = if (dark) lerp(c.surfaceContainerHigh, c.tertiary, 0.24f) else c.tertiaryContainer
-    val downContent = if (dark) c.onSurface else c.onSecondaryContainer
-    val upContent = if (dark) c.onSurface else c.onTertiaryContainer
     val empty = stringResource(R.string.home_stat_empty)
     val down = formatBitrate(stats.downloadBps)
     val up = formatBitrate(stats.uploadBps)
@@ -377,8 +348,6 @@ private fun StatsGrid(stats: TunnelStats, connected: Boolean) {
                 label = stringResource(R.string.home_stat_download),
                 value = if (connected) down.value else empty,
                 unit = if (connected) down.unit else "",
-                containerColor = if (connected) downContainer else c.surfaceContainer,
-                contentColor = if (connected) downContent else c.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
             StatTile(
@@ -386,8 +355,6 @@ private fun StatsGrid(stats: TunnelStats, connected: Boolean) {
                 label = stringResource(R.string.home_stat_upload),
                 value = if (connected) up.value else empty,
                 unit = if (connected) up.unit else "",
-                containerColor = if (connected) upContainer else c.surfaceContainer,
-                contentColor = if (connected) upContent else c.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -397,8 +364,6 @@ private fun StatsGrid(stats: TunnelStats, connected: Boolean) {
                 label = stringResource(R.string.home_stat_latency),
                 value = if (connected) stats.latencyMs?.toString() ?: empty else empty,
                 unit = if (connected && stats.latencyMs != null) stringResource(R.string.home_unit_ms) else "",
-                containerColor = if (connected) c.surfaceContainerHigh else c.surfaceContainer,
-                contentColor = if (connected) c.onSurface else c.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
             StatTile(
@@ -406,8 +371,6 @@ private fun StatsGrid(stats: TunnelStats, connected: Boolean) {
                 label = stringResource(R.string.home_stat_session),
                 value = if (connected) total.value else empty,
                 unit = if (connected) total.unit else "",
-                containerColor = if (connected) c.surfaceContainerHigh else c.surfaceContainer,
-                contentColor = if (connected) c.onSurface else c.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
         }

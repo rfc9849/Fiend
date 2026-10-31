@@ -3,24 +3,20 @@ package dev.fiend.feature.settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -29,11 +25,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import dev.fiend.core.designsystem.component.FiendAlertDialog
+import dev.fiend.core.designsystem.component.FiendButton
+import dev.fiend.core.designsystem.component.FiendButtonKind
+import dev.fiend.core.designsystem.component.FiendIconButton
+import dev.fiend.core.designsystem.component.FiendTextField
+import dev.fiend.core.designsystem.component.FiendTopBar
 import dev.fiend.core.designsystem.icon.FiendIcons
+import dev.fiend.core.designsystem.theme.FiendColors
 import dev.fiend.core.model.RuleKind
 
 @Composable
@@ -61,79 +66,91 @@ internal fun RuleEditorScreen(
         if (uri != null) onImport(uri.toString())
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(kind.title())) },
-                navigationIcon = {
-                    IconButton(onClick = requestClose) {
-                        Icon(FiendIcons.Close, contentDescription = stringResource(R.string.rules_close))
-                    }
-                },
+    Box(Modifier.fillMaxSize().background(FiendColors.surface)) {
+        Column(Modifier.fillMaxSize()) {
+            FiendTopBar(
+                title = stringResource(kind.title()),
+                onBack = requestClose,
+                backLabel = stringResource(R.string.rules_close),
+                navigationIcon = FiendIcons.Close,
                 actions = {
-                    IconButton(onClick = { picker.launch(arrayOf("*/*")) }, enabled = state.loaded) {
-                        Icon(FiendIcons.UploadFile, contentDescription = stringResource(R.string.rules_import))
-                    }
-                    Button(
+                    FiendIconButton(
+                        icon = FiendIcons.UploadFile,
+                        label = stringResource(R.string.rules_import),
+                        onClick = { picker.launch(arrayOf("*/*")) },
+                        enabled = state.loaded,
+                    )
+                    FiendButton(
+                        label = stringResource(R.string.routing_save),
                         onClick = onSave,
+                        kind = FiendButtonKind.Primary,
                         enabled = state.loaded && !state.saving,
-                        modifier = Modifier.padding(end = 12.dp),
-                    ) { Text(stringResource(R.string.routing_save)) }
-                },
-            )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { padding ->
-        if (!state.loaded) return@Scaffold
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .imePadding()
-                .padding(horizontal = 16.dp),
-        ) {
-            OutlinedTextField(
-                value = state.text,
-                onValueChange = onText,
-                placeholder = { Text(stringResource(kind.example())) },
-                supportingText = {
-                    Text(
-                        state.error
-                            ?: stringResource(R.string.rules_counts, state.counts.total, state.counts.domains + state.counts.exact + state.counts.keywords, state.counts.cidrs),
+                        busy = state.saving,
+                        compact = true,
                     )
                 },
-                isError = state.error != null,
-                textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
-                shape = MaterialTheme.shapes.large,
+            )
+            Column(
                 modifier = Modifier
+                    .weight(1f)
                     .fillMaxWidth()
-                    .weight(1f),
-            )
-            Text(
-                text = stringResource(kind.syntax()),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
-            )
+                    .imePadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                if (state.loaded) {
+                    FiendTextField(
+                        value = state.text,
+                        onValueChange = onText,
+                        placeholder = stringResource(kind.example()),
+                        supporting = state.error
+                            ?: stringResource(R.string.rules_counts, state.counts.total, state.counts.domains + state.counts.exact + state.counts.keywords, state.counts.cidrs),
+                        isError = state.error != null,
+                        singleLine = false,
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            lineHeight = 22.sp,
+                        ),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = stringResource(kind.syntax()),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = FiendColors.muted,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                    )
+                }
+            }
         }
+        SnackbarHost(
+            hostState = snackbar,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 16.dp),
+        )
     }
 
     if (confirmDiscard) {
-        AlertDialog(
-            onDismissRequest = { confirmDiscard = false },
-            title = { Text(stringResource(R.string.rules_discard_title)) },
-            text = { Text(stringResource(R.string.rules_discard_body)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmDiscard = false
-                    onClose()
-                }) { Text(stringResource(R.string.rules_discard)) }
+        FiendAlertDialog(
+            title = stringResource(R.string.rules_discard_title),
+            confirmLabel = stringResource(R.string.rules_discard),
+            onConfirm = {
+                confirmDiscard = false
+                onClose()
             },
-            dismissButton = {
-                TextButton(onClick = { confirmDiscard = false }) { Text(stringResource(R.string.rules_keep)) }
-            },
-        )
+            dismissLabel = stringResource(R.string.rules_keep),
+            onDismiss = { confirmDiscard = false },
+        ) {
+            Text(
+                stringResource(R.string.rules_discard_body),
+                style = MaterialTheme.typography.bodyMedium,
+                color = FiendColors.muted,
+            )
+        }
     }
 }
 

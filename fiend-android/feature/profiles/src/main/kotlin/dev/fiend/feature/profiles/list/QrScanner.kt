@@ -25,12 +25,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -56,7 +52,11 @@ import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.multi.qrcode.QRCodeMultiReader
+import dev.fiend.core.designsystem.component.FiendButton
+import dev.fiend.core.designsystem.component.FiendButtonKind
+import dev.fiend.core.designsystem.component.FiendTopBar
 import dev.fiend.core.designsystem.icon.FiendIcons
+import dev.fiend.core.designsystem.theme.FiendColors
 import dev.fiend.feature.profiles.R
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -123,17 +123,38 @@ internal fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
         onDispose { active.set(false); analysis.clearAnalyzer(); camera?.unbind(preview, analysis); executor.shutdown(); surface?.willNotProvideSurface() }
     }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Scaffold(topBar = {
-            TopAppBar(title = { Text(stringResource(R.string.profiles_add_scan)) }, navigationIcon = { IconButton(onClick = onDismiss) { Icon(FiendIcons.ArrowBack, contentDescription = stringResource(R.string.scan_close)) } })
-        }) { padding ->
+        Scaffold(
+            containerColor = FiendColors.surface,
+            topBar = {
+                FiendTopBar(
+                    title = stringResource(R.string.profiles_add_scan),
+                    onBack = onDismiss,
+                    backLabel = stringResource(R.string.scan_close),
+                    navigationIcon = FiendIcons.Close,
+                )
+            },
+        ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 if (!permission || cameraError) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.padding(24.dp)) {
-                        Text(stringResource(if (cameraError) R.string.scan_camera_error else R.string.scan_permission))
+                        Text(stringResource(if (cameraError) R.string.scan_camera_error else R.string.scan_permission), color = FiendColors.muted)
                         Spacer(Modifier.height(16.dp))
                         if (!permission) {
-                            Button(onClick = { askPermission.launch(Manifest.permission.CAMERA) }) { Text(stringResource(R.string.scan_allow)) }
-                            Button(onClick = { context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }) { Text(stringResource(R.string.scan_settings)) }
+                            FiendButton(
+                                label = stringResource(R.string.scan_allow),
+                                onClick = { askPermission.launch(Manifest.permission.CAMERA) },
+                                kind = FiendButtonKind.Primary,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            FiendButton(
+                                label = stringResource(R.string.scan_settings),
+                                onClick = {
+                                    context.startActivity(
+                                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                    )
+                                },
+                            )
                         }
                     }
                 } else surface?.let { CameraXViewfinder(surfaceRequest = it, modifier = Modifier.fillMaxSize()) }
