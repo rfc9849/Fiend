@@ -3,7 +3,7 @@
   import { page } from '$app/state';
   import Brand from './Brand.svelte';
   import Icon from './Icon.svelte';
-  let { children, admin }: { children: Snippet; admin: string } = $props();
+  let { children, admin, version = '' }: { children: Snippet; admin: string; version?: string } = $props();
   let menu = $state(false);
   const items = [
     { href: '/', label: 'Dashboard', icon: 'home' },
@@ -21,7 +21,7 @@
     <div class="top">
       <a class="home" href="/" aria-label="fiend dashboard"><Brand /></a>
       <button type="button" class="menu" aria-expanded={menu} aria-controls="main-nav" aria-label={menu ? 'Close menu' : 'Open menu'} onclick={() => (menu = !menu)}>
-        <Icon name={menu ? 'close' : 'log'} size={18} />
+        <Icon name={menu ? 'close' : 'menu'} size={18} />
       </button>
     </div>
     <nav id="main-nav" aria-label="Main navigation">
@@ -35,6 +35,7 @@
           <Icon name="settings" size={16} /><span>Settings</span>
         </a>
         <p class="who">Signed in as {admin}</p>
+        {#if version}<p class="who">fiend {version}</p>{/if}
       </div>
     </nav>
   </aside>

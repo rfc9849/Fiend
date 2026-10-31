@@ -75,7 +75,7 @@
 
 <svelte:head><title>Users · fiend</title></svelte:head>
 
-<TopBar title="Users" subtitle="Each user has an own secret and link.">
+<TopBar title="Users">
   {#snippet actions()}<Button kind="primary" icon="plus" onclick={() => { draft = toDraft(null); fields = {}; formError = ''; adding = true; }}>Add user</Button>{/snippet}
 </TopBar>
 {#if error}<p class="note error" role="alert">{error}</p>{/if}
@@ -100,11 +100,11 @@
                 <td>
                   <button type="button" class="pick" aria-pressed={selected === user.id} onclick={() => (selected = user.id)}>
                     <span class="dot {user.state}" aria-hidden="true"></span><span>{user.name}</span><span class="visually-hidden">, {stateLabel(user.state)}</span>
-                    {#if user.online}<span class="badge green">{user.online} online</span>{/if}
+                    {#if user.online}<span class="badge green" title="{user.online} open session{user.online === 1 ? '' : 's'}">online</span>{/if}
                   </button>
                 </td>
                 <td class="num">{bytes(user.used)} / {user.traffic_limit ? bytes(user.traffic_limit) : '∞'}{#if user.traffic_limit}<span class="pct" class:warn={near(user)}> {percent(user.used, user.traffic_limit)} %</span>{/if}</td>
-                <td>{user.hold_days && !user.expire_at ? `${user.hold_days} d after first connect` : day(user.expire_at)}</td>
+                <td>{user.hold_days && !user.expire_at ? `${user.hold_days} d after first connection` : user.expire_at ? day(user.expire_at) : 'Never'}</td>
                 <td>{ago(user.last_seen)}</td>
                 <td>{user.nodes.length ? user.nodes.map(nodeName).join(', ') : 'All'}</td>
               </tr>
@@ -140,6 +140,8 @@
   .split.open { grid-template-columns: minmax(0, 1fr) 380px; }
   .list { min-width: 0; }
   .pick { display: inline-flex; align-items: center; gap: 8px; color: var(--text); text-align: left; }
+  .pick::after { content: ''; position: absolute; inset: 0; }
+  tbody tr { position: relative; cursor: pointer; }
   .pick:hover span:nth-child(2) { text-decoration: underline; }
   .pct { color: var(--muted); }
   .pct.warn { color: var(--warn); }

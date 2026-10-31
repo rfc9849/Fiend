@@ -238,7 +238,8 @@ async fn register_warp(app: &App, node_id: i64, client: &mut ControlClient) -> i
         Ok(status) => registered(app, node_id, status).await,
         Err(error) => {
             tracing::warn!(node = node_id, %error, "cannot register WARP");
-            app.audit(None, "warp register failed", &format!("node {node_id}"), &error.to_string())
+            let target = node_target(app, node_id).await;
+            app.audit(None, "WARP registration failed", &target, &error.to_string())
                 .await;
         }
     }
@@ -259,9 +260,16 @@ pub async fn registered(app: &App, node_id: i64, mut status: serde_json::Value) 
     if let Err(error) = result {
         tracing::warn!(node = node_id, %error, "cannot save WARP status");
     }
-    app.audit(None, "warp registered", &format!("node {node_id}"), "")
-        .await;
+    let target = node_target(app, node_id).await;
+    app.audit(None, "WARP registered", &target, "").await;
     app.emit("nodes", Some(node_id.to_string()));
+}
+
+async fn node_target(app: &App, node_id: i64) -> String {
+    match state::node(app, node_id).await {
+        Ok(node) => format!("node {}", node.name),
+        Err(_) => format!("node {node_id}"),
+    }
 }
 
 async fn mark(app: &App, node: i64, status: &str, error: Option<String>) {

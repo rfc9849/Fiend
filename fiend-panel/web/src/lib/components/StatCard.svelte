@@ -1,10 +1,10 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import Sparkline from './Sparkline.svelte';
-  let { label, icon, value, unit = '', samples = [], detail = '' }: { label: string; icon: string; value: string; unit?: string; samples?: number[]; detail?: string } = $props();
+  let { label, icon, value, unit = '', samples = [], detail = '', hint = '' }: { label: string; icon: string; value: string; unit?: string; samples?: number[]; detail?: string; hint?: string } = $props();
 </script>
 
-<section class="stat" aria-label={label}>
+<section class="stat" aria-label={label} title={hint || undefined}>
   <header><span>{label}</span><Icon name={icon} size={16} /></header>
   <p class="value"><span class="number">{value}</span>{#if unit}<span class="unit">{unit}</span>{/if}</p>
   {#if detail}<p class="detail">{detail}</p>{/if}

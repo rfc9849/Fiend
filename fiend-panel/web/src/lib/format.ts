@@ -72,7 +72,7 @@ export function stateLabel(state: string): string {
       disabled: 'Disabled',
       expired: 'Expired',
       limited: 'Limit reached',
-      on_hold: 'Starts on first connect'
+      on_hold: 'Waiting for first connection'
     } as Record<string, string>
   )[state] ?? state;
 }

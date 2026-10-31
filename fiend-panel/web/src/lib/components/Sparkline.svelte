@@ -1,10 +1,12 @@
 <script lang="ts">
   let { values, label }: { values: number[]; label: string } = $props();
   const path = $derived.by(() => {
-    if (values.length < 2) return '';
-    const max = Math.max(...values, 1);
-    const step = 100 / (values.length - 1);
-    return values.map((value, index) => `${index === 0 ? 'M' : 'L'}${(index * step).toFixed(2)} ${(28 - (value / max) * 26).toFixed(2)}`).join(' ');
+    const first = values.findIndex((value) => value !== 0);
+    const shown = first < 0 ? [] : values.slice(first);
+    if (shown.length < 2 || shown.every((value) => value === shown[0])) return '';
+    const max = Math.max(...shown, 1);
+    const step = 100 / (shown.length - 1);
+    return shown.map((value, index) => `${index === 0 ? 'M' : 'L'}${(index * step).toFixed(2)} ${(28 - (value / max) * 26).toFixed(2)}`).join(' ');
   });
 </script>
 

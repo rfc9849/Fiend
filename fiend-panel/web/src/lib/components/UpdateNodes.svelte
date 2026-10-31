@@ -9,19 +9,21 @@
   import { day } from '#lib/format.ts';
   import type { BundleView, JobStarted, JobView, NodeView } from '#lib/api/generated/index.ts';
 
-  let { open = $bindable(), nodes, selected, ondone }: { open: boolean; nodes: NodeView[]; selected: number[]; ondone: () => void } = $props();
+  let { open = $bindable(), nodes, selected = [], ondone }: { open: boolean; nodes: NodeView[]; selected?: number[]; ondone: () => void } = $props();
   let bundles = $state<BundleView[]>([]);
   let bundle = $state('');
   let job = $state<JobView | null>(null);
   let busy = $state(false);
   let error = $state('');
+  let picked = $state<number[]>([]);
   let stop: (() => void) | null = null;
-  const chosen = $derived(nodes.filter((node) => selected.includes(node.id)));
+  const chosen = $derived(nodes.filter((node) => picked.includes(node.id)));
 
   $effect(() => {
     if (open) {
       job = null;
       error = '';
+      picked = selected.length ? [...selected] : nodes.map((node) => node.id);
       api.get<BundleView[]>('/bundles').then((items) => {
         bundles = items;
         bundle = items[0] ? String(items[0].id) : '';
@@ -36,7 +38,7 @@
     busy = true;
     error = '';
     try {
-      const started = await api.post<JobStarted>('/nodes/update', { node_ids: selected, bundle_id: Number(bundle) });
+      const started = await api.post<JobStarted>('/nodes/update', { node_ids: picked, bundle_id: Number(bundle) });
       const refresh = async () => {
         job = await api.get<JobView>(`/jobs/${started.job_id}`);
         if (job.done) ondone();
@@ -57,15 +59,23 @@
   {#if error}<p class="note error" role="alert">{error}</p>{/if}
   {#if job}
     <Steps steps={job.steps} />
-    {#if job.error}<p class="note error result">{job.error}</p>{:else if job.done}<p class="note result">The update is complete.</p>{/if}
+    {#if job.error}<p class="note error result">{job.error}</p>{:else if job.done}<p class="note result">Done.</p>{/if}
   {:else}
     <div class="stack">
-      <p>The panel sends the node binary through the control session. The node checks it, restarts, and rolls back after three failed starts.</p>
-      <p><strong>Nodes:</strong> {chosen.map((node) => node.name).join(', ')}</p>
-      {#if bundles.length}
-        <Field label="Bundle" id="bundle"><Select id="bundle" bind:value={bundle} label="Bundle" options={bundles.map((item) => ({ value: String(item.id), label: `${item.version} · ${item.arch}`, detail: day(item.uploaded_at) }))} /></Field>
+      {#if nodes.length > 1}
+        <fieldset class="nodes">
+          <legend>Nodes</legend>
+          {#each nodes as node (node.id)}
+            <label class="check"><input type="checkbox" checked={picked.includes(node.id)} onchange={(event) => { const on = (event.currentTarget as HTMLInputElement).checked; picked = on ? [...picked, node.id] : picked.filter((item) => item !== node.id); }} />{node.name}<span class="muted small">{node.version ?? 'unknown version'}</span></label>
+          {/each}
+        </fieldset>
       {:else}
-        <p class="note warn">No bundle is available. Upload a bundle in Settings.</p>
+        <p><strong>Node:</strong> {chosen.map((node) => node.name).join(', ')}</p>
+      {/if}
+      {#if bundles.length}
+        <Field label="Version" id="bundle"><Select id="bundle" bind:value={bundle} label="Version" options={bundles.map((item) => ({ value: String(item.id), label: `${item.version} · ${item.arch}`, detail: day(item.uploaded_at) }))} /></Field>
+      {:else}
+        <p class="note warn">No bundle. Upload one in Settings.</p>
       {/if}
     </div>
   {/if}
@@ -81,4 +91,8 @@
 
 <style>
   .result { margin-top: 14px; }
+  .nodes { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  legend { font-weight: 500; font-size: 12px; padding: 0 4px; }
+  .check { display: flex; gap: 8px; align-items: center; }
+  .check input { width: 16px; height: 16px; accent-color: var(--accent); }
 </style>

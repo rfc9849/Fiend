@@ -11,22 +11,22 @@
   <Field label="Name" id="user-name" error={fields.name}><input id="user-name" bind:value={draft.name} /></Field>
   <Switch id="user-enabled" bind:checked={draft.enabled} label="Enabled" />
   <div class="grid-2">
-    <Field label="Traffic limit" id="user-limit" error={fields.traffic_limit} help="For example 50 GB. Empty means no limit."><input id="user-limit" bind:value={draft.limit} placeholder="No limit" /></Field>
+    <Field label="Traffic limit" id="user-limit" error={fields.traffic_limit} help="For example 50 GB"><input id="user-limit" bind:value={draft.limit} placeholder="No limit" /></Field>
     <Field label="Reset usage" id="user-reset" error={fields.reset_period}>
       <Select id="user-reset" bind:value={draft.reset} label="Reset usage" options={[{ value: 'none', label: 'Never' }, { value: 'day', label: 'Every day' }, { value: 'week', label: 'Every week' }, { value: 'month', label: 'Every month' }]} />
     </Field>
   </div>
   <Field label="Expiry" id="user-start" error={fields.hold_days}>
-    <Select id="user-start" bind:value={draft.start} label="Expiry" options={[{ value: 'never', label: 'Never expires' }, { value: 'date', label: 'On a date' }, { value: 'hold', label: 'Days after the first connect' }]} />
+    <Select id="user-start" bind:value={draft.start} label="Expiry" options={[{ value: 'never', label: 'Never expires' }, { value: 'date', label: 'On a date' }, { value: 'hold', label: 'Days after the first connection' }]} />
   </Field>
   {#if draft.start === 'date'}
     <Field label="Expiry date" id="user-expiry" error={fields.expire_at}><input id="user-expiry" type="date" bind:value={draft.expiry} /></Field>
   {:else if draft.start === 'hold'}
-    <Field label="Days after the first connect" id="user-hold" error={fields.hold_days}><input id="user-hold" inputmode="numeric" bind:value={draft.holdDays} /></Field>
+    <Field label="Days after the first connection" id="user-hold" error={fields.hold_days}><input id="user-hold" inputmode="numeric" bind:value={draft.holdDays} /></Field>
   {/if}
   <fieldset class="nodes">
     <legend>Nodes</legend>
-    <p class="small muted">Select none to allow all nodes, also nodes that you add later.</p>
+    <p class="small muted">None selected: all nodes.</p>
     {#each nodes as node (node.id)}
       <label class="check"><input type="checkbox" checked={draft.nodes.includes(node.id)} onchange={(event) => { const on = (event.currentTarget as HTMLInputElement).checked; draft.nodes = on ? [...draft.nodes, node.id] : draft.nodes.filter((item) => item !== node.id); }} />{node.name}</label>
     {/each}

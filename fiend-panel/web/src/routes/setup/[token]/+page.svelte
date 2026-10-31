@@ -62,42 +62,41 @@
 
 <Centered wide>
   {#if valid === false}
-    <h1>This setup link does not work</h1>
-    <p class="lead">The link works one time and for one hour. On the server, run <code>sudo /opt/fiend/bin/fiend-panel renew-setup /etc/fiend/panel.toml</code> and restart the panel with <code>sudo systemctl restart fiend-panel</code> to get a new link.</p>
+    <h1>Setup link expired</h1>
+    <p class="lead">New link: <code>sudo /opt/fiend/bin/fiend-panel renew-setup /etc/fiend/panel.toml && sudo systemctl restart fiend-panel</code></p>
   {:else if valid}
     <p class="step">Step 1 of 4</p>
-    <h1>Admin account</h1>
-    <p class="lead">This account manages all nodes and users. The panel is open only through your SSH tunnel.</p>
+    <h1 class="title">Admin account</h1>
     <form novalidate onsubmit={submit} class="stack">
       {#if error}<p class="note error" role="alert">{error}</p>{/if}
       <Field label="Name" id="name" error={fields.name}><input id="name" autocomplete="username" bind:value={name} /></Field>
       <div class="grid-2">
-        <Field label="Password" id="password" error={fields.password} help="12 characters or more."><input id="password" type="password" autocomplete="new-password" bind:value={password} /></Field>
+        <Field label="Password" id="password" error={fields.password} help="At least 12 characters"><input id="password" type="password" autocomplete="new-password" bind:value={password} /></Field>
         <Field label="Repeat password" id="confirm" error={fields.confirm}><input id="confirm" type="password" autocomplete="new-password" bind:value={confirm} /></Field>
       </div>
-      <Switch id="use-totp" bind:checked={useTotp} label="Use two-factor sign-in (recommended)" />
+      <Switch id="use-totp" bind:checked={useTotp} label="Two-factor sign-in" />
       {#if useTotp && totp}
         <div class="totp">
           <Qr svg={totp.qr_svg} label="QR code for the authenticator app" />
           <div class="stack grow">
-            <p>Scan the code with an authenticator app, or enter the key by hand.</p>
             <CopyField value={totp.secret} label="authenticator key" />
             <Field label="Code from the app" id="totp" error={fields.totp_code}><input id="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={code} /></Field>
           </div>
         </div>
       {:else}
-        <p class="note warn">Without two-factor sign-in you cannot add or remove other admins.</p>
+        <p class="note warn">Needed to add other admins.</p>
       {/if}
-      <div class="row end"><Button kind="primary" type="submit" {busy}>Create account and continue</Button></div>
+      <div class="row end"><Button kind="primary" type="submit" {busy}>Continue</Button></div>
     </form>
   {:else}
-    <p class="muted">Checking the setup link…</p>
+    <p class="muted">Checking…</p>
   {/if}
 </Centered>
 
 <style>
   .step { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
   .lead { margin: 6px 0 18px; line-height: 1.6; }
+  .title { margin-bottom: 18px; }
   .totp { display: flex; gap: 18px; align-items: flex-start; }
   .grow { flex: 1; min-width: 0; }
   .end { justify-content: flex-end; }

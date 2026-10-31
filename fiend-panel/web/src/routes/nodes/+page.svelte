@@ -10,7 +10,6 @@
   import type { NodeView } from '#lib/api/generated/index.ts';
 
   let nodes = $state<NodeView[]>([]);
-  let selected = $state<number[]>([]);
   let adding = $state(false);
   let updating = $state(false);
   let error = $state('');
@@ -37,14 +36,14 @@
 
 <svelte:head><title>Nodes · fiend</title></svelte:head>
 
-<TopBar title="Nodes" subtitle="Servers that this panel controls.">
+<TopBar title="Nodes">
   {#snippet actions()}
-    <Button icon="refresh" disabled={selected.length === 0} onclick={() => (updating = true)}>Update {selected.length ? `(${selected.length})` : ''}</Button>
+    <Button icon="refresh" disabled={nodes.length === 0} onclick={() => (updating = true)}>Update nodes</Button>
     <Button kind="primary" icon="plus" onclick={() => (adding = true)}>Add node</Button>
   {/snippet}
 </TopBar>
 {#if error}<p class="note error" role="alert">{error}</p>{/if}
-{#if loaded}<NodeTable {nodes} selectable bind:selected />{/if}
+{#if loaded}<NodeTable {nodes} />{/if}
 
 <AddNode bind:open={adding} ondone={load} />
-<UpdateNodes bind:open={updating} {nodes} {selected} ondone={load} />
+<UpdateNodes bind:open={updating} {nodes} ondone={load} />

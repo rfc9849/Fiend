@@ -133,7 +133,6 @@
   {#if error}<p class="note error" role="alert">{error}</p>{/if}
   {#if stage === 'host'}
     <form id="add-host" novalidate class="stack" onsubmit={scan}>
-      <p>The panel connects over SSH one time, installs the node, and then forgets the SSH credentials.</p>
       <div class="grid-2">
         <Field label="Server address" id="host" error={fields.host}><input id="host" placeholder="203.0.113.20" bind:value={host} /></Field>
         <Field label="SSH port" id="ssh_port" error={fields.ssh_port}><input id="ssh_port" inputmode="numeric" bind:value={sshPort} /></Field>
@@ -141,35 +140,34 @@
     </form>
   {:else if stage === 'confirm' && key}
     <div class="stack">
-      <p>Compare this host key with the key of the server. On the server, run <code>ssh-keygen -lf /etc/ssh/ssh_host_{key.algorithm.replace('ssh-', '').replace('ecdsa-sha2-nistp256', 'ecdsa')}_key.pub</code>.</p>
+      <p>Check it on the server: <code>ssh-keygen -lf /etc/ssh/ssh_host_{key.algorithm.replace('ssh-', '').replace('ecdsa-sha2-nistp256', 'ecdsa')}_key.pub</code></p>
       <div class="fingerprint"><span class="muted small">{key.algorithm}</span><code>{key.fingerprint}</code></div>
-      <p class="note warn">Continue only if the fingerprint is the same. A different key can mean that someone intercepts the connection.</p>
     </div>
   {:else if stage === 'credentials'}
     <form id="add-credentials" novalidate class="stack" onsubmit={install}>
       <div class="grid-2">
         <Field label="Node name" id="name" error={fields.name}><input id="name" bind:value={name} /></Field>
-        <Field label="Node port" id="node_port" error={fields.node_port} help="The disguised TLS port for clients."><input id="node_port" inputmode="numeric" bind:value={nodePort} /></Field>
+        <Field label="Node port" id="node_port" error={fields.node_port}><input id="node_port" inputmode="numeric" bind:value={nodePort} /></Field>
         <Field label="SSH user" id="user" error={fields.user}><input id="user" autocomplete="off" bind:value={user} /></Field>
         <Field label="Sign in with" id="auth"><Select id="auth" bind:value={auth} label="Sign in with" options={[{ value: 'key', label: 'Private key' }, { value: 'password', label: 'Password' }]} /></Field>
       </div>
       {#if auth === 'key'}
-        <Field label="Private key" id="private_key" error={fields.private_key} help="The key is used once and is not saved."><textarea id="private_key" autocomplete="off" spellcheck="false" bind:value={privateKey}></textarea></Field>
-        <Field label="Key passphrase" id="passphrase" help="Leave empty if the key has no passphrase."><input id="passphrase" type="password" autocomplete="off" bind:value={passphrase} /></Field>
+        <Field label="Private key" id="private_key" error={fields.private_key} help="Not saved."><textarea id="private_key" autocomplete="off" spellcheck="false" bind:value={privateKey}></textarea></Field>
+        <Field label="Key passphrase" id="passphrase"><input id="passphrase" type="password" autocomplete="off" bind:value={passphrase} /></Field>
       {:else}
         <Field label="SSH password" id="password" error={fields.password}><input id="password" type="password" autocomplete="off" bind:value={password} /></Field>
       {/if}
       {#if user.trim() !== 'root'}
-        <Field label="sudo password" id="sudo" help="Needed if the user is not root. Leave empty to use the SSH password or password-free sudo."><input id="sudo" type="password" autocomplete="off" bind:value={sudo} /></Field>
+        <Field label="sudo password" id="sudo" help="Empty: SSH password or passwordless sudo."><input id="sudo" type="password" autocomplete="off" bind:value={sudo} /></Field>
       {/if}
-      <Field label="Disguise" id="disguise" help="The node uses this origin and template.">
+      <Field label="Disguise" id="disguise">
         <Select id="disguise" bind:value={disguise} label="Disguise" options={[...disguises.map((item) => ({ value: String(item.id), label: item.name, detail: item.origin_host })), { value: '', label: 'Choose later' }]} />
       </Field>
     </form>
   {:else if stage === 'progress'}
     {#if job}
       <Steps steps={job.steps} />
-      {#if job.error}<p class="note error result" role="alert">{job.error}</p>{:else if job.done}<p class="note result">The node is installed.</p>{/if}
+      {#if job.error}<p class="note error result" role="alert">{job.error}</p>{:else if job.done}<p class="note result">Installed.</p>{/if}
     {:else}
       <p class="muted">Starting…</p>
     {/if}
@@ -180,7 +178,7 @@
       <Button kind="primary" type="submit" form="add-host" {busy}>Check host key</Button>
     {:else if stage === 'confirm'}
       <Button kind="ghost" onclick={() => (stage = 'host')}>Back</Button>
-      <Button kind="primary" onclick={() => (stage = 'credentials')}>The key is correct</Button>
+      <Button kind="primary" onclick={() => (stage = 'credentials')}>Key matches</Button>
     {:else if stage === 'credentials'}
       <Button kind="ghost" onclick={() => (stage = 'confirm')}>Back</Button>
       <Button kind="primary" type="submit" form="add-credentials" {busy}>Install node</Button>

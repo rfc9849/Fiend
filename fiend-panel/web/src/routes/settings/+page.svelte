@@ -73,7 +73,7 @@
     try {
       await api.post('/account/password', { current: password.current, password: password.next, totp_code: password.code || null });
       password = { current: '', next: '', confirm: '', code: '' };
-      toast('Password changed. Other sessions are closed.');
+      toast('Password changed');
       await load();
     } catch (failure) {
       const result = fieldErrors(failure);
@@ -151,7 +151,7 @@
       link.click();
       URL.revokeObjectURL(url);
       backupCode = '';
-      toast('Backup downloaded. It holds all secrets. Keep it safe.');
+      toast('Backup downloaded');
     } catch (failure) {
       toast(fieldErrors(failure).form ?? 'The backup failed', true);
     } finally {
@@ -185,15 +185,14 @@
   </section>
 
   <section class="card" aria-labelledby="look-title">
-    <h2 id="look-title">Theme</h2>
-    <div class="theme"><Field label="Theme" id="theme"><Select id="theme" bind:value={themeValue} label="Theme" onchange={(value) => setTheme(value as Theme)} options={[{ value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]} /></Field></div>
-    <p class="small muted">The panel version is {session.info?.version ?? '—'}.</p>
+    <h2 id="look-title">Appearance</h2>
+    <div class="theme"><Field label="Theme" id="theme"><Select id="theme" bind:value={themeValue} label="Theme" onchange={(value) => setTheme(value as Theme)} options={[{ value: 'system', label: 'Same as the system' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]} /></Field></div>
   </section>
 </div>
 
 <section class="card" aria-labelledby="admins-title">
   <div class="card-header"><h2 id="admins-title">Admins</h2><Button icon="plus" disabled={!me?.totp} onclick={() => { admin = { name: '', password: '', code: '' }; adminFields = {}; adminError = ''; adminOpen = true; }}>Add admin</Button></div>
-  {#if !me?.totp}<p class="note warn">Turn on two-factor sign-in to add or remove admins.</p>{/if}
+  {#if !me?.totp}<p class="note warn">Needs two-factor sign-in.</p>{/if}
   <div class="table-wrap">
     <table>
       <thead><tr><th>Name</th><th>Two-factor</th><th>Added</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
@@ -215,7 +214,6 @@
       {uploadBusy ? 'Uploading…' : 'Upload bundle'}
     </label>
   </div>
-  <p class="small muted">Bundles from <code>tools/package/server-bundle.sh</code>. The panel uses them to add and update nodes. Nodes download nothing.</p>
   {#if bundles.length}
     <div class="table-wrap">
       <table>
@@ -229,13 +227,13 @@
       </table>
     </div>
   {:else}
-    <p class="note warn">No bundle. Upload one before you add or update nodes.</p>
+    <p class="note warn">No bundle. Build one with <code>tools/package/server-bundle.sh</code>.</p>
   {/if}
 </section>
 
 <section class="card" aria-labelledby="backup-title">
-  <h2 id="backup-title">Backup and restore</h2>
-  <p class="lead">The backup holds the user secrets and the node control secrets. Keep it as safe as the server.</p>
+  <h2 id="backup-title">Backup</h2>
+  <p class="lead">Contains all secrets.</p>
   <div class="row">
     {#if me?.totp}<div class="code"><Field label="Two-factor code" id="backup-code"><input id="backup-code" inputmode="numeric" autocomplete="one-time-code" bind:value={backupCode} /></Field></div>{/if}
     <Button icon="down" busy={backupBusy} onclick={backup}>Download backup</Button>
@@ -247,12 +245,12 @@
 </section>
 
 <section class="card" aria-labelledby="audit-title">
-  <h2 id="audit-title">Audit log</h2>
+  <h2 id="audit-title" class="spaced">Audit log</h2>
   <div class="table-wrap audit">
     <table>
-      <thead><tr><th>Time</th><th>Admin</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+      <thead><tr><th>Time</th><th>By</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
       <tbody>
-        {#each audit as row (row.id)}<tr><td>{date(row.ts)}</td><td>{row.admin ?? 'panel'}</td><td>{row.action}</td><td>{row.target}</td><td class="detail">{row.detail}</td></tr>{/each}
+        {#each audit as row (row.id)}<tr><td>{date(row.ts)}</td><td>{row.admin ?? 'panel'}</td><td>{row.action.charAt(0).toUpperCase() + row.action.slice(1)}</td><td>{row.target}</td><td class="detail" title={row.detail}>{row.detail}</td></tr>{/each}
       </tbody>
     </table>
   </div>
@@ -261,7 +259,7 @@
 <Dialog bind:open={totpOpen} title="Turn on two-factor sign-in">
   {#if totp}
     <form id="totp-form" novalidate class="stack" onsubmit={enableTotp}>
-      <div class="totp"><Qr svg={totp.qr_svg} label="QR code for the authenticator app" /><div class="stack grow"><p>Scan the code, or enter the key by hand.</p><CopyField value={totp.secret} label="authenticator key" /></div></div>
+      <div class="totp"><Qr svg={totp.qr_svg} label="QR code for the authenticator app" /><div class="stack grow"><p>Scan the code or enter the key.</p><CopyField value={totp.secret} label="authenticator key" /></div></div>
       <Field label="Code from the app" id="totp-code" error={totpFields.totp_code}><input id="totp-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={totpCode} /></Field>
     </form>
   {/if}
@@ -269,7 +267,7 @@
 </Dialog>
 
 <Dialog bind:open={disableOpen} title="Turn off two-factor sign-in">
-  <div class="stack"><p>Without two-factor sign-in you cannot change admins.</p><Field label="Two-factor code" id="disable-code"><input id="disable-code" inputmode="numeric" bind:value={disableCode} /></Field></div>
+  <div class="stack"><Field label="Two-factor code" id="disable-code"><input id="disable-code" inputmode="numeric" bind:value={disableCode} /></Field></div>
   {#snippet actions()}<Button kind="ghost" onclick={() => (disableOpen = false)}>Cancel</Button><Button kind="danger" onclick={async () => { try { await api.del('/account/totp', { code: disableCode }); disableOpen = false; toast('Two-factor sign-in is off'); await load(); } catch (failure) { toast(fieldErrors(failure).form ?? Object.values(fieldErrors(failure).fields)[0] ?? 'Failed', true); } }}>Turn off</Button>{/snippet}
 </Dialog>
 
@@ -277,19 +275,19 @@
   <form id="admin-form" novalidate class="stack" onsubmit={addAdmin}>
     {#if adminError}<p class="note error" role="alert">{adminError}</p>{/if}
     <Field label="Name" id="admin-name" error={adminFields.name}><input id="admin-name" autocomplete="off" bind:value={admin.name} /></Field>
-    <Field label="Password" id="admin-password" error={adminFields.password} help="The new admin can change it and turn on two-factor sign-in."><input id="admin-password" type="password" autocomplete="new-password" bind:value={admin.password} /></Field>
+    <Field label="Password" id="admin-password" error={adminFields.password}><input id="admin-password" type="password" autocomplete="new-password" bind:value={admin.password} /></Field>
     <Field label="Your two-factor code" id="admin-code" error={adminFields.current_code}><input id="admin-code" inputmode="numeric" autocomplete="one-time-code" bind:value={admin.code} /></Field>
   </form>
   {#snippet actions()}<Button kind="ghost" onclick={() => (adminOpen = false)}>Cancel</Button><Button kind="primary" type="submit" form="admin-form">Add admin</Button>{/snippet}
 </Dialog>
 
 <Dialog bind:open={removeAdminOpen} title="Remove {removingAdmin?.name ?? ''}">
-  <div class="stack"><p>The admin cannot sign in any more.</p><Field label="Your two-factor code" id="remove-code"><input id="remove-code" inputmode="numeric" bind:value={removeCode} /></Field></div>
+  <div class="stack"><Field label="Your two-factor code" id="remove-code"><input id="remove-code" inputmode="numeric" bind:value={removeCode} /></Field></div>
   {#snippet actions()}<Button kind="ghost" onclick={() => (removeAdminOpen = false)}>Cancel</Button><Button kind="danger" onclick={async () => { try { await api.del(`/admins/${removingAdmin?.id}?code=${encodeURIComponent(removeCode)}`); removeAdminOpen = false; toast('Admin removed'); await load(); } catch (failure) { toast(fieldErrors(failure).form ?? Object.values(fieldErrors(failure).fields)[0] ?? 'Failed', true); } }}>Remove</Button>{/snippet}
 </Dialog>
 
-<Confirm bind:open={restoreOpen} title="Restore the database" message="The panel replaces all its data with the file {restoreFile?.name ?? ''} and restarts. Sign in again after the restart." action="Restore" onconfirm={async () => { if (restoreFile) await api.upload('/restore', await restoreFile.arrayBuffer()); toast('The panel restarts with the restored data'); setTimeout(() => location.assign('/login'), 4000); }} />
-<Confirm bind:open={removeBundleOpen} title="Remove bundle" message="The bundle {removingBundle?.version ?? ''} {removingBundle?.arch ?? ''} is removed from the panel." action="Remove" onconfirm={async () => { if (removingBundle) await api.del(`/bundles/${removingBundle.id}`); toast('Bundle removed'); await load(); }} />
+<Confirm bind:open={restoreOpen} title="Restore from {restoreFile?.name ?? ''}" message="All panel data is replaced. The panel restarts." action="Restore" onconfirm={async () => { if (restoreFile) await api.upload('/restore', await restoreFile.arrayBuffer()); toast('Restarting'); setTimeout(() => location.assign('/login'), 4000); }} />
+<Confirm bind:open={removeBundleOpen} title="Remove bundle {removingBundle?.version ?? ''} {removingBundle?.arch ?? ''}" action="Remove" onconfirm={async () => { if (removingBundle) await api.del(`/bundles/${removingBundle.id}`); toast('Bundle removed'); await load(); }} />
 
 <style>
   .columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; align-items: start; }
@@ -297,6 +295,7 @@
   .status { margin: 12px 0 16px; }
   .theme { max-width: 220px; margin: 12px 0; }
   .lead { margin: 6px 0 12px; }
+  .spaced { margin-bottom: 14px; }
   .upload { display: inline-flex; align-items: center; min-height: 32px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 12px; font-weight: 500; }
   .upload:hover { background: var(--hover); }
   .upload:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }

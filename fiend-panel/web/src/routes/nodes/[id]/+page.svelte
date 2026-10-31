@@ -6,7 +6,6 @@
   import Field from '#lib/components/Field.svelte';
   import Select from '#lib/components/Select.svelte';
   import Confirm from '#lib/components/Confirm.svelte';
-  import HealthRing from '#lib/components/HealthRing.svelte';
   import WarpCard from '#lib/components/WarpCard.svelte';
   import RoutingEditor from '#lib/components/RoutingEditor.svelte';
   import UpdateNodes from '#lib/components/UpdateNodes.svelte';
@@ -97,17 +96,16 @@
     <div class="main">
       <section class="card" aria-labelledby="state-title">
         <div class="state">
-          <HealthRing status={node.status} size={44} />
+          <span class="dot big {node.status}" aria-hidden="true"></span>
           <div>
             <h2 id="state-title">{stateLabel(node.status)}</h2>
             <p>{node.last_error ?? `Last seen ${ago(node.last_seen)}`}</p>
           </div>
         </div>
         <dl class="facts">
-          <dt>Version</dt><dd class="mono">{node.version ?? '—'} {node.arch ?? ''}</dd>
-          <dt>Binary</dt><dd class="mono">{node.binary_sha256 ? node.binary_sha256.slice(0, 16) : '—'}</dd>
+          <dt>Version</dt><dd>{#if node.version}<span class="mono">{node.version}</span> <span class="muted">{node.arch ?? ''}</span>{:else}—{/if}</dd>
           <dt>Started</dt><dd>{date(node.started_at)}</dd>
-          <dt>Settings</dt><dd>{node.applied_version >= node.desired_version ? 'Current' : 'Waiting for sync'} <span class="muted small">(v{node.applied_version})</span></dd>
+          <dt>Settings</dt><dd>{node.applied_version >= node.desired_version ? 'Up to date' : 'Waiting for sync'}</dd>
           <dt>CPU</dt><dd>{node.cpu === null ? '—' : `${node.cpu.toFixed(0)} %`}</dd>
           <dt>Memory</dt><dd>{node.memory_used === null ? '—' : `${bytes(node.memory_used)} of ${bytes(node.memory_total)}`}</dd>
           <dt>Traffic now</dt><dd>{rate(node.traffic_rate)}</dd>
@@ -120,19 +118,19 @@
         <form novalidate class="stack form-body" onsubmit={save}>
           <div class="grid-2">
             <Field label="Name" id="node-name" error={fields.name}><input id="node-name" bind:value={name} /></Field>
-            <Field label="Public address" id="node-address" error={fields.address} help="Links use this address."><input id="node-address" bind:value={address} /></Field>
+            <Field label="Public address" id="node-address" error={fields.address}><input id="node-address" bind:value={address} /></Field>
           </div>
-          <Field label="Disguise" id="node-disguise" error={fields.disguise_id} help="The origin and TLS template of this node.">
+          <Field label="Disguise" id="node-disguise" error={fields.disguise_id}>
             <Select id="node-disguise" bind:value={disguise} label="Disguise" options={[{ value: '', label: 'None' }, ...disguises.map((item) => ({ value: String(item.id), label: item.name, detail: item.origin_host }))]} />
           </Field>
-          <div class="row"><Button kind="primary" type="submit" busy={saving}>Save</Button><Button kind="danger" onclick={() => (removing = true)}>Remove from panel</Button></div>
+          <div class="row between"><Button kind="primary" type="submit" busy={saving}>Save</Button><Button kind="danger" onclick={() => (removing = true)}>Remove from panel</Button></div>
         </form>
       </section>
 
       <section class="card" aria-labelledby="logs-title">
-        <div class="card-header"><h2 id="logs-title">Logs</h2><Button icon="log" busy={loadingLogs} onclick={loadLogs}>{logs ? 'Reload' : 'Show logs'}</Button></div>
+        <div class="card-header" class:flat={!logs}><h2 id="logs-title">Logs</h2><Button icon="log" busy={loadingLogs} onclick={loadLogs}>{logs ? 'Reload' : 'Show logs'}</Button></div>
         {#if logs}
-          {#if logs.length}<pre class="logs" aria-label="Node log lines">{logs.join('\n')}</pre>{:else}<p class="muted">No log lines.</p>{/if}
+          {#if logs.length}<pre class="logs" aria-label="Node log lines">{logs.join('\n')}</pre>{:else}<p class="muted">Empty.</p>{/if}
         {/if}
       </section>
     </div>
@@ -140,12 +138,12 @@
       <WarpCard node={id} />
     </div>
   </div>
-  <section class="routing" aria-label="Node routing">
-    <h2>Routing on this node</h2>
+  <section class="routing" aria-labelledby="routing-title">
+    <h2 id="routing-title">Routing on this node</h2>
     <RoutingEditor node={id} />
   </section>
-  <Confirm bind:open={restarting} title="Restart {node.name}" message="Open connections on this node close. Clients connect again." action="Restart" onconfirm={async () => { await api.post(`/nodes/${id}/restart`); toast('The node restarts'); }} />
-  <Confirm bind:open={removing} title="Remove {node.name}" message="The panel stops managing this node. The node software stays on the server and keeps the last settings." action="Remove" onconfirm={async () => { await api.del(`/nodes/${id}`); toast('Node removed'); await goto('/nodes'); }} />
+  <Confirm bind:open={restarting} title="Restart {node.name}" message="Open connections close." action="Restart" onconfirm={async () => { await api.post(`/nodes/${id}/restart`); toast('The node restarts'); }} />
+  <Confirm bind:open={removing} title="Remove {node.name} from the panel" message="The node keeps running with its last settings." action="Remove" onconfirm={async () => { await api.del(`/nodes/${id}`); toast('Node removed'); await goto('/nodes'); }} />
   <UpdateNodes bind:open={updating} nodes={[node]} selected={[id]} ondone={() => load()} />
 {:else if error}
   <p class="note error" role="alert">{error}</p>
@@ -157,12 +155,16 @@
   .layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
   .main, .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   .main :global(.card + .card) { margin-top: 0; }
-  .state { display: flex; gap: 14px; align-items: center; margin-bottom: 16px; }
+  .state { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; }
+  .dot.big { width: 12px; height: 12px; box-shadow: 0 0 0 4px var(--soft); }
+  .between { justify-content: space-between; }
+  .flat { margin-bottom: 0; }
   .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 18px; margin: 0; }
   dt { color: var(--muted); }
   dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
   .form-body { margin-top: 14px; }
   .logs { margin: 0; overflow-x: auto; padding: 12px; background: var(--soft); border-radius: 6px; font: 11px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-  .routing { margin-top: 28px; }
+  .routing { margin-top: 32px; }
+  .routing > h2 { margin-bottom: 12px; font-size: 18px; }
   @media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); } }
 </style>

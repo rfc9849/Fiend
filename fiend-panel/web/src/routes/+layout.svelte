@@ -49,7 +49,7 @@
   {#if open || page.url.pathname.startsWith('/welcome') || !session.info}
     {@render children()}
   {:else}
-    <Shell admin={session.info.admin.name}>{@render children()}</Shell>
+    <Shell admin={session.info.admin.name} version={session.info.version}>{@render children()}</Shell>
   {/if}
 {/if}
 <Toasts />

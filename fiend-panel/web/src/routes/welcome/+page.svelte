@@ -94,7 +94,7 @@
       try {
         await api.post(`/disguises/${created.id}/probe`, { node_id: localNode.id });
       } catch (failure) {
-        toast(`The origin probe failed. You can probe again on the Disguises page. ${fieldErrors(failure).form ?? ''}`, true);
+        toast(`Origin probe failed. ${fieldErrors(failure).form ?? ''}`, true);
       }
       await refresh();
       step = 4;
@@ -144,35 +144,32 @@
   <p class="step">Step {step} of 4</p>
   {#if error}<p class="note error" role="alert">{error}</p>{/if}
   {#if step === 2}
-    <h1>Local node</h1>
-    <p class="lead">This server runs the first node. The panel controls it through a local socket.</p>
+    <h1 class="title">Local node</h1>
     <form novalidate class="stack" onsubmit={saveNode}>
       {#if defaults}
         <dl class="facts">
-          <dt>Node port</dt><dd class="mono">{defaults.port}</dd>
-          <dt>Settings</dt><dd>{defaults.imported ? `Imported from the old server. ${defaults.users} existing secret${defaults.users === 1 ? '' : 's'} become users, so existing clients keep working.` : 'New node'}</dd>
+          <dt>Port</dt><dd class="mono">{defaults.port}</dd>
+          {#if defaults.imported}<dt>Imported</dt><dd>{defaults.users} existing secret{defaults.users === 1 ? '' : 's'}</dd>{/if}
         </dl>
         {#if defaults.error}<p class="note error">{defaults.error}</p>{/if}
       {/if}
       {#if localNode}
-        <p class="note">The local node <strong>{localNode.name}</strong> is added with the address <code>{localNode.address}</code>.</p>
+        <p class="note"><strong>{localNode.name}</strong> · <code>{localNode.address}</code></p>
       {:else}
         <div class="grid-2">
           <Field label="Name" id="name" error={fields.name}><input id="name" bind:value={nodeName} /></Field>
-          <Field label="Public address" id="address" error={fields.address} help={defaults?.address ? 'Found automatically. Change it if clients use a different IP address or host name.' : 'Clients connect to this IP address or host name.'}><input id="address" inputmode="url" placeholder="203.0.113.10" bind:value={address} /></Field>
+          <Field label="Public address" id="address" error={fields.address}><input id="address" inputmode="url" placeholder="203.0.113.10" bind:value={address} /></Field>
         </div>
       {/if}
       <div class="row end"><Button kind="primary" type="submit" {busy} disabled={!defaults?.available && !localNode}>Next</Button></div>
     </form>
   {:else if step === 3}
-    <h1>Disguise</h1>
-    <p class="lead">Clients send a copy of a real browser ClientHello. Visitors without a secret see the origin site.</p>
+    <h1 class="title">Disguise</h1>
     <form novalidate class="stack" onsubmit={saveDisguise}>
       {#if session.info?.wizard.disguise}
-        <p class="note">The local node has a disguise. You can change it on the Disguises page.</p>
+        <p class="note">Already set.</p>
       {:else}
         <TemplatePicker {presets} bind:preset bind:file error={fields.template} />
-        <p class="small muted">The panel probes the origin from the local node.</p>
       {/if}
       <div class="row between">
         <Button kind="ghost" onclick={() => (step = 2)}>Back</Button>
@@ -180,13 +177,11 @@
       </div>
     </form>
   {:else}
-    <h1>First user</h1>
-    <p class="lead">Each user has an own secret. A link holds all nodes of the user.</p>
+    <h1 class="title">First user</h1>
     {#if link}
       <div class="share">
         <Qr svg={link.qr_svg} label="QR code with the link for {userName}" />
         <div class="stack grow">
-          <p>Scan the code with the Android app, or copy the link into the desktop app or the CLI.</p>
           <CopyField value={link.link} label="link" />
           {#each link.warnings as warning}<p class="note warn">{warning}</p>{/each}
         </div>
@@ -212,7 +207,7 @@
 
 <style>
   .step { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-  .lead { margin: 6px 0 18px; line-height: 1.6; }
+  .title { margin-bottom: 18px; }
   .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
   dt { color: var(--muted); }
   dd { margin: 0; }

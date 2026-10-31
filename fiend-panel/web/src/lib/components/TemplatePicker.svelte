@@ -29,10 +29,10 @@
   }
 </script>
 
-<Field label="TLS template" id="template" error={error || fileError} help="Wikipedia, or your own ClientHello capture (.bin) or template (.json). The origin is the SNI host of the template, port 443.">
-  <Select id="template" bind:value={preset} {options} label="TLS template" />
+<Field label="TLS template" id={presets.length ? 'template' : 'template-file'} error={error || fileError} help=".bin capture or .json template">
+  {#if presets.length}<Select id="template" bind:value={preset} {options} label="TLS template" />{/if}
 </Field>
-{#if preset === 'file'}
+{#if preset === 'file' || !presets.length}
   <div class="file">
     <label class="pick" for="template-file">Choose a file</label>
     <input id="template-file" class="visually-hidden" type="file" accept=".bin,.json,application/json,application/octet-stream" onchange={pick} />

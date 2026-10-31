@@ -159,7 +159,7 @@
 </script>
 
 {#if error}<p class="note error" role="alert">{error}</p>{/if}
-<p class="note">The first rule that matches wins. {node === null ? 'Node rules come after these global rules.' : 'Global rules come first, then these node rules.'} No match means direct. Destinations on the bypass list of a client never reach the node, so server rules do not apply to them.</p>
+<p class="note">First match wins. {node === null ? 'Node rules run after these.' : 'Global rules run first.'} No match: direct.</p>
 
 <section class="block" aria-labelledby="outbounds-{node ?? 'global'}">
   <div class="card-header"><h2 id="outbounds-{node ?? 'global'}">{node === null ? 'Global outbounds' : 'Outbounds of this node'}</h2><Button icon="plus" onclick={() => editOutbound(null)}>Add outbound</Button></div>
@@ -173,15 +173,17 @@
               <td class="mono">{item.name}</td>
               <td>{kinds.find((kind) => kind.value === item.kind)?.label ?? item.kind}</td>
               <td class="mono">{item.kind === 'fiend' ? nodes.find((other) => other.id === item.link_node_id)?.name ?? '—' : item.server ?? '—'}{#if item.username} · {item.username}{/if}</td>
-              <td>{item.udp ? 'yes' : item.udp_fallback ? `to ${item.udp_fallback}` : 'blocked'}</td>
+              <td>{item.udp ? 'Yes' : item.udp_fallback ? `Through ${item.udp_fallback}` : 'Blocked'}</td>
               <td class="actions"><IconButton icon="edit" label="Edit {item.name}" onclick={() => editOutbound(item)} /><IconButton icon="close" label="Remove {item.name}" onclick={() => { removing = { kind: 'outbound', id: item.id, name: item.name }; removeOpen = true; }} /></td>
             </tr>
           {/each}
         </tbody>
       </table>
     </div>
+  {:else if node === null}
+    <p class="empty">No outbounds.</p>
   {:else}
-    <p class="empty">No outbounds. All traffic goes direct.</p>
+    <p class="empty">None. {#if global?.outbounds.length}Global: <span class="mono">{global.outbounds.map((item) => item.name).join(', ')}</span> · <a href="/routing">Edit</a>{/if}</p>
   {/if}
 </section>
 
@@ -190,11 +192,11 @@
   {#if routing?.rules.length}
     <div class="table-wrap">
       <table>
-        <thead><tr><th class="num">#</th><th>Patterns</th><th>Outbound</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+        <thead><tr><th class="index">#</th><th>Patterns</th><th>Outbound</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
         <tbody>
           {#each routing.rules as item, index (item.id)}
             <tr>
-              <td class="num">{index + 1}</td>
+              <td class="index">{index + 1}</td>
               <td class="mono pattern">{summary(item.pattern)}</td>
               <td class="mono">{item.outbound}</td>
               <td class="actions">
@@ -208,33 +210,34 @@
         </tbody>
       </table>
     </div>
-  {:else}
+  {:else if node === null}
     <p class="empty">No rules.</p>
+  {:else}
+    <p class="empty">None. {#if global?.rules.length}{global.rules.length} global rule{global.rules.length === 1 ? '' : 's'} · <a href="/routing">Edit</a>{/if}</p>
   {/if}
 </section>
 
 <Dialog bind:open={outboundOpen} title={editing === null ? 'Add outbound' : 'Edit outbound'}>
   <form id="outbound-form" novalidate class="stack" onsubmit={saveOutbound}>
     {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
-    <Field label="Name" id="outbound-name" error={fields.name} help="Rules use this name."><input id="outbound-name" bind:value={form.name} /></Field>
+    <Field label="Name" id="outbound-name" error={fields.name}><input id="outbound-name" bind:value={form.name} /></Field>
     <Field label="Type" id="outbound-kind" error={fields.kind}><Select id="outbound-kind" bind:value={form.kind} options={kinds} label="Type" /></Field>
     {#if form.kind === 'socks5' || form.kind === 'http'}
-      <Field label="Proxy server" id="outbound-server" error={fields.server} help="host:port"><input id="outbound-server" bind:value={form.server} placeholder="127.0.0.1:1080" /></Field>
+      <Field label="Proxy server" id="outbound-server" error={fields.server}><input id="outbound-server" bind:value={form.server} placeholder="127.0.0.1:1080" /></Field>
       <div class="grid-2">
-        <Field label="User name" id="outbound-user" help="Optional."><input id="outbound-user" autocomplete="off" bind:value={form.username} /></Field>
-        <Field label="Password" id="outbound-password" error={fields.password} help={editing === null ? 'Optional.' : 'Leave empty to keep the saved password.'}><input id="outbound-password" type="password" autocomplete="off" bind:value={form.password} /></Field>
+        <Field label="User name" id="outbound-user"><input id="outbound-user" autocomplete="off" bind:value={form.username} /></Field>
+        <Field label="Password" id="outbound-password" error={fields.password} help={editing === null ? '' : 'Empty keeps the saved password.'}><input id="outbound-password" type="password" autocomplete="off" bind:value={form.password} /></Field>
       </div>
       {#if form.kind === 'socks5'}<Switch id="outbound-udp" bind:checked={form.udp} label="The proxy supports UDP ASSOCIATE" />{/if}
     {/if}
     {#if form.kind === 'fiend'}
-      <Field label="Node" id="outbound-link" error={fields.link_node_id} help="The panel adds a service user on that node."><Select id="outbound-link" bind:value={form.link} label="Node" options={nodes.filter((item) => item.id !== node).map((item) => ({ value: String(item.id), label: item.name, detail: item.address }))} /></Field>
+      <Field label="Node" id="outbound-link" error={fields.link_node_id}><Select id="outbound-link" bind:value={form.link} label="Node" options={nodes.filter((item) => item.id !== node).map((item) => ({ value: String(item.id), label: item.name, detail: item.address }))} /></Field>
     {/if}
     {#if form.kind === 'http' || form.kind === 'warp' || (form.kind === 'socks5' && !form.udp)}
-      <Field label="UDP traffic" id="outbound-fallback" error={fields.udp_fallback} help="This outbound has no UDP. Block UDP or send it to another outbound.">
+      <Field label="UDP traffic" id="outbound-fallback" error={fields.udp_fallback}>
         <Select id="outbound-fallback" bind:value={form.fallback} label="UDP traffic" options={[{ value: '', label: 'Block UDP' }, { value: 'direct', label: 'direct' }, ...available.filter((item) => item.udp && item.name !== form.name).map((item) => ({ value: item.name, label: item.name, detail: item.kind }))]} />
       </Field>
     {/if}
-    {#if form.kind === 'warp'}<p class="small muted">Turn on WARP on the node page. Nodes without WARP skip this outbound.</p>{/if}
   </form>
   {#snippet actions()}
     <Button kind="ghost" onclick={() => (outboundOpen = false)}>Cancel</Button>
@@ -245,7 +248,7 @@
 <Dialog bind:open={ruleOpen} title={editing === null ? 'Add rule' : 'Edit rule'}>
   <form id="rule-form" novalidate class="stack" onsubmit={saveRule}>
     {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
-    <Field label="Patterns" id="rule-pattern" error={fields.pattern} help="One per line: domain:example.com, full:www.example.com, keyword:tracker, ip:10.0.0.0/8."><textarea id="rule-pattern" spellcheck="false" bind:value={rule.pattern}></textarea></Field>
+    <Field label="Patterns" id="rule-pattern" error={fields.pattern} help="One per line: domain:example.com, full:www.example.com, keyword:ads, ip:10.0.0.0/8"><textarea id="rule-pattern" spellcheck="false" bind:value={rule.pattern}></textarea></Field>
     <Field label="Outbound" id="rule-outbound" error={fields.outbound}><Select id="rule-outbound" bind:value={rule.outbound} options={outboundOptions} label="Outbound" /></Field>
   </form>
   {#snippet actions()}
@@ -254,11 +257,13 @@
   {/snippet}
 </Dialog>
 
-<Confirm bind:open={removeOpen} title="Remove {removing?.name ?? ''}" message="The nodes get the new routing at once." action="Remove" onconfirm={remove} />
+<Confirm bind:open={removeOpen} title="Remove {removing?.name ?? ''}" action="Remove" onconfirm={remove} />
 
 <style>
   .block { margin-top: 22px; }
   .empty { padding: 14px; border: 1px dashed var(--line); border-radius: 9px; }
-  .actions { text-align: right; width: 1%; }
+  .actions { text-align: right; width: 1%; position: sticky; right: 0; background: var(--panel); }
+  tbody tr:hover .actions { background: var(--hover); }
+  .index { width: 1%; padding-right: 4px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .pattern { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 </style>

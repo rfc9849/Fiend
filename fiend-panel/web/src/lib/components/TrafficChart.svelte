@@ -20,22 +20,31 @@
 </script>
 
 <figure>
+  <div class="plot">
+    <span class="tick top">{bytes(max)}</span>
+    <span class="tick mid">{bytes(max / 2)}</span>
   <svg viewBox="0 0 {width} {height}" preserveAspectRatio="none" role="img" aria-label="Traffic chart. Total {bytes(total)}. Highest point {bytes(max)} per interval.">
+    <line x1="0" x2={width} y1="8" y2="8" stroke="var(--line)" stroke-dasharray="3 4" />
+    <line x1="0" x2={width} y1={height / 2 + 4} y2={height / 2 + 4} stroke="var(--line)" stroke-dasharray="3 4" />
     <line x1="0" x2={width} y1={height - 0.5} y2={height - 0.5} stroke="var(--line)" />
-    <line x1="0" x2={width} y1={height / 2} y2={height / 2} stroke="var(--line)" stroke-dasharray="3 4" />
     <path d={line('total')} fill="none" stroke="var(--accent)" stroke-width="1.5" vector-effect="non-scaling-stroke" />
     <path d={line('up')} fill="none" stroke="var(--green)" stroke-width="1.5" stroke-dasharray="4 3" vector-effect="non-scaling-stroke" />
   </svg>
+  </div>
   <figcaption>
     <span class="key"><span class="swatch total"></span>Total</span>
     <span class="key"><span class="swatch up"></span>Upload</span>
-    <span class="muted">Peak {bytes(max)} per {step >= 86400 ? 'day' : step >= 3600 ? `${step / 3600} h` : 'interval'}</span>
+    <span class="muted">{bytes(total)} in this range · values per {step >= 86400 ? 'day' : step >= 3600 ? (step === 3600 ? 'hour' : `${step / 3600} h`) : `${Math.round(step / 60)} min`}</span>
     {#if points.length}<span class="muted range">{label(points[0].ts)} – {label(points[points.length - 1].ts)}</span>{/if}
   </figcaption>
 </figure>
 
 <style>
   figure { margin: 0; }
+  .plot { position: relative; }
+  .tick { position: absolute; left: 0; font-size: 10px; color: var(--muted); background: var(--panel); padding-right: 6px; line-height: 1; }
+  .tick.top { top: 3px; }
+  .tick.mid { top: 89px; }
   svg { display: block; width: 100%; height: 180px; }
   figcaption { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11px; margin-top: 8px; color: var(--muted); }
   .key { display: inline-flex; align-items: center; gap: 6px; }

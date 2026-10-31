@@ -481,7 +481,7 @@ async fn delete_node(
         .await?;
     if used > 0 {
         return Err(ApiError::conflict(
-            "Other nodes chain to this node. Remove those outbounds first.",
+            "Other nodes chain to this node.",
         ));
     }
     app.sync.remove(id);
@@ -653,9 +653,14 @@ async fn warp_settings(
         .await?;
     app.audit(
         Some(admin.id),
-        "warp settings",
+        "WARP settings",
         &format!("node {}", node.name),
-        &format!("enabled {} rotate {:?}", input.enabled, input.rotate_every),
+        &match (input.enabled, input.rotate_every) {
+            (false, _) => "off".to_owned(),
+            (true, None) => "on".to_owned(),
+            (true, Some(every)) if every % 86400 == 0 => format!("on, New IP every {} d", every / 86400),
+            (true, Some(every)) => format!("on, New IP every {} h", every / 3600),
+        },
     )
     .await;
     changed(&app).await?;
@@ -748,7 +753,7 @@ async fn warp_register(
         .await?;
     app.audit(
         Some(admin.id),
-        "warp registered",
+        "WARP registered",
         &format!("node {}", node.name),
         "",
     )
@@ -789,13 +794,17 @@ async fn warp_rotate(
         after_v6: ip("/after/v6/ip"),
         warp: warp_view(warp_row(&app, id).await?, Some(status), None),
     };
+    let shown = |value: &Option<String>| value.clone().unwrap_or_else(|| "none".into());
     app.audit(
         Some(admin.id),
-        "warp new ip",
+        "WARP new IP",
         &format!("node {}", node.name),
         &format!(
-            "{:?} -> {:?}, {:?} -> {:?}",
-            result.before_v4, result.after_v4, result.before_v6, result.after_v6
+            "IPv4 {} → {}, IPv6 {} → {}",
+            shown(&result.before_v4),
+            shown(&result.after_v4),
+            shown(&result.before_v6),
+            shown(&result.after_v6)
         ),
     )
     .await;
@@ -814,7 +823,7 @@ async fn warp_delete(
     sqlx::query("UPDATE warp SET status = NULL, exit_v4 = NULL, exit_v6 = NULL, rotated_at = NULL WHERE node_id = ?").bind(id).execute(&app.db).await?;
     app.audit(
         Some(admin.id),
-        "warp deleted",
+        "WARP account deleted",
         &format!("node {}", node.name),
         "",
     )
@@ -1069,7 +1078,7 @@ async fn update_one(app: &App, node: &NodeRow, binary: &[u8], core: &str) -> Res
             }
             if health["started_at"].as_i64() > node.started_at {
                 return Err(
-                    "The node restarted with the old binary. The update was rolled back.".into(),
+                    "Update failed and was rolled back.".into(),
                 );
             }
         }
@@ -1637,6 +1646,16 @@ async fn create_disguise(
     Json(input): Json<DisguiseInput>,
 ) -> ApiResult<Json<Created>> {
     let (raw, origin_host) = template_bytes(&input)?;
+    let same: Option<String> = sqlx::query_scalar("SELECT name FROM disguises WHERE template_raw = ?")
+        .bind(&raw)
+        .fetch_optional(&app.db)
+        .await?;
+    if let Some(same) = same {
+        return Err(ApiError::field(
+            "template",
+            format!("This template is already added as {same}."),
+        ));
+    }
     let base = match input.preset.as_deref() {
         Some("wikipedia") => "Wikipedia",
         _ => origin_host.as_str(),
@@ -1684,7 +1703,7 @@ async fn delete_disguise(
         .await?;
     if used > 0 {
         return Err(ApiError::conflict(
-            "Nodes use this disguise. Select another disguise for them first.",
+            "Nodes use this disguise.",
         ));
     }
     sqlx::query("DELETE FROM disguises WHERE id = ?")
@@ -2061,7 +2080,7 @@ async fn delete_outbound(
     .await?;
     if used > 0 {
         return Err(ApiError::conflict(
-            "Rules use this outbound. Change or remove those rules first.",
+            "Rules use this outbound.",
         ));
     }
     sqlx::query("DELETE FROM outbounds WHERE id = ?")

@@ -1,38 +1,31 @@
 <script lang="ts">
   import type { NodeView } from '#lib/api/generated/index.ts';
-  import HealthRing from './HealthRing.svelte';
   import { ago, bytes, rate, stateLabel } from '#lib/format.ts';
-  let { nodes, selectable = false, selected = $bindable([]) }: { nodes: NodeView[]; selectable?: boolean; selected?: number[] } = $props();
-  function toggle(id: number) {
-    selected = selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id];
-  }
+  let { nodes }: { nodes: NodeView[] } = $props();
 </script>
 
 {#if nodes.length === 0}
-  <p class="empty">No nodes yet.</p>
+  <p class="empty">No nodes yet. Add a node to start.</p>
 {:else}
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
-          {#if selectable}<th><span class="visually-hidden">Select</span></th>{/if}
           <th>Name</th><th>Address</th><th>Version</th><th class="num">CPU</th><th class="num">Memory</th><th class="num">Traffic</th><th>Last seen</th>
         </tr>
       </thead>
       <tbody>
         {#each nodes as node (node.id)}
-          <tr class:selected={selected.includes(node.id)}>
-            {#if selectable}<td><input type="checkbox" aria-label="Select {node.name}" checked={selected.includes(node.id)} onchange={() => toggle(node.id)} /></td>{/if}
+          <tr>
             <td>
-              <a class="row-link" href="/nodes/{node.id}">
-                <HealthRing status={node.status} size={18} />
-                <span>{node.name}</span>
-                <span class="visually-hidden">, {stateLabel(node.status)}</span>
-              </a>
-              {#if node.local}<span class="badge">local</span>{/if}
+              <span class="name-cell">
+                <span class="dot {node.status}" title={stateLabel(node.status)} aria-hidden="true"></span>
+                <a class="row-link" href="/nodes/{node.id}">{node.name}<span class="visually-hidden">, {stateLabel(node.status)}</span></a>
+                {#if node.local}<span class="badge">local</span>{/if}
+              </span>
             </td>
             <td class="mono">{node.address}:{node.port}</td>
-            <td class="mono">{node.version ?? '—'}{#if node.arch} · {node.arch}{/if}</td>
+            <td>{#if node.version}<span class="mono">{node.version}</span>{#if node.arch}<span class="muted arch">{node.arch}</span>{/if}{:else}—{/if}</td>
             <td class="num">{node.cpu === null ? '—' : `${node.cpu.toFixed(0)} %`}</td>
             <td class="num">{node.memory_used === null ? '—' : `${bytes(node.memory_used)} / ${bytes(node.memory_total)}`}</td>
             <td class="num">{rate(node.traffic_rate)}</td>
@@ -47,5 +40,5 @@
 <style>
   .empty { padding: 18px; border: 1px dashed var(--line); border-radius: 9px; text-align: center; }
   .state { color: var(--danger); }
-  input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
+  .arch { margin-left: 6px; }
 </style>

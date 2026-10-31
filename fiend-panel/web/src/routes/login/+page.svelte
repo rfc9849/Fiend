@@ -41,16 +41,15 @@
 
 <Centered>
   <h1>Sign in</h1>
-  <p class="lead">Use the admin account of this panel.</p>
   <form novalidate onsubmit={submit} class="stack">
     {#if error}<p class="note error" role="alert">{error}</p>{/if}
     <Field label="Name" id="name" error={fields.name}><input id="name" autocomplete="username" bind:value={name} aria-invalid={!!fields.name} /></Field>
     <Field label="Password" id="password" error={fields.password}><input id="password" type="password" autocomplete="current-password" bind:value={password} aria-invalid={!!fields.password} /></Field>
-    <Field label="Two-factor code" id="code" help="Leave empty if two-factor sign-in is off." error={fields.totp_code}><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" bind:value={code} /></Field>
+    <Field label="Two-factor code" id="code" help="If enabled" error={fields.totp_code}><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" bind:value={code} /></Field>
     <Button kind="primary" type="submit" {busy}>Sign in</Button>
   </form>
 </Centered>
 
 <style>
-  .lead { margin: 6px 0 18px; }
+  h1 { margin-bottom: 18px; }
 </style>

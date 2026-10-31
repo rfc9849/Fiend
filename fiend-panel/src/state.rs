@@ -417,17 +417,17 @@ pub async fn user_link(app: &App, user: &UserRow) -> ApiResult<Link> {
             template = Some(self::disguise(app, disguise_id).await?.template()?);
         } else if first_disguise != Some(disguise_id) {
             warnings.push(format!(
-                "Node {} uses a different disguise. The link uses the disguise of the first node.",
+                "Node {} has a different disguise than this link.",
                 node.name
             ));
         }
         servers.push(authority(&node.address, node.port));
     }
     let template = template
-        .ok_or_else(|| ApiError::bad("No node with a disguise is available for this user."))?;
+        .ok_or_else(|| ApiError::bad("No node with a disguise."))?;
     if servers.len() > fiend_core::share::MAX_SERVERS {
         servers.truncate(fiend_core::share::MAX_SERVERS);
-        warnings.push("A link holds at most 16 servers. Extra nodes are not in the link.".into());
+        warnings.push("Only the first 16 nodes are in the link.".into());
     }
     let secret = fiend_core::share::decode_secret(&user.secret).map_err(ApiError::internal)?;
     let link = fiend_core::share::encode(&fiend_core::share::Share {

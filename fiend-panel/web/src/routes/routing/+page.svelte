@@ -14,11 +14,11 @@
 
 <svelte:head><title>Routing · fiend</title></svelte:head>
 
-<TopBar title="Routing" subtitle="Outbounds and rules for all nodes. Node pages add their own rules." />
+<TopBar title="Routing" />
 <RoutingEditor node={null} />
 <div class="warp">
   {#each nodes as node (node.id)}
-    <WarpCard node={node.id} title="Cloudflare WARP on {node.name}" />
+    <WarpCard node={node.id} title="WARP on {node.name}" />
   {/each}
 </div>
 

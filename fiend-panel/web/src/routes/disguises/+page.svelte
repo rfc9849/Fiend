@@ -26,6 +26,7 @@
   let removing = $state<DisguiseView | null>(null);
   let removeOpen = $state(false);
   let error = $state('');
+  const unused = $derived(presets.filter((preset) => !disguises.some((item) => item.name === preset.name)));
 
   async function load() {
     try {
@@ -75,8 +76,8 @@
 
 <svelte:head><title>Disguises · fiend</title></svelte:head>
 
-<TopBar title="Disguises" subtitle="Origins and TLS templates. A node copies the TLS behavior of its origin.">
-  {#snippet actions()}<Button kind="primary" icon="plus" onclick={() => { preset = presets[0]?.id ?? 'file'; file = null; fields = {}; formError = ''; adding = true; }}>Add disguise</Button>{/snippet}
+<TopBar title="Disguises">
+  {#snippet actions()}<Button kind="primary" icon="plus" onclick={() => { preset = unused[0]?.id ?? 'file'; file = null; fields = {}; formError = ''; adding = true; }}>Add disguise</Button>{/snippet}
 </TopBar>
 {#if error}<p class="note error" role="alert">{error}</p>{/if}
 {#if disguises.length === 0}
@@ -97,11 +98,15 @@
       {#if item.profile}<p class="small muted">Record sizes: <span class="mono">{item.profile.record_sizes.join(', ')}</span></p>{/if}
       <p class="small muted">Last probe: {date(item.probed_at)}</p>
       <div class="row probe">
-        {#if nodes.length}
+        {#if nodes.length > 1}
           <div class="node"><Select id="probe-{item.id}" label="Probe from node" bind:value={probeNode[item.id]} options={nodes.map((node) => ({ value: String(node.id), label: node.name }))} /></div>
-          <Button icon="refresh" busy={probing === item.id} onclick={() => probe(item)}>Probe origin</Button>
         {/if}
-        <Button kind="danger" disabled={item.nodes > 0} onclick={() => { removing = item; removeOpen = true; }}>Remove</Button>
+        {#if nodes.length}<Button icon="refresh" busy={probing === item.id} onclick={() => probe(item)}>{nodes.length > 1 ? 'Probe origin' : `Probe origin from ${nodes[0].name}`}</Button>{/if}
+        {#if item.nodes > 0}
+          <span class="small muted in-use">In use</span>
+        {:else}
+          <Button kind="danger" onclick={() => { removing = item; removeOpen = true; }}>Remove</Button>
+        {/if}
       </div>
     </section>
   {/each}
@@ -110,7 +115,7 @@
 <Dialog bind:open={adding} title="Add disguise">
   <form id="add-disguise" novalidate class="stack" onsubmit={create}>
     {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
-    <TemplatePicker {presets} bind:preset bind:file error={fields.template} />
+    <TemplatePicker presets={unused} bind:preset bind:file error={fields.template} />
   </form>
   {#snippet actions()}
     <Button kind="ghost" onclick={() => (adding = false)}>Cancel</Button>
@@ -118,7 +123,7 @@
   {/snippet}
 </Dialog>
 
-<Confirm bind:open={removeOpen} title="Remove {removing?.name ?? ''}" message="The template and the origin profile are removed from the panel." action="Remove" onconfirm={async () => { if (removing) await api.del(`/disguises/${removing.id}`); toast('Disguise removed'); await load(); }} />
+<Confirm bind:open={removeOpen} title="Remove {removing?.name ?? ''}" action="Remove" onconfirm={async () => { if (removing) await api.del(`/disguises/${removing.id}`); toast('Disguise removed'); await load(); }} />
 
 <style>
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 16px; }
@@ -129,5 +134,6 @@
   .checks li span { color: var(--text); overflow-wrap: anywhere; }
   .probe { margin-top: 12px; }
   .node { width: 160px; }
+  .in-use { margin-left: auto; }
   .empty { padding: 18px; border: 1px dashed var(--line); border-radius: 9px; text-align: center; }
 </style>

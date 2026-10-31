@@ -175,6 +175,24 @@ pub async fn import(app: &App, archive: PathBuf) -> ApiResult<BundleView> {
         .bind(now())
         .fetch_one(&app.db)
         .await?;
+    let older: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, path FROM bundles WHERE version = ? AND arch = ? AND id != ?",
+    )
+    .bind(&parsed.version)
+    .bind(&parsed.arch)
+    .bind(id)
+    .fetch_all(&app.db)
+    .await?;
+    for (old, path) in older {
+        sqlx::query("DELETE FROM bundles WHERE id = ?")
+            .bind(old)
+            .execute(&app.db)
+            .await?;
+        let path = std::path::PathBuf::from(path);
+        if path.starts_with(&app.config.bundles) && path != target {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
     Ok(BundleView {
         id,
         version: parsed.version,

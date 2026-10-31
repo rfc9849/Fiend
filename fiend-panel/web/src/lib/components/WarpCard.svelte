@@ -1,5 +1,6 @@
 <script lang="ts">
   import Button from './Button.svelte';
+  import Field from './Field.svelte';
   import Select from './Select.svelte';
   import Switch from './Switch.svelte';
   import Confirm from './Confirm.svelte';
@@ -57,7 +58,7 @@
   const rotate = () => act('rotate', async () => {
     rotation = await api.post<WarpRotation>(`/nodes/${node}/warp/rotate`);
     warp = rotation.warp;
-    toast('WARP has a new account');
+    toast('New WARP IP');
   });
 </script>
 
@@ -71,42 +72,38 @@
     <div class="stack">
       <Switch id="warp-enabled-{node}" checked={warp.enabled} label="Use WARP on this node" disabled={!!busy} onchange={(value) => settings(value, every)} />
       {#if warp.enabled && !warp.registered}
-        <div class="row"><Button busy={busy === 'register'} onclick={register}>Register a WARP account</Button><span class="small muted">The node calls the Cloudflare client API.</span></div>
+        <div class="row"><Button busy={busy === 'register'} onclick={register}>Register again</Button></div>
       {/if}
       {#if warp.registered}
         <dl class="facts">
           <dt>Exit IPv4</dt><dd class="mono">{warp.exit_v4 ?? '—'}</dd>
           <dt>Exit IPv6</dt><dd class="mono">{warp.exit_v6 ?? '—'}</dd>
-          <dt>Location</dt><dd>{warp.colo ?? '—'} · {warp.warp_on ? 'warp=on' : 'not on WARP'}</dd>
-          <dt>Account age</dt><dd>{ago(warp.created_at)}</dd>
-          <dt>Last rotation</dt><dd>{date(warp.rotated_at)}</dd>
-          <dt>Checked</dt><dd>{ago(warp.checked_at)}</dd>
+          <dt>Location</dt><dd>{warp.colo ?? '—'}{#if !warp.warp_on} · <span class="warn-text">not on WARP</span>{/if}</dd>
+          <dt>Account made</dt><dd>{ago(warp.created_at)}</dd>
+          <dt>Last new IP</dt><dd>{date(warp.rotated_at)}</dd>
         </dl>
         {#if rotation}
           <p class="note">
-            IPv4: <span class="mono">{rotation.before_v4 ?? '—'}</span> → <span class="mono">{rotation.after_v4 ?? '—'}</span>{#if rotation.before_v4 && rotation.before_v4 === rotation.after_v4} (Cloudflare kept the shared IPv4 exit){/if}<br />
+            IPv4: <span class="mono">{rotation.before_v4 ?? '—'}</span> → <span class="mono">{rotation.after_v4 ?? '—'}</span><br />
             IPv6: <span class="mono">{rotation.before_v6 ?? '—'}</span> → <span class="mono">{rotation.after_v6 ?? '—'}</span>
           </p>
         {/if}
-        <div class="row">
-          <label class="small muted" for="warp-rotate-{node}">Automatic New IP</label>
-          <div class="rotate"><Select id="warp-rotate-{node}" bind:value={every} label="Automatic New IP" onchange={(value) => settings(warp?.enabled ?? false, value)} options={[{ value: 'off', label: 'Off' }, { value: '21600', label: 'Every 6 h' }, { value: '43200', label: 'Every 12 h' }, { value: '86400', label: 'Every 24 h' }, { value: '604800', label: 'Every 7 d' }]} /></div>
-          <Button kind="danger" onclick={() => (deleting = true)}>Delete account</Button>
-        </div>
+        <div class="rotate"><Field label="Automatic new IP" id="warp-rotate-{node}"><Select id="warp-rotate-{node}" bind:value={every} label="Automatic new IP" onchange={(value) => settings(warp?.enabled ?? false, value)} options={[{ value: 'off', label: 'Off' }, { value: '21600', label: 'Every 6 h' }, { value: '43200', label: 'Every 12 h' }, { value: '86400', label: 'Every 24 h' }, { value: '604800', label: 'Every 7 d' }]} /></Field></div>
       {/if}
       {#if warp.error}<p class="note warn">{warp.error}</p>{/if}
-      <p class="small muted">Send only selected destinations to WARP with routing rules. Some sites show captchas for WARP addresses.</p>
+      {#if warp.registered}<div><Button kind="ghost" onclick={() => (deleting = true)}>Delete account</Button></div>{/if}
     </div>
   {:else}
     <p class="muted">Loading…</p>
   {/if}
 </section>
 
-<Confirm bind:open={deleting} title="Delete the WARP account" message="The node stops WARP and deletes the account at Cloudflare. Rules that use WARP fail until you register again." action="Delete account" onconfirm={async () => { warp = await api.del<WarpView>(`/nodes/${node}/warp`); toast('WARP account deleted'); }} />
+<Confirm bind:open={deleting} title="Delete the WARP account"  action="Delete account" onconfirm={async () => { warp = await api.del<WarpView>(`/nodes/${node}/warp`); toast('WARP account deleted'); }} />
 
 <style>
   .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; }
   dt { color: var(--muted); }
   dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-  .rotate { width: 160px; }
+  .rotate { width: 200px; }
+  .warn-text { color: var(--warn); }
 </style>

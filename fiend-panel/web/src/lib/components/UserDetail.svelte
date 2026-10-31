@@ -76,7 +76,7 @@
     if (confirm === 'secret') {
       await api.post<UserSecret>(`/users/${id}/secret`);
       secretKey += 1;
-      toast('New secret made. Send the new link to the user.');
+      toast('New secret made');
     } else if (confirm === 'reset') {
       await api.post(`/users/${id}/reset`);
       toast('Usage reset');
@@ -96,10 +96,10 @@
   }
 
   const texts = {
-    secret: ['Make a new secret', 'The old link stops working at once. Send the new link to the user.', 'Make new secret'],
-    reset: ['Reset usage', 'The used traffic of this user goes back to zero.', 'Reset usage'],
-    kill: ['Close sessions', 'All open connections of this user close. The client can connect again.', 'Close sessions'],
-    delete: ['Remove user', 'The user and the link stop working on all nodes.', 'Remove user']
+    secret: ['New secret', 'The old link stops working.', 'Make new secret'],
+    reset: ['Reset usage', '', 'Reset'],
+    kill: ['Close sessions', '', 'Close sessions'],
+    delete: ['Remove user', '', 'Remove']
   } as const;
 </script>
 
@@ -131,7 +131,7 @@
       <dl class="facts">
         <dt>Used</dt><dd>{bytes(user.used)}{#if user.traffic_limit} of {bytes(user.traffic_limit)} ({percent(user.used, user.traffic_limit)} %){/if}</dd>
         <dt>Reset</dt><dd>{user.reset_period === 'none' ? 'Never' : `${user.reset_period}, next ${date(user.reset_at)}`}</dd>
-        <dt>Expiry</dt><dd>{user.hold_days && !user.expire_at ? `${user.hold_days} days after the first connect` : date(user.expire_at)}</dd>
+        <dt>Expiry</dt><dd>{user.hold_days && !user.expire_at ? `${user.hold_days} days after the first connection` : user.expire_at ? date(user.expire_at) : 'Never'}</dd>
         <dt>Nodes</dt><dd>{user.nodes.length ? user.nodes.map((node) => nodes.find((item) => item.id === node)?.name ?? node).join(', ') : 'All nodes'}</dd>
         <dt>Online</dt><dd>{user.online} session{user.online === 1 ? '' : 's'}</dd>
         {#if user.note}<dt>Note</dt><dd>{user.note}</dd>{/if}

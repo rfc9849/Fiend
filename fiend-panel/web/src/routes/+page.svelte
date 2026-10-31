@@ -62,7 +62,7 @@
     <StatCard label="Traffic now" icon="speed" value={traffic[0]} unit={traffic[1]} samples={data.traffic_samples} />
     <StatCard label="Users online" icon="key" value={String(data.users_online)} unit="of {data.users_total}" samples={data.online_samples} />
     <StatCard label="Nodes online" icon="server" value={String(data.nodes_online)} unit="of {data.nodes_total}" samples={data.node_samples} />
-    <StatCard label="Sent to the origin" icon="shield" value={String(data.origin_recent)} unit="in 1 h" samples={data.origin_samples} />
+    <StatCard label="Probes sent to origin" icon="shield" value={String(data.origin_recent)} unit="in 1 h" samples={data.origin_samples} />
   </div>
   <section class="section" aria-labelledby="nodes-title">
     <div class="card-header"><h2 id="nodes-title">Nodes</h2><a href="/nodes" class="small">All nodes</a></div>
