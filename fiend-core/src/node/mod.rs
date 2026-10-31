@@ -217,7 +217,7 @@ struct Inner {
     origin_cache: Mutex<Option<(u64, OriginProfile)>>,
     warp: warp::Manager,
     resolver: Mutex<Option<outbound::Resolver>>,
-    binary_sha256: String,
+    binary_sha256: std::sync::OnceLock<String>,
     listen_port: AtomicU64,
 }
 
@@ -335,7 +335,7 @@ impl Node {
                     wireproxy,
                 ),
                 resolver: Mutex::new(None),
-                binary_sha256: binary_sha256(),
+                binary_sha256: std::sync::OnceLock::new(),
                 listen_port: AtomicU64::new(0),
             }),
         };
@@ -636,7 +636,7 @@ impl Node {
             uptime: self.inner.started.elapsed().as_secs(),
             started_at: self.inner.started_at,
             state_version: self.snapshot().state.version,
-            binary_sha256: self.inner.binary_sha256.clone(),
+            binary_sha256: self.inner.binary_sha256.get_or_init(binary_sha256).clone(),
             listen_port: self.inner.listen_port.load(Ordering::Relaxed) as u16,
         }
     }

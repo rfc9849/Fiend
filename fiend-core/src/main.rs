@@ -163,6 +163,10 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     )
     .await;
     node.set_listen_port(settings.listen.port());
+    {
+        let node = node.clone();
+        tokio::task::spawn_blocking(move || node.health());
+    }
     let server = Server::managed(settings.config, node.clone());
     {
         let node = node.clone();
