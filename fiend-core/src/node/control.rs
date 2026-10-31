@@ -34,6 +34,7 @@ pub struct Request {
 pub enum Call {
     Health,
     ApplyState(DesiredState),
+    State,
     Stats,
     Sessions {
         user_id: String,
@@ -50,6 +51,7 @@ pub enum Call {
     Logs {
         limit: usize,
     },
+    Restart,
     WarpStatus,
     WarpRegister,
     WarpRotate,
@@ -99,6 +101,7 @@ async fn dispatch(node: Node, request: Request) -> Response {
                 .await
                 .map(|version| serde_json::json!({"applied_version": version})),
             Call::Stats => serde_json::to_value(node.stats()).map_err(io::Error::other),
+            Call::State => serde_json::to_value(node.desired_state()).map_err(io::Error::other),
             Call::Sessions { user_id } => {
                 serde_json::to_value(node.sessions(&user_id)).map_err(io::Error::other)
             }
@@ -123,6 +126,14 @@ async fn dispatch(node: Node, request: Request) -> Response {
                         }
                     }
                 }
+            }
+            Call::Restart => {
+                let node = node.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    node.request_restart();
+                });
+                Ok(serde_json::json!({"restarting": true}))
             }
             Call::WarpStatus => {
                 serde_json::to_value(node.warp().status().await).map_err(io::Error::other)

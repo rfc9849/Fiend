@@ -4,13 +4,30 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+fiend-core = { path = "../fiend-core" }
+fiend-rules = { path = "../fiend-rules" }
+argon2 = "=0.6.0"
 axum = "=0.8.9"
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+flate2 = "1.1.10"
 hex = "=0.4.3"
+qrcode = { version = "=0.14.1", default-features = false }
 rand = "=0.10.3"
+russh = { version = "=0.65.0", default-features = false, features = ["ring", "flate2", "rsa"] }
 rust-embed = { version = "=8.13.0", features = ["debug-embed"] }
 serde = { version = "=1.0.229", features = ["derive"] }
-tokio = { version = "=1.54.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+serde_json = "1"
+sha2 = "0.11"
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "migrate", "macros"] }
+tar = "0.4"
+tokio = { version = "=1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "fs", "io-util", "process"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 toml = "=1.1.8"
+totp-rs = { version = "=6.0.0", features = ["otpauth"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ts-rs = { version = "=12.0.1", features = ["serde-json-impl"] }
+zeroize = "1"
 
 [dev-dependencies]
 tower = { version = "=0.5.3", features = ["util"] }

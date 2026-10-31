@@ -4,26 +4,34 @@ use std::path::PathBuf;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use fiend_panel::{Config, router, valid_host};
+use fiend_panel::{App, Config, router, valid_host};
 use tower::ServiceExt;
 
-fn config() -> Config {
-    Config {
-        listen: "127.0.0.1:8080".parse().unwrap(),
-        setup_token: "ab".repeat(32),
-        setup_expires_at: u64::MAX,
-    }
-}
-
 fn temp(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("fiend-panel-{}-{name}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "fiend-panel-{}-{name}-{}",
+        std::process::id(),
+        hex::encode(rand::random::<[u8; 4]>())
+    ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
     path
 }
 
+fn config(dir: &std::path::Path) -> Config {
+    Config {
+        listen: "127.0.0.1:8080".parse().unwrap(),
+        setup_token: "ab".repeat(32),
+        setup_expires_at: u64::MAX,
+        database: dir.join("panel.db"),
+        bundles: dir.join("bundles"),
+        local_node: dir.join("node.toml"),
+    }
+}
+
 #[test]
 fn loopback_only() {
+    let dir = temp("loopback");
     for address in [
         "0.0.0.0:8080",
         "192.168.1.1:8080",
@@ -32,11 +40,12 @@ fn loopback_only() {
         "127.0.0.2:8080",
         "127.0.0.1:0",
     ] {
-        let mut config = config();
+        let mut config = config(&dir);
         config.listen = address.parse::<SocketAddr>().unwrap();
         assert!(config.validate().is_err(), "{address}");
     }
-    assert!(config().validate().is_ok());
+    assert!(config(&dir).validate().is_ok());
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -78,16 +87,29 @@ fn init_is_private_and_keeps_existing_config() {
             0o600
         );
     }
+    fs::write(
+        &path,
+        "listen = \"127.0.0.1:9\"\nsetup_token = \"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"\nsetup_expires_at = 1\n",
+    )
+    .unwrap();
+    let old = Config::load(&path).unwrap();
+    assert_eq!(old.database, PathBuf::from("/var/lib/fiend/panel.db"));
+    let renewed = Config::renew_setup(&path).unwrap();
+    assert_ne!(renewed.setup_token, old.setup_token);
+    assert!(renewed.setup_expires_at > 1);
     fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
 async fn http_security_and_assets() {
-    let app = router(config());
+    let dir = temp("assets");
+    let app = router(App::open(config(&dir)).await.unwrap());
     for (path, status, mime) in [
         ("/", StatusCode::OK, "text/html; charset=utf-8"),
+        ("/users", StatusCode::OK, "text/html; charset=utf-8"),
         ("/health", StatusCode::OK, "text/plain; charset=utf-8"),
         ("/missing.js", StatusCode::NOT_FOUND, ""),
+        ("/elsewhere", StatusCode::NOT_FOUND, ""),
         ("/setup", StatusCode::NOT_FOUND, ""),
         ("/setup/wrong", StatusCode::NOT_FOUND, ""),
         ("/api/missing", StatusCode::NOT_FOUND, ""),
@@ -116,7 +138,7 @@ async fn http_security_and_assets() {
             assert_eq!(response.headers()["content-type"], mime);
         }
         if path == "/" {
-            let body = to_bytes(response.into_body(), 100_000).await.unwrap();
+            let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
             let text = String::from_utf8(body.to_vec()).unwrap();
             assert!(!text.contains("<script>"));
             assert!(text.contains("src=\"/bootstrap."));
@@ -168,16 +190,18 @@ async fn http_security_and_assets() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
 async fn setup_token_expires() {
     for expires in [0, u64::MAX] {
-        let mut config = config();
+        let dir = temp("expires");
+        let mut config = config(&dir);
         let path = format!("/setup/{}", config.setup_token);
         config.setup_expires_at = expires;
-        let response = router(config)
+        let response = router(App::open(config).await.unwrap())
             .oneshot(
                 Request::builder()
                     .uri(path)
@@ -195,5 +219,6 @@ async fn setup_token_expires() {
                 StatusCode::OK
             }
         );
+        fs::remove_dir_all(dir).unwrap();
     }
 }

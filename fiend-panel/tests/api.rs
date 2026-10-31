@@ -1,0 +1,635 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use fiend_core::addr::Address;
+use fiend_core::client::{Client, ClientConfig};
+use fiend_core::node::{DesiredState, Node};
+use fiend_core::server::Server;
+use fiend_core::target::TargetPolicy;
+use fiend_panel::{App, Config, router};
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tower::ServiceExt;
+
+const TOKEN: &str = "abababababababababababababababababababababababababababababababab";
+const LEGACY: [u8; 32] = [0x5a; 32];
+const CONTROL: [u8; 32] = [0x6b; 32];
+
+struct Temp(PathBuf);
+impl Temp {
+    fn new() -> Self {
+        let path =
+            PathBuf::from("/tmp").join(format!("fpa-{}", hex::encode(rand::random::<[u8; 5]>())));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct Panel {
+    app: App,
+    router: Router,
+    cookie: Option<String>,
+    csrf: Option<String>,
+}
+
+impl Panel {
+    async fn new(dir: &Path) -> Self {
+        let config = Config {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            setup_token: TOKEN.into(),
+            setup_expires_at: u64::MAX,
+            database: dir.join("panel.db"),
+            bundles: dir.join("bundles"),
+            local_node: dir.join("node.toml"),
+        };
+        let app = App::open(config).await.unwrap();
+        Self {
+            router: router(app.clone()),
+            app,
+            cookie: None,
+            csrf: None,
+        }
+    }
+
+    async fn send(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        csrf: bool,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "127.0.0.1:8080")
+            .header("content-type", "application/json");
+        if let Some(cookie) = &self.cookie {
+            builder = builder.header("cookie", format!("fiend_session={cookie}"));
+        }
+        if csrf && let Some(token) = &self.csrf {
+            builder = builder.header("x-csrf-token", token);
+        }
+        let body = body
+            .map(|body| Body::from(body.to_string()))
+            .unwrap_or_else(Body::empty);
+        let response = self
+            .router
+            .clone()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        if let Some(cookie) = response.headers().get("set-cookie") {
+            let text = cookie.to_str().unwrap();
+            assert!(text.contains("HttpOnly") && text.contains("SameSite=Strict"));
+            let value = text
+                .split(';')
+                .next()
+                .unwrap()
+                .split_once('=')
+                .unwrap()
+                .1
+                .to_owned();
+            self.cookie = (!value.is_empty()).then_some(value);
+        }
+        let bytes = to_bytes(response.into_body(), 10_000_000).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    async fn get(&mut self, path: &str) -> (StatusCode, Value) {
+        self.send("GET", path, None, false).await
+    }
+
+    async fn post(&mut self, path: &str, body: Value) -> (StatusCode, Value) {
+        self.send("POST", path, Some(body), true).await
+    }
+
+    async fn put(&mut self, path: &str, body: Value) -> (StatusCode, Value) {
+        self.send("PUT", path, Some(body), true).await
+    }
+
+    async fn refresh(&mut self) {
+        let (status, session) = self.get("/api/session").await;
+        assert_eq!(status, StatusCode::OK);
+        self.csrf = Some(session["csrf"].as_str().unwrap().to_owned());
+    }
+
+    async fn setup(&mut self) {
+        let (status, _) = self
+            .post("/api/setup", json!({"token": TOKEN, "name": "owner", "password": "a long test password", "totp_secret": null, "totp_code": null}))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        self.refresh().await;
+    }
+}
+
+fn totp_code(secret: &str) -> String {
+    let bytes = fiend_panel::auth::decode_base32(secret).unwrap();
+    let totp = totp_rs::Builder::new()
+        .with_secret(totp_rs::Secret::new(bytes.into_boxed_slice()))
+        .with_account_name("test")
+        .build()
+        .unwrap();
+    totp.generate_current().to_string()
+}
+
+#[tokio::test]
+async fn setup_is_one_time_and_validates_input() {
+    let dir = Temp::new();
+    let mut panel = Panel::new(&dir.0).await;
+    assert_eq!(
+        panel.get(&format!("/api/setup/{TOKEN}")).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(panel.get("/api/setup/00").await.0, StatusCode::NOT_FOUND);
+    let (status, body) = panel
+        .post("/api/setup", json!({"token": TOKEN, "name": "owner", "password": "short", "totp_secret": null, "totp_code": null}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["field"], "password");
+    let (status, totp) = panel.get(&format!("/api/setup/{TOKEN}/totp")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(totp["uri"].as_str().unwrap().starts_with("otpauth://totp/"));
+    assert!(totp["qr_svg"].as_str().unwrap().starts_with("<svg"));
+    let (status, body) = panel
+        .post("/api/setup", json!({"token": TOKEN, "name": "owner", "password": "a long test password", "totp_secret": totp["secret"], "totp_code": "000000"}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["field"], "totp_code");
+    let (status, _) = panel
+        .post("/api/setup", json!({"token": "cd".repeat(32), "name": "owner", "password": "a long test password", "totp_secret": null, "totp_code": null}))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let code = totp_code(totp["secret"].as_str().unwrap());
+    let (status, _) = panel
+        .post("/api/setup", json!({"token": TOKEN, "name": "owner", "password": "a long test password", "totp_secret": totp["secret"], "totp_code": code}))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    panel.refresh().await;
+    let (_, session) = panel.get("/api/session").await;
+    assert_eq!(session["admin"]["totp"], true);
+    assert_eq!(session["wizard"]["local_node"], false);
+    assert_eq!(
+        panel.get(&format!("/api/setup/{TOKEN}")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let page = panel
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/setup/{TOKEN}"))
+                .header("host", "localhost:1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::NOT_FOUND);
+    let (status, _) = panel
+        .post("/api/setup", json!({"token": TOKEN, "name": "second", "password": "a long test password", "totp_secret": null, "totp_code": null}))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    panel.cookie = None;
+    let (status, _) = panel
+        .post(
+            "/api/login",
+            json!({"name": "owner", "password": "a long test password", "totp_code": null}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut accepted = false;
+    for _ in 0..40 {
+        let code = totp_code(totp["secret"].as_str().unwrap());
+        let (status, _) = panel
+            .post(
+                "/api/login",
+                json!({"name": "owner", "password": "a long test password", "totp_code": code}),
+            )
+            .await;
+        if status == StatusCode::NO_CONTENT {
+            accepted = true;
+            let (replay, _) = panel
+                .post(
+                    "/api/login",
+                    json!({"name": "owner", "password": "a long test password", "totp_code": code}),
+                )
+                .await;
+            assert_eq!(
+                replay,
+                StatusCode::UNAUTHORIZED,
+                "a TOTP code works one time"
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(accepted);
+}
+
+#[tokio::test]
+async fn sessions_csrf_origin_and_rate_limits() {
+    let dir = Temp::new();
+    let mut panel = Panel::new(&dir.0).await;
+    assert_eq!(panel.get("/api/session").await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(panel.get("/api/users").await.0, StatusCode::UNAUTHORIZED);
+    panel.setup().await;
+    let user = json!({"name": "alice", "enabled": true, "note": "", "traffic_limit": null, "expire_at": null, "hold_days": null, "reset_period": "none", "nodes": []});
+    let (status, _) = panel
+        .send("POST", "/api/users", Some(user.clone()), false)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a change needs the CSRF token"
+    );
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/users")
+        .header("host", "127.0.0.1:8080")
+        .header("origin", "http://evil.example")
+        .header("content-type", "application/json")
+        .header(
+            "cookie",
+            format!("fiend_session={}", panel.cookie.clone().unwrap()),
+        )
+        .header("x-csrf-token", panel.csrf.clone().unwrap())
+        .body(Body::from(user.to_string()))
+        .unwrap();
+    assert_eq!(
+        panel
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let (status, created) = panel.post("/api/users", user.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert!(
+        created.get("secret").is_none(),
+        "user lists do not hold secrets"
+    );
+    let (status, body) = panel.post("/api/users", user).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["field"], "name");
+    let (status, users) = panel.get("/api/users").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!users.to_string().contains(&"5a".repeat(8)));
+    let id = created["id"].as_i64().unwrap();
+    let (status, secret) = panel.get(&format!("/api/users/{id}/secret")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(secret["secret"].as_str().unwrap().len(), 64);
+    let (_, audit) = panel.get("/api/audit").await;
+    assert!(
+        audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["action"] == "secret shown")
+    );
+    assert!(
+        !audit
+            .to_string()
+            .contains(secret["secret"].as_str().unwrap())
+    );
+    let (status, body) = panel.post("/api/admins", json!({"name": "second", "password": "another long password", "current_code": "123456"})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, _) = panel.post("/api/logout", json!({})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(panel.get("/api/session").await.0, StatusCode::UNAUTHORIZED);
+    for _ in 0..5 {
+        let (status, _) = panel
+            .post(
+                "/api/login",
+                json!({"name": "owner", "password": "wrong password value", "totp_code": null}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _) = panel
+        .post(
+            "/api/login",
+            json!({"name": "owner", "password": "a long test password", "totp_code": null}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, body) = panel.post("/api/users", json!({"name": "", "enabled": true, "note": "", "traffic_limit": -1, "expire_at": null, "hold_days": null, "reset_period": "none", "nodes": []})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+fn write_node_files(dir: &Path, port: u16) {
+    fs::write(
+        dir.join("control.secret"),
+        format!("{}\n", hex::encode(CONTROL)),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("node.toml"),
+        format!(
+            "listen = \"127.0.0.1:{port}\"\nsecret = \"{}\"\norigin_host = \"127.0.0.1\"\norigin_port = 9\n\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"control.sock\"\nupdates_dir = \"updates\"\n",
+            hex::encode(LEGACY)
+        ),
+    )
+    .unwrap();
+}
+
+async fn start_node(dir: &Path) -> (std::net::SocketAddr, Node) {
+    let listener = fiend_core::net::bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = listener.local_addr().unwrap();
+    write_node_files(dir, address.port());
+    let settings = fiend_core::config::load_server(dir.join("node.toml")).unwrap();
+    let mut config = settings.config.clone();
+    config.origin.record_sizes = vec![35, 3400, 286, 74];
+    config.target = TargetPolicy::allow_all();
+    let node = Node::load(
+        &settings.node.state_file,
+        CONTROL.to_vec(),
+        DesiredState::from_legacy(&config),
+    )
+    .unwrap();
+    node.set_listen_port(address.port());
+    let server = Server::managed(config, node.clone());
+    tokio::spawn(async move { server.serve(listener).await });
+    let control = node.clone();
+    let socket = settings.node.control_socket.clone();
+    tokio::spawn(async move { fiend_core::node::control::serve_unix(&socket, control).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    (address, node)
+}
+
+async fn echo() -> Address {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 65536];
+                while let Ok(count) = stream.read(&mut buffer).await {
+                    if count == 0 || stream.write_all(&buffer[..count]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Address::Ip(address)
+}
+
+async fn wait_for(mut check: impl AsyncFnMut() -> bool) -> bool {
+    for _ in 0..80 {
+        if check().await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn local_node_import_sync_links_statistics_and_limits() {
+    let dir = Temp::new();
+    let (node_address, node) = start_node(&dir.0).await;
+    let mut panel = Panel::new(&dir.0).await;
+    panel.setup().await;
+    let (status, defaults) = panel.get("/api/wizard/local").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(defaults["available"], true, "{defaults}");
+    assert_eq!(defaults["imported"], true);
+    assert_eq!(defaults["port"], node_address.port());
+    let (status, body) = panel
+        .post(
+            "/api/wizard/local",
+            json!({"name": "main", "address": "bad address"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["field"], "address");
+    let (status, created) = panel
+        .post(
+            "/api/wizard/local",
+            json!({"name": "main", "address": "127.0.0.1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let node_id = created["id"].as_i64().unwrap();
+    let (_, users) = panel.get("/api/users").await;
+    let imported = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|user| user["name"] == "existing-clients")
+        .unwrap()
+        .clone();
+    let imported_id = imported["id"].as_i64().unwrap();
+    let (_, secret) = panel.get(&format!("/api/users/{imported_id}/secret")).await;
+    assert_eq!(secret["secret"], hex::encode(LEGACY));
+
+    let (status, preset) = panel.post("/api/disguises", json!({"name": "wiki", "origin_host": "www.wikipedia.org", "origin_port": 443, "preset": "wikipedia", "template_base64": null})).await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let disguise = preset["id"].as_i64().unwrap();
+    let (status, body) = panel.post("/api/disguises", json!({"name": "bad", "origin_host": "x.example", "origin_port": 443, "preset": null, "template_base64": "bm90IGEgdGVtcGxhdGU="})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["field"], "template");
+    let (status, _) = panel.put(&format!("/api/nodes/{node_id}"), json!({"name": "main", "address": "127.0.0.1", "port": node_address.port(), "disguise_id": disguise})).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, user) = panel.post("/api/users", json!({"name": "alice", "enabled": true, "note": "test", "traffic_limit": 200000, "expire_at": null, "hold_days": null, "reset_period": "month", "nodes": []})).await;
+    assert_eq!(status, StatusCode::OK, "{user}");
+    let alice = user["id"].as_i64().unwrap();
+    assert!(user["reset_at"].as_i64().unwrap() > fiend_panel::now());
+    let (status, link) = panel.get(&format!("/api/users/{alice}/link")).await;
+    assert_eq!(status, StatusCode::OK, "{link}");
+    let text = link["link"].as_str().unwrap();
+    assert!(
+        text.starts_with("fiend://") && text.len() < 1200,
+        "{}",
+        text.len()
+    );
+    assert!(fiend_panel::qr::version(text).unwrap() <= 25);
+    let share = fiend_core::share::decode(text).unwrap();
+    assert_eq!(share.servers, vec![node_address.to_string()]);
+
+    panel.app.start();
+    panel.app.sync.ensure(&panel.app, node_id);
+    assert!(
+        wait_for(async || node
+            .desired_state()
+            .users
+            .iter()
+            .any(|user| user.id == format!("u{alice}")))
+        .await,
+        "the panel applies users"
+    );
+    assert!(
+        node.desired_state()
+            .users
+            .iter()
+            .any(|user| user.secret == hex::encode(LEGACY)),
+        "the imported secret stays valid"
+    );
+    assert_eq!(node.desired_state().origin_host, "www.wikipedia.org");
+
+    let mut config =
+        ClientConfig::new(String::new(), share.secret.to_vec(), share.template.clone());
+    config.servers = share.servers.clone();
+    config.mux.attempts = 1;
+    let client = Client::new(config);
+    let target = echo().await;
+    let mut lane = client.open_tcp(&target).await.unwrap();
+    let payload = vec![7u8; 50_000];
+    lane.write_all(&payload).await.unwrap();
+    let mut reply = vec![0u8; payload.len()];
+    lane.read_exact(&mut reply).await.unwrap();
+    assert!(
+        wait_for(async || {
+            let (_, user) = panel.get(&format!("/api/users/{alice}")).await;
+            user["user"]["used"].as_i64().unwrap_or(0) >= 100_000
+        })
+        .await,
+        "the panel stores usage"
+    );
+    let (_, traffic) = panel
+        .get(&format!("/api/traffic?range=24h&user={alice}"))
+        .await;
+    let total: i64 = traffic["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|point| point["up"].as_i64().unwrap() + point["down"].as_i64().unwrap())
+        .sum();
+    assert!(total >= 100_000, "{total}");
+    let (_, dashboard) = panel.get("/api/dashboard").await;
+    assert_eq!(dashboard["nodes_online"], 1, "{dashboard}");
+    assert_eq!(dashboard["nodes"][0]["status"], "online");
+    lane.write_all(&vec![1u8; 150_000]).await.unwrap();
+    let mut rest = vec![0u8; 150_000];
+    let _ = tokio::time::timeout(Duration::from_secs(5), lane.read_exact(&mut rest)).await;
+    assert!(
+        wait_for(async || {
+            let (_, user) = panel.get(&format!("/api/users/{alice}")).await;
+            user["user"]["state"] == "limited"
+        })
+        .await,
+        "the user reaches the limit"
+    );
+    assert!(
+        wait_for(async || node
+            .desired_state()
+            .users
+            .iter()
+            .any(|user| user.id == format!("u{alice}") && !user.enabled))
+        .await
+    );
+    assert!(
+        client.open_tcp(&target).await.is_err(),
+        "a limited user goes to the origin"
+    );
+    let (status, reset) = panel
+        .post(&format!("/api/users/{alice}/reset"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reset["used"], 0);
+    assert!(
+        wait_for(async || node
+            .desired_state()
+            .users
+            .iter()
+            .any(|user| user.id == format!("u{alice}") && user.enabled))
+        .await
+    );
+    client.close();
+
+    let (status, body) = panel.post("/api/outbounds", json!({"node_id": null, "name": "proxy", "kind": "socks5", "server": "bad", "username": null, "password": null, "udp": false, "link_node_id": null, "udp_fallback": null})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["field"], "server");
+    let (status, _) = panel.post("/api/outbounds", json!({"node_id": null, "name": "proxy", "kind": "http", "server": "127.0.0.1:3128", "username": "user", "password": "pass", "udp": false, "link_node_id": null, "udp_fallback": null})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, routing) = panel.get("/api/routing").await;
+    assert_eq!(routing["outbounds"][0]["has_password"], true);
+    assert!(!routing.to_string().contains("\"pass\""));
+    let (status, body) = panel
+        .post(
+            "/api/rules",
+            json!({"node_id": null, "pattern": "regexp:x", "outbound": "proxy"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _) = panel
+        .post(
+            "/api/rules",
+            json!({"node_id": null, "pattern": "domain:example.com", "outbound": "proxy"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        wait_for(async || node
+            .desired_state()
+            .rules
+            .iter()
+            .any(|rule| rule.outbound == "proxy"))
+        .await
+    );
+    let (status, _) = panel
+        .send(
+            "DELETE",
+            &format!("/api/outbounds/{}", routing["outbounds"][0]["id"]),
+            None,
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "an outbound in use stays");
+
+    let (status, logs) = panel.get(&format!("/api/nodes/{node_id}/logs")).await;
+    assert_eq!(status, StatusCode::OK, "{logs}");
+    let (status, sessions) = panel.get(&format!("/api/users/{alice}/sessions")).await;
+    assert_eq!(status, StatusCode::OK, "{sessions}");
+}
+
+#[tokio::test]
+async fn unreachable_nodes_report_errors() {
+    let dir = Temp::new();
+    let mut panel = Panel::new(&dir.0).await;
+    panel.setup().await;
+    let id: i64 = sqlx::query_scalar("INSERT INTO nodes (name, address, port, local, control_secret, service_secret, created_at) VALUES ('far', '127.0.0.1', 1, 0, ?, ?, 0) RETURNING id")
+        .bind(hex::encode(CONTROL))
+        .bind(hex::encode([1u8; 32]))
+        .fetch_one(&panel.app.db)
+        .await
+        .unwrap();
+    panel.app.sync.ensure(&panel.app, id);
+    assert!(
+        wait_for(async || {
+            let (_, node) = panel.get(&format!("/api/nodes/{id}")).await;
+            node["status"] == "offline" && node["last_error"].is_string()
+        })
+        .await
+    );
+    let (status, body) = panel
+        .post(&format!("/api/nodes/{id}/restart"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let (status, body) = panel.get("/api/users/999").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _) = panel
+        .post(
+            "/api/nodes/update",
+            json!({"node_ids": [id], "bundle_id": 1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

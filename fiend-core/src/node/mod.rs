@@ -217,6 +217,8 @@ struct Inner {
     origin_cache: Mutex<Option<(u64, OriginProfile)>>,
     warp: warp::Manager,
     resolver: Mutex<Option<outbound::Resolver>>,
+    binary_sha256: String,
+    listen_port: AtomicU64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -255,6 +257,18 @@ pub struct Health {
     pub uptime: u64,
     pub started_at: u64,
     pub state_version: u64,
+    #[serde(default)]
+    pub binary_sha256: String,
+    #[serde(default)]
+    pub listen_port: u16,
+}
+
+fn binary_sha256() -> String {
+    use sha2::{Digest, Sha256};
+    std::env::current_exe()
+        .and_then(fs::read)
+        .map(|bytes| hex::encode(Sha256::digest(bytes)))
+        .unwrap_or_default()
 }
 
 impl Node {
@@ -321,6 +335,8 @@ impl Node {
                     wireproxy,
                 ),
                 resolver: Mutex::new(None),
+                binary_sha256: binary_sha256(),
+                listen_port: AtomicU64::new(0),
             }),
         };
         node.restore_usage()?;
@@ -620,7 +636,15 @@ impl Node {
             uptime: self.inner.started.elapsed().as_secs(),
             started_at: self.inner.started_at,
             state_version: self.snapshot().state.version,
+            binary_sha256: self.inner.binary_sha256.clone(),
+            listen_port: self.inner.listen_port.load(Ordering::Relaxed) as u16,
         }
+    }
+
+    pub fn set_listen_port(&self, port: u16) {
+        self.inner
+            .listen_port
+            .store(u64::from(port), Ordering::Relaxed);
     }
 
     pub fn stats(&self) -> Stats {
@@ -837,7 +861,7 @@ pub fn save_state(path: &Path, state: &DesiredState) -> io::Result<()> {
     save_private(path, &raw)
 }
 
-pub(crate) fn save_private(path: &Path, raw: &[u8]) -> io::Result<()> {
+pub fn save_private(path: &Path, raw: &[u8]) -> io::Result<()> {
     if raw.len() > MAX_STATE_BYTES {
         return Err(invalid("saved document is too large"));
     }

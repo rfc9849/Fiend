@@ -162,6 +162,7 @@ async fn run_node(args: &[String]) -> Result<(), String> {
         fs::canonicalize(path).map_err(|error| error.to_string())?,
     )
     .await;
+    node.set_listen_port(settings.listen.port());
     let server = Server::managed(settings.config, node.clone());
     {
         let node = node.clone();
