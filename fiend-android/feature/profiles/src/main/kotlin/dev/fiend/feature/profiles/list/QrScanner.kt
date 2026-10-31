@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import android.util.Size
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import android.content.pm.PackageManager
@@ -14,6 +15,8 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,8 +52,10 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
+import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.multi.qrcode.QRCodeMultiReader
 import dev.fiend.core.designsystem.icon.FiendIcons
 import dev.fiend.feature.profiles.R
 import java.util.concurrent.Executors
@@ -85,10 +90,14 @@ internal fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
         val camera = provider
         val executor = Executors.newSingleThreadExecutor()
         val preview = Preview.Builder().build()
-        val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
+        val analysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(ResolutionSelector.Builder().setResolutionStrategy(ResolutionStrategy(Size(1280, 960), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)).build())
+            .build()
         val found = AtomicBoolean(false)
         val active = AtomicBoolean(true)
-        val reader = MultiFormatReader().apply { setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE), DecodeHintType.TRY_HARDER to true)) }
+        val hints = mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE), DecodeHintType.TRY_HARDER to true)
+        val reader = MultiFormatReader().apply { setHints(hints) }
         if (camera != null && permission) {
             preview.setSurfaceProvider { surface = it }
             analysis.setAnalyzer(executor) { image ->
@@ -100,7 +109,10 @@ internal fun QrScanner(onResult: (String) -> Unit, onDismiss: () -> Unit) {
                         val data = ByteArray(image.width * image.height)
                         for (y in 0 until image.height) for (x in 0 until image.width) data[y * image.width + x] = buffer.get(base + y * plane.rowStride + x * plane.pixelStride)
                         val source = PlanarYUVLuminanceSource(data, image.width, image.height, 0, 0, image.width, image.height, false)
-                        val decoded = reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))).text
+                        val bitmap = BinaryBitmap(HybridBinarizer(source))
+                        val decoded = runCatching { reader.decodeWithState(bitmap).text }.getOrNull()?.takeIf { it.startsWith("fiend://") }
+                            ?: QRCodeMultiReader().decodeMultiple(bitmap, hints).map { it.text }.firstOrNull { it.startsWith("fiend://") }
+                            ?: throw NotFoundException.getNotFoundInstance()
                         if (found.compareAndSet(false, true)) ContextCompat.getMainExecutor(context).execute { if (active.get()) result(decoded) }
                     }
                 } catch (_: Exception) { }
