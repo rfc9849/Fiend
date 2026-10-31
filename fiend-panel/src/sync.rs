@@ -225,6 +225,45 @@ async fn run(app: App, node_id: i64, wake: Arc<Notify>) {
     }
 }
 
+async fn register_warp(app: &App, node_id: i64, client: &mut ControlClient) -> io::Result<()> {
+    let status = client.call(Call::WarpStatus).await?;
+    if status
+        .get("registered")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    match client.call(Call::WarpRegister).await {
+        Ok(status) => registered(app, node_id, status).await,
+        Err(error) => {
+            tracing::warn!(node = node_id, %error, "cannot register WARP");
+            app.audit(None, "warp register failed", &format!("node {node_id}"), &error.to_string())
+                .await;
+        }
+    }
+    Ok(())
+}
+
+pub async fn registered(app: &App, node_id: i64, mut status: serde_json::Value) {
+    status["checked_at"] = now().into();
+    let result = sqlx::query("UPDATE warp SET status = ?, exit_v4 = ?, exit_v6 = ?, checked_at = ?, rotated_at = ? WHERE node_id = ?")
+        .bind(status.to_string())
+        .bind(status.pointer("/v4/ip").and_then(serde_json::Value::as_str))
+        .bind(status.pointer("/v6/ip").and_then(serde_json::Value::as_str))
+        .bind(now())
+        .bind(now())
+        .bind(node_id)
+        .execute(&app.db)
+        .await;
+    if let Err(error) = result {
+        tracing::warn!(node = node_id, %error, "cannot save WARP status");
+    }
+    app.audit(None, "warp registered", &format!("node {node_id}"), "")
+        .await;
+    app.emit("nodes", Some(node_id.to_string()));
+}
+
 async fn mark(app: &App, node: i64, status: &str, error: Option<String>) {
     let changed: Option<String> = sqlx::query_scalar("SELECT status FROM nodes WHERE id = ?")
         .bind(node)
@@ -287,6 +326,9 @@ async fn session(
                                 .await
                                 .map_err(io::Error::other)?;
                             app.emit("nodes", Some(node_id.to_string()));
+                            if desired.warp.enabled {
+                                register_warp(app, node_id, client).await?;
+                            }
                         }
                         Err(error) => {
                             status = "error";

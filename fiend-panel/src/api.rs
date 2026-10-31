@@ -645,7 +645,7 @@ async fn warp_settings(
             "Choose off, 6 h, 12 h, 24 h, or 7 d.",
         ));
     }
-    sqlx::query("INSERT INTO warp (node_id, enabled, rotate_every) VALUES (?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET enabled = excluded.enabled, rotate_every = excluded.rotate_every")
+    sqlx::query("INSERT INTO warp (node_id, enabled, rotate_every, chosen) VALUES (?, ?, ?, 1) ON CONFLICT(node_id) DO UPDATE SET enabled = excluded.enabled, rotate_every = excluded.rotate_every, chosen = 1")
         .bind(id)
         .bind(input.enabled)
         .bind(input.rotate_every)
@@ -659,7 +659,57 @@ async fn warp_settings(
     )
     .await;
     changed(&app).await?;
+    if input.enabled {
+        ensure_warp(&app, id).await?;
+    }
     Ok(Json(warp_view(warp_row(&app, id).await?, None, None)))
+}
+
+async fn ensure_warp(app: &App, id: i64) -> ApiResult<()> {
+    wait_applied(app, id).await;
+    let status = crate::sync::call(app, id, Call::WarpStatus)
+        .await
+        .map_err(control_error)?;
+    if status
+        .get("registered")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        save_warp_status(app, id, status).await?;
+        return Ok(());
+    }
+    let status = match crate::sync::call(app, id, Call::WarpRegister).await {
+        Ok(status) => status,
+        Err(error) => {
+            let status = crate::sync::call(app, id, Call::WarpStatus)
+                .await
+                .map_err(control_error)?;
+            if !status
+                .get("registered")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(control_error(error));
+            }
+            status
+        }
+    };
+    crate::sync::registered(app, id, status).await;
+    Ok(())
+}
+
+async fn enable_warp_for(app: &App, node_id: Option<i64>) -> ApiResult<()> {
+    let nodes: Vec<i64> = match node_id {
+        Some(id) => vec![id],
+        None => state::nodes(app).await?.iter().map(|node| node.id).collect(),
+    };
+    for id in &nodes {
+        sqlx::query("INSERT INTO warp (node_id, enabled, chosen) VALUES (?, 1, 1) ON CONFLICT(node_id) DO UPDATE SET enabled = 1, chosen = 1")
+            .bind(id)
+            .execute(&app.db)
+            .await?;
+    }
+    changed(app).await
 }
 
 async fn wait_applied(app: &App, id: i64) {
@@ -1913,6 +1963,9 @@ async fn create_outbound(
     )
     .await;
     changed(&app).await?;
+    if input.kind == "warp" {
+        enable_warp_for(&app, input.node_id).await?;
+    }
     Ok(Json(Created { id }))
 }
 
@@ -1980,6 +2033,9 @@ async fn edit_outbound(
     )
     .await;
     changed(&app).await?;
+    if input.kind == "warp" && previous.kind != "warp" {
+        enable_warp_for(&app, input.node_id).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

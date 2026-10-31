@@ -621,6 +621,54 @@ async fn local_node_import_sync_links_statistics_and_limits() {
 }
 
 #[tokio::test]
+async fn warp_outbound_turns_on_warp_for_nodes() {
+    let dir = Temp::new();
+    let mut panel = Panel::new(&dir.0).await;
+    panel.setup().await;
+    let insert = async |panel: &Panel, name: &str| -> i64 {
+        sqlx::query_scalar("INSERT INTO nodes (name, address, port, local, control_secret, service_secret, created_at) VALUES (?, '127.0.0.1', 1, 0, ?, ?, 0) RETURNING id")
+            .bind(name)
+            .bind(hex::encode(CONTROL))
+            .bind(hex::encode([1u8; 32]))
+            .fetch_one(&panel.app.db)
+            .await
+            .unwrap()
+    };
+    let first = insert(&panel, "first").await;
+    let second = insert(&panel, "second").await;
+    let (status, body) = panel.post("/api/outbounds", json!({"node_id": null, "name": "WARP", "kind": "warp", "server": null, "username": null, "password": null, "udp": false, "link_node_id": null, "udp_fallback": null})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = panel.post("/api/rules", json!({"node_id": null, "pattern": "domain:resolve.rs", "outbound": "WARP"})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for id in [first, second] {
+        let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, id).await.unwrap();
+        assert!(warp.enabled, "node {id}");
+        assert!(outbounds.iter().any(|outbound| outbound.id == "WARP"));
+        assert!(rules.iter().any(|rule| rule.outbound == "WARP"));
+    }
+
+    let (status, body) = panel.put(&format!("/api/nodes/{second}/warp"), json!({"enabled": false, "rotate_every": null})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, second).await.unwrap();
+    assert!(!warp.enabled, "an explicit off stays off");
+    assert!(outbounds.is_empty() && rules.is_empty());
+
+    let third = insert(&panel, "third").await;
+    sqlx::query("INSERT INTO warp (node_id, status) VALUES (?, '{}')")
+        .bind(third)
+        .execute(&panel.app.db)
+        .await
+        .unwrap();
+    let before = fiend_panel::db::version(&panel.app.db).await;
+    let (outbounds, _, warp) = fiend_panel::state::routing_for(&panel.app, third).await.unwrap();
+    assert!(warp.enabled, "a new node gets WARP");
+    assert!(outbounds.iter().any(|outbound| outbound.id == "WARP"));
+    assert!(fiend_panel::db::version(&panel.app.db).await > before, "the node gets the change");
+    let (_, _, warp) = fiend_panel::state::routing_for(&panel.app, second).await.unwrap();
+    assert!(!warp.enabled, "an explicit off stays off");
+}
+
+#[tokio::test]
 async fn unreachable_nodes_report_errors() {
     let dir = Temp::new();
     let mut panel = Panel::new(&dir.0).await;

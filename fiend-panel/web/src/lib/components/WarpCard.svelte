@@ -8,7 +8,7 @@
   import { ago, date } from '#lib/format.ts';
   import type { WarpRotation, WarpView } from '#lib/api/generated/index.ts';
 
-  let { node }: { node: number } = $props();
+  let { node, title = 'Cloudflare WARP' }: { node: number; title?: string } = $props();
   let warp = $state<WarpView | null>(null);
   let rotation = $state<WarpRotation | null>(null);
   let busy = $state('');
@@ -61,15 +61,15 @@
   });
 </script>
 
-<section class="card" aria-labelledby="warp-title">
+<section class="card" aria-labelledby="warp-title-{node}">
   <div class="card-header">
-    <h2 id="warp-title">Cloudflare WARP</h2>
+    <h2 id="warp-title-{node}">{title}</h2>
     {#if warp?.registered}<Button kind="primary" icon="refresh" busy={busy === 'rotate'} disabled={!warp.running || !!busy} onclick={rotate}>New IP</Button>{/if}
   </div>
   {#if error}<p class="note error" role="alert">{error}</p>{/if}
   {#if warp}
     <div class="stack">
-      <Switch id="warp-enabled" checked={warp.enabled} label="Use WARP on this node" disabled={!!busy} onchange={(value) => settings(value, every)} />
+      <Switch id="warp-enabled-{node}" checked={warp.enabled} label="Use WARP on this node" disabled={!!busy} onchange={(value) => settings(value, every)} />
       {#if warp.enabled && !warp.registered}
         <div class="row"><Button busy={busy === 'register'} onclick={register}>Register a WARP account</Button><span class="small muted">The node calls the Cloudflare client API.</span></div>
       {/if}
@@ -89,8 +89,8 @@
           </p>
         {/if}
         <div class="row">
-          <label class="small muted" for="warp-rotate">Automatic New IP</label>
-          <div class="rotate"><Select id="warp-rotate" bind:value={every} label="Automatic New IP" onchange={(value) => settings(warp?.enabled ?? false, value)} options={[{ value: 'off', label: 'Off' }, { value: '21600', label: 'Every 6 h' }, { value: '43200', label: 'Every 12 h' }, { value: '86400', label: 'Every 24 h' }, { value: '604800', label: 'Every 7 d' }]} /></div>
+          <label class="small muted" for="warp-rotate-{node}">Automatic New IP</label>
+          <div class="rotate"><Select id="warp-rotate-{node}" bind:value={every} label="Automatic New IP" onchange={(value) => settings(warp?.enabled ?? false, value)} options={[{ value: 'off', label: 'Off' }, { value: '21600', label: 'Every 6 h' }, { value: '43200', label: 'Every 12 h' }, { value: '86400', label: 'Every 24 h' }, { value: '604800', label: 'Every 7 d' }]} /></div>
           <Button kind="danger" onclick={() => (deleting = true)}>Delete account</Button>
         </div>
       {/if}

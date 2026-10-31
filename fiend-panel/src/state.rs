@@ -270,6 +270,15 @@ pub async fn routing_for(
             merged.push(row);
         }
     }
+    if merged.iter().any(|row| row.kind == "warp") {
+        let added = sqlx::query("INSERT INTO warp (node_id, enabled) VALUES (?, 1) ON CONFLICT(node_id) DO UPDATE SET enabled = 1 WHERE chosen = 0 AND enabled = 0")
+            .bind(node_id)
+            .execute(&app.db)
+            .await?;
+        if added.rows_affected() > 0 {
+            crate::db::bump_version(&app.db).await?;
+        }
+    }
     let warp: Option<(bool, Option<i64>)> =
         sqlx::query_as("SELECT enabled, rotate_every FROM warp WHERE node_id = ?")
             .bind(node_id)
