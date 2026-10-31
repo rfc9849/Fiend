@@ -1,43 +1,87 @@
 <script lang="ts">
-  import serverIcon from '@icons/server.svg?raw';
+  import { onMount } from 'svelte';
+  import TopBar from '#lib/components/TopBar.svelte';
+  import StatCard from '#lib/components/StatCard.svelte';
+  import Tabs from '#lib/components/Tabs.svelte';
+  import TrafficChart from '#lib/components/TrafficChart.svelte';
+  import NodeTable from '#lib/components/NodeTable.svelte';
+  import { api, fieldErrors } from '#lib/api/client.ts';
+  import { onEvent } from '#lib/stores/events.ts';
+  import { rate, splitUnit } from '#lib/format.ts';
+  import type { Dashboard, TrafficSeries } from '#lib/api/generated/index.ts';
+
+  let data = $state<Dashboard | null>(null);
+  let series = $state<TrafficSeries | null>(null);
+  let range = $state('24h');
+  let error = $state('');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  async function load() {
+    try {
+      data = await api.get<Dashboard>('/dashboard');
+      error = '';
+    } catch (failure) {
+      error = fieldErrors(failure).form ?? '';
+    }
+  }
+
+  async function loadSeries() {
+    try {
+      series = await api.get<TrafficSeries>(`/traffic?range=${range}`);
+    } catch (failure) {
+      error = fieldErrors(failure).form ?? '';
+    }
+  }
+
+  onMount(() => {
+    load();
+    loadSeries();
+    const stop = onEvent((kind) => {
+      if (kind === 'stats' || kind === 'nodes') {
+        clearTimeout(timer);
+        timer = setTimeout(load, 300);
+      }
+    });
+    const slow = setInterval(loadSeries, 60_000);
+    return () => {
+      stop();
+      clearInterval(slow);
+      clearTimeout(timer);
+    };
+  });
+
+  const traffic = $derived(splitUnit(rate(data?.traffic_rate ?? 0)));
 </script>
 
-<svelte:head>
-  <title>fiend — server panel</title>
-  <meta name="description" content="Private fiend server panel" />
-</svelte:head>
+<svelte:head><title>Dashboard · fiend</title></svelte:head>
 
-<main>
-  <header><span class="wordmark">fiend</span><span class="label">server panel</span></header>
-  <section aria-labelledby="title">
-    <span class="icon">{@html serverIcon}</span>
-    <h1 id="title">Panel package installed</h1>
-    <p>This page checks the private panel connection.</p>
-    <p>Node management and account setup are not available in this build.</p>
-    <div class="note">Keep this panel on loopback. Use an SSH tunnel to open it.</div>
+<TopBar title="Dashboard" />
+{#if error}<p class="note error" role="alert">{error}</p>{/if}
+{#if data}
+  <div class="cards">
+    <StatCard label="Traffic now" icon="speed" value={traffic[0]} unit={traffic[1]} samples={data.traffic_samples} />
+    <StatCard label="Users online" icon="key" value={String(data.users_online)} unit="of {data.users_total}" samples={data.online_samples} />
+    <StatCard label="Nodes online" icon="server" value={String(data.nodes_online)} unit="of {data.nodes_total}" samples={data.node_samples} />
+    <StatCard label="Sent to the origin" icon="shield" value={String(data.origin_recent)} unit="in 1 h" samples={data.origin_samples} />
+  </div>
+  <section class="section" aria-labelledby="nodes-title">
+    <div class="card-header"><h2 id="nodes-title">Nodes</h2><a href="/nodes" class="small">All nodes</a></div>
+    <NodeTable nodes={data.nodes} />
   </section>
-</main>
+  <section class="card section" aria-labelledby="traffic-title">
+    <div class="card-header">
+      <h2 id="traffic-title">Traffic</h2>
+      <Tabs label="Traffic range" bind:value={range} onchange={loadSeries} tabs={[{ value: '24h', label: '24 h' }, { value: '7d', label: '7 d' }, { value: '30d', label: '30 d' }]} />
+    </div>
+    {#if series}<TrafficChart points={series.points} step={series.step} />{/if}
+  </section>
+{:else if !error}
+  <p class="muted">Loading…</p>
+{/if}
 
 <style>
-  :global(:root) { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #242b30; background: #e3e5e6; font-size: 13px; color-scheme: light dark; }
-  :global(body) { margin: 0; }
-  :global(*) { box-sizing: border-box; }
-  main { min-height: 100dvh; max-width: 960px; margin: auto; background: #fafbfb; padding: 32px; }
-  header { display: flex; gap: 16px; align-items: baseline; }
-  .wordmark { font-size: 26px; font-weight: 600; letter-spacing: -1px; }
-  .label, p { color: #677179; }
-  section { margin-top: 48px; padding: 24px; background: #fff; border: 1px solid #d9dfe3; border-radius: 9px; }
-  h1 { font-size: 24px; font-weight: 600; letter-spacing: -.6px; }
-  p { line-height: 1.6; }
-  .icon { display: block; width: 24px; height: 24px; }
-  .icon :global(svg) { width: 24px; height: 24px; }
-  .note { margin-top: 24px; padding: 12px; border-radius: 6px; background: #e6edf3; color: #365f87; line-height: 1.6; }
-  @media (prefers-color-scheme: dark) {
-    :global(:root) { color: #e2e7eb; background: #101214; }
-    main { background: #1b1e21; }
-    section { background: #22262a; border-color: #353d43; }
-    .label, p { color: #a0aab3; }
-    .note { background: #293946; color: #a0bdd6; }
-  }
-  @media (max-width: 720px) { main { padding: 20px; } section { padding: 20px; margin-top: 32px; } }
+  .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+  .section { margin-top: 24px; }
+  @media (max-width: 1100px) { .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 480px) { .cards { grid-template-columns: minmax(0, 1fr); } }
 </style>
