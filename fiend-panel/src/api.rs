@@ -1509,7 +1509,9 @@ async fn presets(_admin: Admin) -> Json<Vec<PresetView>> {
     }])
 }
 
-fn template_bytes(input: &DisguiseInput) -> ApiResult<Vec<u8>> {
+const ORIGIN_PORT: u16 = 443;
+
+fn template_bytes(input: &DisguiseInput) -> ApiResult<(Vec<u8>, String)> {
     let template = match (&input.preset, &input.template_base64) {
         (Some(preset), _) if preset == "wikipedia" => {
             fiend_core::fingerprint::Template::from_json(BUNDLED).map_err(ApiError::internal)?
@@ -1529,7 +1531,28 @@ fn template_bytes(input: &DisguiseInput) -> ApiResult<Vec<u8>> {
     let compact = fiend_core::share::compact_hello(&template);
     fiend_core::share::template_from_hello(&compact)
         .map_err(|error| ApiError::field("template", error.to_string()))?;
-    Ok(compact)
+    let domain = template.domain.trim().to_owned();
+    fiend_core::share::check_server(&state::authority(&domain, i64::from(ORIGIN_PORT)))
+        .map_err(|_| ApiError::field("template", "The template has no valid SNI host name."))?;
+    Ok((compact, domain))
+}
+
+async fn free_disguise_name(app: &App, base: &str) -> ApiResult<String> {
+    for number in 1..=100 {
+        let name = if number == 1 {
+            base.to_owned()
+        } else {
+            format!("{base} {number}")
+        };
+        let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM disguises WHERE name = ?")
+            .bind(&name)
+            .fetch_one(&app.db)
+            .await?;
+        if used == 0 {
+            return Ok(name);
+        }
+    }
+    Err(ApiError::conflict("Too many disguises use this name."))
 }
 
 fn fiend_app_template(bytes: &[u8]) -> ApiResult<fiend_core::fingerprint::Template> {
@@ -1563,23 +1586,16 @@ async fn create_disguise(
     admin: Admin,
     Json(input): Json<DisguiseInput>,
 ) -> ApiResult<Json<Created>> {
-    auth::check_name(&input.name, "name")?;
-    fiend_core::share::check_server(&state::authority(
-        &input.origin_host,
-        i64::from(input.origin_port.max(1)),
-    ))
-    .map_err(|_| ApiError::field("origin_host", "Enter the origin host name."))?;
-    if input.origin_port == 0 {
-        return Err(ApiError::field(
-            "origin_port",
-            "Enter a port from 1 to 65535.",
-        ));
-    }
-    let raw = template_bytes(&input)?;
+    let (raw, origin_host) = template_bytes(&input)?;
+    let base = match input.preset.as_deref() {
+        Some("wikipedia") => "Wikipedia",
+        _ => origin_host.as_str(),
+    };
+    let name = free_disguise_name(&app, base).await?;
     let profile = match crate::db::setting(&app.db, "local_origin").await {
         Some(text) => {
             let saved: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-            if saved["host"] == input.origin_host.as_str() && saved["port"] == input.origin_port {
+            if saved["host"] == origin_host.as_str() && saved["port"] == ORIGIN_PORT {
                 saved["profile"].to_string()
             } else {
                 "{}".into()
@@ -1588,23 +1604,19 @@ async fn create_disguise(
         None => "{}".into(),
     };
     let id: i64 = sqlx::query_scalar("INSERT INTO disguises (name, origin_host, origin_port, template_raw, origin_profile, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id")
-        .bind(&input.name)
-        .bind(&input.origin_host)
-        .bind(i64::from(input.origin_port))
+        .bind(&name)
+        .bind(&origin_host)
+        .bind(i64::from(ORIGIN_PORT))
         .bind(raw)
         .bind(profile)
         .bind(now())
         .fetch_one(&app.db)
-        .await
-        .map_err(|error| match ApiError::from(error) {
-            error if error.status == StatusCode::CONFLICT => ApiError::field("name", "This name is already in use."),
-            error => error,
-        })?;
+        .await?;
     app.audit(
         Some(admin.id),
         "disguise added",
-        &format!("disguise {}", input.name),
-        &format!("{}:{}", input.origin_host, input.origin_port),
+        &format!("disguise {name}"),
+        &format!("{origin_host}:{ORIGIN_PORT}"),
     )
     .await;
     Ok(Json(Created { id }))

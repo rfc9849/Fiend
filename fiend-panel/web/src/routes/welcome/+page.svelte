@@ -18,9 +18,6 @@
   let presets = $state<PresetView[]>([]);
   let nodeName = $state('main');
   let address = $state('');
-  let disguiseName = $state('Default');
-  let originHost = $state('www.wikipedia.org');
-  let originPort = $state('443');
   let preset = $state('wikipedia');
   let file = $state<string | null>(null);
   let userName = $state('');
@@ -38,13 +35,7 @@
   onMount(async () => {
     try {
       [defaults, presets] = await Promise.all([api.get<LocalNodeDefaults>('/wizard/local'), api.get<PresetView[]>('/disguises/presets')]);
-      originHost = defaults.origin_host;
       if (defaults.address && !address) address = defaults.address;
-      originPort = String(defaults.origin_port);
-      if (originHost !== 'www.wikipedia.org') {
-        preset = 'file';
-        disguiseName = originHost;
-      }
       await refresh();
       const wizard = session.info?.wizard;
       if (wizard?.local_node) step = wizard.disguise ? (wizard.first_user ? 4 : 4) : 3;
@@ -91,17 +82,11 @@
       step = 4;
       return;
     }
-    const port = Number(originPort);
-    if (!originHost.trim()) fields.origin_host = 'Enter the origin host.';
-    if (!Number.isInteger(port) || port < 1 || port > 65535) fields.origin_port = 'Enter a port from 1 to 65535.';
     if (preset === 'file' && !file) fields.template = 'Choose a template file.';
     if (Object.keys(fields).length) return;
     busy = true;
     try {
       const created = await api.post<Created>('/disguises', {
-        name: disguiseName.trim() || originHost.trim(),
-        origin_host: originHost.trim(),
-        origin_port: port,
         preset: preset === 'file' ? null : preset,
         template_base64: preset === 'file' ? file : null
       });
@@ -165,7 +150,6 @@
       {#if defaults}
         <dl class="facts">
           <dt>Node port</dt><dd class="mono">{defaults.port}</dd>
-          <dt>Origin</dt><dd class="mono">{defaults.origin_host}:{defaults.origin_port}</dd>
           <dt>Settings</dt><dd>{defaults.imported ? `Imported from the old server. ${defaults.users} existing secret${defaults.users === 1 ? '' : 's'} become users, so existing clients keep working.` : 'New node'}</dd>
         </dl>
         {#if defaults.error}<p class="note error">{defaults.error}</p>{/if}
@@ -187,13 +171,8 @@
       {#if session.info?.wizard.disguise}
         <p class="note">The local node has a disguise. You can change it on the Disguises page.</p>
       {:else}
-        <Field label="Name" id="disguise-name" error={fields.name}><input id="disguise-name" bind:value={disguiseName} /></Field>
-        <div class="grid-2">
-          <Field label="Origin host" id="origin-host" error={fields.origin_host}><input id="origin-host" bind:value={originHost} /></Field>
-          <Field label="Origin port" id="origin-port" error={fields.origin_port}><input id="origin-port" inputmode="numeric" bind:value={originPort} /></Field>
-        </div>
         <TemplatePicker {presets} bind:preset bind:file error={fields.template} />
-        <p class="small muted">The template SNI must belong to the origin. The panel probes the origin from the local node.</p>
+        <p class="small muted">The panel probes the origin from the local node.</p>
       {/if}
       <div class="row between">
         <Button kind="ghost" onclick={() => (step = 2)}>Back</Button>

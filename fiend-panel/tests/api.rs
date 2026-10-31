@@ -118,6 +118,10 @@ impl Panel {
         self.send("PUT", path, Some(body), true).await
     }
 
+    async fn del(&mut self, path: &str) -> (StatusCode, Value) {
+        self.send("DELETE", path, None, true).await
+    }
+
     async fn refresh(&mut self) {
         let (status, session) = self.get("/api/session").await;
         assert_eq!(status, StatusCode::OK);
@@ -439,10 +443,26 @@ async fn local_node_import_sync_links_statistics_and_limits() {
     let (_, secret) = panel.get(&format!("/api/users/{imported_id}/secret")).await;
     assert_eq!(secret["secret"], hex::encode(LEGACY));
 
-    let (status, preset) = panel.post("/api/disguises", json!({"name": "wiki", "origin_host": "www.wikipedia.org", "origin_port": 443, "preset": "wikipedia", "template_base64": null})).await;
+    let (status, preset) = panel.post("/api/disguises", json!({"preset": "wikipedia", "template_base64": null})).await;
     assert_eq!(status, StatusCode::OK, "{preset}");
     let disguise = preset["id"].as_i64().unwrap();
-    let (status, body) = panel.post("/api/disguises", json!({"name": "bad", "origin_host": "x.example", "origin_port": 443, "preset": null, "template_base64": "bm90IGEgdGVtcGxhdGU="})).await;
+    let (status, again) = panel.post("/api/disguises", json!({"preset": "wikipedia", "template_base64": null})).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    let (_, listed) = panel.get("/api/disguises").await;
+    let listed: Vec<_> = listed.as_array().unwrap().iter().map(|item| (item["name"].as_str().unwrap().to_owned(), item["origin_host"].as_str().unwrap().to_owned(), item["origin_port"].as_i64().unwrap())).collect();
+    assert_eq!(listed, vec![("Wikipedia".to_owned(), "www.wikipedia.org".to_owned(), 443), ("Wikipedia 2".to_owned(), "www.wikipedia.org".to_owned(), 443)]);
+    let (status, _) = panel.del(&format!("/api/disguises/{}", again["id"])).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let upload = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, include_bytes!("../../fiend-core/testdata/template.json"));
+    let (status, uploaded) = panel.post("/api/disguises", json!({"preset": null, "template_base64": upload})).await;
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    let (_, listed) = panel.get("/api/disguises").await;
+    let item = listed.as_array().unwrap().iter().find(|item| item["id"] == uploaded["id"]).unwrap().clone();
+    assert_eq!((item["name"].as_str(), item["origin_host"].as_str(), item["origin_port"].as_i64()), (Some("www.wikipedia.org"), Some("www.wikipedia.org"), Some(443)));
+    assert!(item["checks"].as_array().unwrap().iter().all(|check| check["name"] != "Domain" || check["ok"] == true), "{item}");
+    let (status, _) = panel.del(&format!("/api/disguises/{}", uploaded["id"])).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = panel.post("/api/disguises", json!({"preset": null, "template_base64": "bm90IGEgdGVtcGxhdGU="})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["field"], "template");
     let (status, _) = panel.put(&format!("/api/nodes/{node_id}"), json!({"name": "main", "address": "127.0.0.1", "port": node_address.port(), "disguise_id": disguise})).await;

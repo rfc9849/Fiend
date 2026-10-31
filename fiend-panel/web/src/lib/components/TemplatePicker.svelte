@@ -29,7 +29,7 @@
   }
 </script>
 
-<Field label="TLS template" id="template" error={error || fileError} help="A preset, a ClientHello capture (.bin), or a template file (.json).">
+<Field label="TLS template" id="template" error={error || fileError} help="Wikipedia, or your own ClientHello capture (.bin) or template (.json). The origin is the SNI host of the template, port 443.">
   <Select id="template" bind:value={preset} {options} label="TLS template" />
 </Field>
 {#if preset === 'file'}

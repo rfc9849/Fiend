@@ -295,9 +295,6 @@ pub struct DisguiseView {
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct DisguiseInput {
-    pub name: String,
-    pub origin_host: String,
-    pub origin_port: u16,
     pub preset: Option<String>,
     pub template_base64: Option<String>,
 }

@@ -4,7 +4,6 @@
   import Button from '#lib/components/Button.svelte';
   import Dialog from '#lib/components/Dialog.svelte';
   import Confirm from '#lib/components/Confirm.svelte';
-  import Field from '#lib/components/Field.svelte';
   import Select from '#lib/components/Select.svelte';
   import TemplatePicker from '#lib/components/TemplatePicker.svelte';
   import Icon from '#lib/components/Icon.svelte';
@@ -17,9 +16,6 @@
   let presets = $state<PresetView[]>([]);
   let nodes = $state<NodeView[]>([]);
   let adding = $state(false);
-  let name = $state('');
-  let host = $state('');
-  let port = $state('443');
   let preset = $state('wikipedia');
   let file = $state<string | null>(null);
   let fields = $state<Record<string, string>>({});
@@ -46,15 +42,11 @@
     event.preventDefault();
     fields = {};
     formError = '';
-    const number = Number(port);
-    if (!name.trim()) fields.name = 'Enter a name.';
-    if (!host.trim()) fields.origin_host = 'Enter the origin host.';
-    if (!Number.isInteger(number) || number < 1 || number > 65535) fields.origin_port = 'Enter a port from 1 to 65535.';
     if (preset === 'file' && !file) fields.template = 'Choose a template file.';
     if (Object.keys(fields).length) return;
     busy = true;
     try {
-      await api.post('/disguises', { name: name.trim(), origin_host: host.trim(), origin_port: number, preset: preset === 'file' ? null : preset, template_base64: preset === 'file' ? file : null });
+      await api.post('/disguises', { preset: preset === 'file' ? null : preset, template_base64: preset === 'file' ? file : null });
       adding = false;
       toast('Disguise added');
       await load();
@@ -84,7 +76,7 @@
 <svelte:head><title>Disguises · fiend</title></svelte:head>
 
 <TopBar title="Disguises" subtitle="Origins and TLS templates. A node copies the TLS behavior of its origin.">
-  {#snippet actions()}<Button kind="primary" icon="plus" onclick={() => { name = ''; host = ''; port = '443'; preset = presets[0]?.id ?? 'file'; file = null; fields = {}; formError = ''; adding = true; }}>Add disguise</Button>{/snippet}
+  {#snippet actions()}<Button kind="primary" icon="plus" onclick={() => { preset = presets[0]?.id ?? 'file'; file = null; fields = {}; formError = ''; adding = true; }}>Add disguise</Button>{/snippet}
 </TopBar>
 {#if error}<p class="note error" role="alert">{error}</p>{/if}
 {#if disguises.length === 0}
@@ -118,11 +110,6 @@
 <Dialog bind:open={adding} title="Add disguise">
   <form id="add-disguise" novalidate class="stack" onsubmit={create}>
     {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
-    <Field label="Name" id="disguise-name" error={fields.name}><input id="disguise-name" bind:value={name} /></Field>
-    <div class="grid-2">
-      <Field label="Origin host" id="disguise-host" error={fields.origin_host} help="A real HTTPS site."><input id="disguise-host" bind:value={host} placeholder="www.example.com" /></Field>
-      <Field label="Origin port" id="disguise-port" error={fields.origin_port}><input id="disguise-port" inputmode="numeric" bind:value={port} /></Field>
-    </div>
     <TemplatePicker {presets} bind:preset bind:file error={fields.template} />
   </form>
   {#snippet actions()}
