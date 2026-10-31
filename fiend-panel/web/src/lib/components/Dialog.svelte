@@ -14,7 +14,7 @@
 <dialog bind:this={dialog} class:wide aria-labelledby={id} onclose={() => { open = false; onclose?.(); }} onclick={(event) => { if (event.target === dialog) dialog.close(); }}>
   {#if open}
     <div class="frame">
-      <header><h2 {id}>{title}</h2><IconButton icon="close" label="Close" onclick={() => dialog.close()} /></header>
+      <header><h2 {id}>{title}</h2><IconButton icon="close" label="Close dialog" onclick={() => dialog.close()} /></header>
       <div class="body">{@render children()}</div>
       {#if actions}<footer>{@render actions()}</footer>{/if}
     </div>

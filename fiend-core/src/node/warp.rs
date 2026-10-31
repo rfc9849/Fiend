@@ -442,7 +442,7 @@ impl Manager {
         })
         .to_string();
         let url = format!("{}/reg", self.inner.api);
-        let text = tokio::task::spawn_blocking(move || {
+        let text = retry(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(API_TIMEOUT))
                 .build()
@@ -452,14 +452,13 @@ impl Manager {
                 .header("User-Agent", USER_AGENT)
                 .header("CF-Client-Version", CLIENT_VERSION)
                 .header("Content-Type", "application/json; charset=UTF-8")
-                .send(body)
+                .send(&body)
                 .map_err(|error| other(format!("WARP registration failed: {error}")))?
                 .body_mut()
                 .read_to_string()
                 .map_err(|error| other(format!("WARP registration reply failed: {error}")))
         })
-        .await
-        .map_err(io::Error::other)??;
+        .await?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .map_err(|_| other("WARP registration reply is not JSON"))?;
         let result = value.get("result").unwrap_or(&value);
@@ -493,7 +492,7 @@ impl Manager {
     async fn delete_account(&self, account: &Account) -> io::Result<()> {
         let url = format!("{}/reg/{}", self.inner.api, account.id);
         let token = Zeroizing::new(format!("Bearer {}", account.token));
-        tokio::task::spawn_blocking(move || {
+        retry(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(API_TIMEOUT))
                 .build()
@@ -508,8 +507,33 @@ impl Manager {
                 .map_err(|error| other(format!("WARP account delete failed: {error}")))
         })
         .await
-        .map_err(io::Error::other)?
     }
+}
+
+async fn retry<T, F>(operation: F) -> io::Result<T>
+where
+    T: Send + 'static,
+    F: Fn() -> io::Result<T> + Send + Sync + 'static,
+{
+    let operation = std::sync::Arc::new(operation);
+    let mut last = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let call = operation.clone();
+        match tokio::task::spawn_blocking(move || call())
+            .await
+            .map_err(io::Error::other)?
+        {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                tracing::warn!(%error, attempt, "WARP API call failed");
+                last = Some(error);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| other("WARP API call failed")))
 }
 
 fn prepare_directory(path: &Path) -> io::Result<()> {
