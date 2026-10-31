@@ -157,6 +157,38 @@ class StorageTest {
     }
 
     @Test
+    fun subscriptionsAreRenamedAndRecheckedForANewType() = runBlocking {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/geosite-mixed.txt") { exchange ->
+            val body = "domain:example.ru\nip:1.2.3.0/24\n".toByteArray()
+            exchange.sendResponseHeaders(200, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val settings = RealSettingsRepository(PreferencesStore(context, scope), RealLogRepository(), scope)
+            settings.awaitReady()
+            val repository = RealSubscriptionRepository(context, settings, RealRulesRepository(context))
+            val added = repository.add("http://127.0.0.1:${server.address.port}/geosite-mixed.txt", RuleKind.Proxy, " Mixed ").getOrThrow()
+            assertEquals("Mixed", added.title)
+            assertEquals(2, added.entries)
+            val blocked = repository.edit(added.id, "Mixed", RuleKind.Block).getOrThrow()
+            assertEquals(RuleKind.Block, blocked.kind)
+            assertTrue(blocked.error != null)
+            val dpi = repository.edit(added.id, "", RuleKind.Dpi).getOrThrow()
+            assertNull(dpi.error)
+            assertEquals(2, dpi.entries)
+            assertEquals("geosite-mixed", dpi.title)
+            assertEquals(listOf(dpi), settings.settings.value.subscriptions)
+            assertTrue(repository.edit(added.id, "x".repeat(65), RuleKind.Dpi).isFailure)
+            assertTrue(repository.edit("none", "", RuleKind.Dpi).isFailure)
+            repository.remove(added.id)
+        } finally { server.stop(0); scope.cancel() }
+    }
+
+    @Test
     fun rulesAreValidatedByRustAndImportIsLimited() = runBlocking {
         val context = RuntimeEnvironment.getApplication() as Context
         val repository = RealRulesRepository(context)

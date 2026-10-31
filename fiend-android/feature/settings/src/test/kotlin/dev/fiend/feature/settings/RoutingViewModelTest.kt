@@ -54,11 +54,19 @@ class RoutingViewModelTest {
         override suspend fun refreshStale() { stale += 1 }
         override suspend fun refresh(id: String): Result<Unit> = failWith?.let { Result.failure(it) } ?: Result.success(Unit)
         override suspend fun refreshAll(): Result<Unit> = failWith?.let { Result.failure(it) } ?: Result.success(Unit)
-        override suspend fun add(url: String, kind: RuleKind): Result<RuleSubscription> {
-            val subscription = RuleSubscription("id-${added.size}", url, kind, updatedAtMs = 1, entries = 3)
+        override suspend fun add(url: String, kind: RuleKind, name: String): Result<RuleSubscription> {
+            val subscription = RuleSubscription("id-${added.size}", url, kind, updatedAtMs = 1, entries = 3, name = name)
             added += subscription
             settings?.update { it.copy(subscriptions = it.subscriptions + subscription) }
             return Result.success(subscription)
+        }
+        override suspend fun edit(id: String, name: String, kind: RuleKind): Result<RuleSubscription> {
+            val index = added.indexOfFirst { it.id == id }
+            if (index < 0) return Result.failure(IllegalArgumentException("The subscription is not available"))
+            val changed = added[index].copy(name = name, kind = kind)
+            added[index] = changed
+            settings?.update { current -> current.copy(subscriptions = current.subscriptions.map { if (it.id == id) changed else it }) }
+            return Result.success(changed)
         }
         override suspend fun remove(id: String) { added.removeAll { it.id == id } }
         override suspend fun ruleFiles(): List<RuleFileSpec> = emptyList()
@@ -141,6 +149,13 @@ class RoutingViewModelTest {
         assertEquals("https://example.com/list.srs", subscriptions.added.single().url)
         assertEquals(RuleKind.Proxy, subscriptions.added.single().kind)
         assertEquals(3, model.uiState.value.subscriptions.single().entries)
+        assertEquals("list", model.uiState.value.subscriptions.single().title)
+        withTimeout(5_000) { model.uiState.first { !it.busy } }
+        assertEquals(RoutingInputError.Name, model.editSubscription("id-0", "x".repeat(65), RuleKind.Dpi))
+        assertNull(model.editSubscription("id-0", " Blocked ", RuleKind.Dpi))
+        val edited = withTimeout(5_000) { model.uiState.first { it.subscriptions.single().kind == RuleKind.Dpi } }
+        assertEquals("Blocked", edited.subscriptions.single().title)
+        withTimeout(5_000) { model.uiState.first { !it.busy } }
         subscriptions.failWith = IllegalArgumentException("HTTP 404")
         model.refreshSubscription("id-0")
         val notice = withTimeout(5_000) { model.uiState.first { it.message != null } }

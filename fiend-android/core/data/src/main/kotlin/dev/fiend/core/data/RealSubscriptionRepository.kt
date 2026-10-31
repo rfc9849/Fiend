@@ -71,14 +71,39 @@ internal class RealSubscriptionRepository @Inject constructor(
         }
     }
 
-    override suspend fun add(url: String, kind: RuleKind): Result<RuleSubscription> {
+    override suspend fun add(url: String, kind: RuleKind, name: String): Result<RuleSubscription> {
         settings.awaitReady()
         return mutex.withLock {
             val link = runCatching { validateUrl(url) }.getOrElse { return@withLock Result.failure(it) }
-            val subscription = RuleSubscription(id = UUID.randomUUID().toString(), url = link, kind = kind)
+            val clean = runCatching { validateName(name) }.getOrElse { return@withLock Result.failure(it) }
+            val subscription = RuleSubscription(id = UUID.randomUUID().toString(), url = link, kind = kind, name = clean)
             settings.update { it.copy(subscriptions = it.subscriptions + subscription) }
             refreshLocked(subscription)
             Result.success(settings.settings.value.subscriptions.first { it.id == subscription.id })
+        }
+    }
+
+    override suspend fun edit(id: String, name: String, kind: RuleKind): Result<RuleSubscription> {
+        settings.awaitReady()
+        return mutex.withLock {
+            val clean = runCatching { validateName(name) }.getOrElse { return@withLock Result.failure(it) }
+            val current = settings.settings.value.subscriptions.firstOrNull { it.id == id }
+                ?: return@withLock Result.failure(IllegalArgumentException("The subscription is not available"))
+            val file = fileFor(id)
+            val checked = if (current.kind != kind) {
+                withContext(Dispatchers.IO) { if (file.isFile) rules.inspectFile(file.absolutePath, kind) else null }
+            } else {
+                null
+            }
+            update(id) { item ->
+                val changed = item.copy(name = clean, kind = kind)
+                when {
+                    checked == null -> changed
+                    checked.isSuccess -> changed.copy(entries = checked.getOrThrow().total, error = null)
+                    else -> changed.copy(error = checked.exceptionOrNull()?.message ?: "The list is not valid")
+                }
+            }
+            Result.success(settings.settings.value.subscriptions.first { it.id == id })
         }
     }
 
@@ -154,6 +179,14 @@ internal class RealSubscriptionRepository @Inject constructor(
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun validateName(name: String): String {
+        val trimmed = name.trim()
+        require(trimmed.length <= RuleSubscription.MAX_NAME && trimmed.none { it.isISOControl() }) {
+            "Name must be ${RuleSubscription.MAX_NAME} characters or less, on one line"
+        }
+        return trimmed
     }
 
     private fun validateUrl(url: String): String {

@@ -3,6 +3,7 @@ package dev.fiend.feature.settings
 import android.text.format.DateFormat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -43,6 +44,8 @@ import dev.fiend.core.designsystem.component.SegmentedGroup
 import dev.fiend.core.designsystem.icon.FiendIcons
 import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.RuleKind
+import dev.fiend.core.model.RuleSubscription
+import dev.fiend.core.model.urlTitle
 import java.util.Date
 
 private enum class RoutingDialog { Resolver, Mtu, Subscription }
@@ -57,7 +60,8 @@ internal fun RoutingScreen(
     onOpenDpi: () -> Unit,
     onResolver: (String) -> RoutingInputError?,
     onMtu: (String) -> RoutingInputError?,
-    onAddSubscription: (String, RuleKind) -> RoutingInputError?,
+    onAddSubscription: (String, RuleKind, String) -> RoutingInputError?,
+    onEditSubscription: (String, String, RuleKind) -> RoutingInputError?,
     onRefreshSubscription: (String) -> Unit,
     onRemoveSubscription: (String) -> Unit,
     onRefreshAll: () -> Unit,
@@ -66,6 +70,7 @@ internal fun RoutingScreen(
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val snackbar = remember { SnackbarHostState() }
     var dialog by rememberSaveable { mutableStateOf<RoutingDialog?>(null) }
+    var editing by rememberSaveable { mutableStateOf<String?>(null) }
     val enabled = state.loaded && !state.busy
 
     LaunchedEffect(state.message) {
@@ -161,7 +166,7 @@ internal fun RoutingScreen(
                         item {
                             ActionItem(
                                 shapes = it,
-                                headline = subscription.url,
+                                headline = subscription.title,
                                 supporting = subscriptionSummary(subscription),
                                 icon = FiendIcons.Link,
                                 trailing = {
@@ -187,7 +192,7 @@ internal fun RoutingScreen(
                                     }
                                 },
                                 enabled = enabled,
-                                onClick = { onRefreshSubscription(subscription.id) },
+                                onClick = { editing = subscription.id },
                             )
                         }
                     }
@@ -280,10 +285,18 @@ internal fun RoutingScreen(
             onDismiss = { dialog = null },
         )
         RoutingDialog.Subscription -> SubscriptionDialog(
+            initial = null,
             onConfirm = onAddSubscription,
             onDismiss = { dialog = null },
         )
         null -> Unit
+    }
+    state.subscriptions.firstOrNull { it.id == editing }?.let { subscription ->
+        SubscriptionDialog(
+            initial = subscription,
+            onConfirm = { _, kind, name -> onEditSubscription(subscription.id, name, kind) },
+            onDismiss = { editing = null },
+        )
     }
 }
 
@@ -320,36 +333,67 @@ private fun subscriptionSummary(subscription: SubscriptionUi): String {
 
 @Composable
 private fun SubscriptionDialog(
-    onConfirm: (String, RuleKind) -> RoutingInputError?,
+    initial: SubscriptionUi?,
+    onConfirm: (String, RuleKind, String) -> RoutingInputError?,
     onDismiss: () -> Unit,
 ) {
-    var url by rememberSaveable { mutableStateOf("") }
-    var kind by rememberSaveable { mutableStateOf(RuleKind.Direct) }
-    var failed by remember { mutableStateOf(false) }
+    var url by rememberSaveable(initial?.id) { mutableStateOf(initial?.url ?: "") }
+    var name by rememberSaveable(initial?.id) { mutableStateOf(initial?.name ?: "") }
+    var kind by rememberSaveable(initial?.id) { mutableStateOf(initial?.kind ?: RuleKind.Direct) }
+    var failed by remember { mutableStateOf<RoutingInputError?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.routing_subscription_add)) },
+        title = {
+            Text(stringResource(if (initial == null) R.string.routing_subscription_add else R.string.routing_subscription_edit))
+        },
         text = {
             Column {
+                if (initial == null) {
+                    OutlinedTextField(
+                        value = url,
+                        onValueChange = { url = it; failed = null },
+                        label = { Text(stringResource(R.string.routing_subscription_url)) },
+                        isError = failed == RoutingInputError.Link,
+                        supportingText = {
+                            Text(
+                                if (failed == RoutingInputError.Link) {
+                                    stringResource(R.string.routing_error_link)
+                                } else {
+                                    stringResource(R.string.routing_subscription_url_body)
+                                },
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        shape = MaterialTheme.shapes.large,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 OutlinedTextField(
-                    value = url,
-                    onValueChange = { url = it; failed = false },
-                    label = { Text(stringResource(R.string.routing_subscription_url)) },
-                    isError = failed,
+                    value = name,
+                    onValueChange = { name = it; failed = null },
+                    label = { Text(stringResource(R.string.routing_subscription_name)) },
+                    placeholder = { Text(urlTitle(url.trim()).takeIf { url.isNotBlank() } ?: "") },
+                    isError = failed == RoutingInputError.Name,
                     supportingText = {
-                        Text(if (failed) stringResource(R.string.routing_error_link) else stringResource(R.string.routing_subscription_url_body))
+                        Text(
+                            if (failed == RoutingInputError.Name) {
+                                stringResource(R.string.routing_error_name, RuleSubscription.MAX_NAME)
+                            } else {
+                                stringResource(R.string.routing_subscription_name_body)
+                            },
+                        )
                     },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     shape = MaterialTheme.shapes.large,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
                     text = stringResource(R.string.routing_subscription_kind),
                     style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
+                    modifier = Modifier.padding(top = 8.dp, bottom = 8.dp),
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RuleKind.entries.forEach { option ->
                         FilterChip(
                             selected = kind == option,
@@ -358,12 +402,23 @@ private fun SubscriptionDialog(
                         )
                     }
                 }
+                if (initial != null) {
+                    Text(
+                        text = initial.url,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 16.dp),
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = {
-                if (onConfirm(url, kind) == null) onDismiss() else failed = true
-            }) { Text(stringResource(R.string.routing_subscription_add_action)) }
+                val error = onConfirm(url, kind, name)
+                if (error == null) onDismiss() else failed = error
+            }) {
+                Text(stringResource(if (initial == null) R.string.routing_subscription_add_action else R.string.routing_save))
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.settings_cancel)) }

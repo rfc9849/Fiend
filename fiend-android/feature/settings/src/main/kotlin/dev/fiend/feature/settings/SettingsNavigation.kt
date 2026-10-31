@@ -99,6 +99,7 @@ private fun RoutingRoute(
         onResolver = viewModel::setResolver,
         onMtu = viewModel::setMtu,
         onAddSubscription = viewModel::addSubscription,
+        onEditSubscription = viewModel::editSubscription,
         onRefreshSubscription = viewModel::refreshSubscription,
         onRemoveSubscription = viewModel::removeSubscription,
         onRefreshAll = viewModel::refreshAll,

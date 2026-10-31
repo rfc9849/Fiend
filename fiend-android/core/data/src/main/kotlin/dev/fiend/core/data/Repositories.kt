@@ -85,7 +85,9 @@ interface SubscriptionRepository {
 
     suspend fun refreshAll(): Result<Unit>
 
-    suspend fun add(url: String, kind: RuleKind): Result<RuleSubscription>
+    suspend fun add(url: String, kind: RuleKind, name: String = ""): Result<RuleSubscription>
+
+    suspend fun edit(id: String, name: String, kind: RuleKind): Result<RuleSubscription>
 
     suspend fun remove(id: String)
 

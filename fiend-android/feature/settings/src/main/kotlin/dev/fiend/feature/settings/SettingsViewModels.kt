@@ -16,6 +16,7 @@ import dev.fiend.core.model.InstalledApp
 import dev.fiend.core.model.LogLine
 import dev.fiend.core.model.RuleCounts
 import dev.fiend.core.model.RuleKind
+import dev.fiend.core.model.RuleSubscription
 import dev.fiend.core.model.SplitTunnelMode
 import dev.fiend.core.model.ThemeMode
 import javax.inject.Inject
@@ -103,6 +104,8 @@ data class SubscriptionUi(
     val entries: Int,
     val updatedAtMs: Long,
     val error: String?,
+    val name: String = "",
+    val title: String = url,
 )
 
 data class RoutingUiState(
@@ -118,7 +121,7 @@ data class RoutingUiState(
     val message: String? = null,
 )
 
-enum class RoutingInputError { Resolver, Mtu, Link }
+enum class RoutingInputError { Resolver, Mtu, Link, Name }
 
 @HiltViewModel
 class RoutingViewModel @Inject constructor(
@@ -146,7 +149,7 @@ class RoutingViewModel @Inject constructor(
             proxyRules = countOf(s.proxyRules, true),
             dpiRules = countOf(s.dpiRules, true),
             subscriptions = s.subscriptions.map {
-                SubscriptionUi(it.id, it.url, it.kind, it.entries, it.updatedAtMs, it.error)
+                SubscriptionUi(it.id, it.url, it.kind, it.entries, it.updatedAtMs, it.error, it.name, it.title)
             },
             directResolver = s.directResolver,
             mtu = s.mtu,
@@ -171,16 +174,29 @@ class RoutingViewModel @Inject constructor(
         return null
     }
 
-    fun addSubscription(url: String, kind: RuleKind): RoutingInputError? {
+    fun addSubscription(url: String, kind: RuleKind, name: String = ""): RoutingInputError? {
         val link = url.trim()
         if (link.length !in 1..2048 || !(link.startsWith("https://") || link.startsWith("http://"))) {
             return RoutingInputError.Link
         }
+        if (!validName(name)) return RoutingInputError.Name
         work {
-            subscriptions.add(link, kind).onFailure { message.value = it.message ?: "Cannot add the subscription" }
+            subscriptions.add(link, kind, name.trim()).onFailure { message.value = it.message ?: "Cannot add the subscription" }
         }
         return null
     }
+
+    fun editSubscription(id: String, name: String, kind: RuleKind): RoutingInputError? {
+        if (!validName(name)) return RoutingInputError.Name
+        work {
+            subscriptions.edit(id, name.trim(), kind)
+                .onSuccess { saved -> saved.error?.let { message.value = it } }
+                .onFailure { message.value = it.message ?: "Cannot save the subscription" }
+        }
+        return null
+    }
+
+    private fun validName(name: String) = name.trim().let { it.length <= RuleSubscription.MAX_NAME && it.none(Char::isISOControl) }
 
     fun refreshSubscription(id: String) = work {
         subscriptions.refresh(id).onFailure { message.value = it.message ?: "Cannot update the list" }

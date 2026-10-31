@@ -17,7 +17,23 @@ data class RuleSubscription(
     val updatedAtMs: Long = 0,
     val entries: Int = 0,
     val error: String? = null,
-)
+    val name: String = "",
+) {
+    val title: String get() = name.trim().ifEmpty { urlTitle(url) }
+
+    companion object {
+        const val MAX_NAME = 64
+    }
+}
+
+fun urlTitle(url: String): String {
+    val path = url.substringBefore('?').substringBefore('#').substringAfter("://")
+    val file = path.trimEnd('/').substringAfterLast('/')
+    val stem = listOf(".srs", ".txt", ".list", ".json").firstNotNullOfOrNull { suffix ->
+        file.takeIf { it.endsWith(suffix) }?.removeSuffix(suffix)
+    } ?: file
+    return stem.ifEmpty { url }
+}
 
 data class RuleFileSpec(val path: String, val kind: RuleKind)
 

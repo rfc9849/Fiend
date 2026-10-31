@@ -66,6 +66,10 @@
     <string name="routing_subscription_failed">Update failed: %1$s</string>
     <string name="routing_subscription_never">not updated</string>
     <string name="routing_subscription_add">Add subscription</string>
+    <string name="routing_subscription_edit">Edit subscription</string>
+    <string name="routing_subscription_name">Name</string>
+    <string name="routing_subscription_name_body">Optional. If empty, the file name from the link is used.</string>
+    <string name="routing_error_name">Use %1$d characters or less, on one line</string>
     <string name="routing_subscription_add_body">Download a sing-box rule set and update it every 24 hours</string>
     <string name="routing_subscription_add_action">Add</string>
     <string name="routing_subscription_refresh">Update now</string>
