@@ -17,9 +17,9 @@ env:
   PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
-  verify:
+  version:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -43,6 +43,12 @@ jobs:
           esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -65,11 +71,11 @@ jobs:
           cargo test --locked -p fiend-desktop --lib --bins --no-fail-fast
 
   android:
-    needs: verify
+    needs: version
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      VERSION: ${{ needs.verify.outputs.version }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
@@ -126,7 +132,7 @@ jobs:
           if-no-files-found: error
 
   linux:
-    needs: verify
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -163,11 +169,11 @@ jobs:
           if-no-files-found: error
 
   macos:
-    needs: verify
+    needs: version
     runs-on: macos-15
     timeout-minutes: 120
     env:
-      VERSION: ${{ needs.verify.outputs.version }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - name: Install the Rust targets
@@ -190,7 +196,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    needs: verify
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +219,7 @@ jobs:
           if-no-files-found: error
 
   docker:
-    needs: verify
+    needs: [version, test]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -248,7 +254,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, android, linux, macos, windows, docker]
+    needs: [version, test, android, linux, macos, windows, docker]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -271,7 +277,7 @@ jobs:
       - name: Make the release
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
         run: |
           set -- --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
           if [ "$PRERELEASE" = true ]; then set -- "$@" --prerelease; fi
