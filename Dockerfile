@@ -35,7 +35,7 @@ ARG TARGETARCH
 WORKDIR /src
 COPY . .
 COPY --from=web /src/fiend-panel/web/build fiend-panel/web/build
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=fiend-registry-$TARGETARCH \
     --mount=type=cache,target=/src/target,id=fiend-target-$TARGETARCH \
     set -eu; \
     case "$TARGETARCH" in \
