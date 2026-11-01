@@ -2,6 +2,7 @@ pub mod control;
 pub mod logs;
 pub mod metrics;
 pub mod outbound;
+pub mod probes;
 pub mod update;
 mod usage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -194,6 +195,7 @@ struct Inner {
     control_key: AuthKey,
     accepted: AtomicU64,
     origin: AtomicU64,
+    probes: probes::Recorder,
     next_session: AtomicU64,
     sessions: Mutex<HashMap<u64, (SessionInfo, watch::Sender<bool>)>>,
     retired: Mutex<Vec<Arc<UserEntry>>>,
@@ -234,6 +236,8 @@ pub struct Stats {
     pub handshakes_accepted: u64,
     pub handshakes_origin: u64,
     pub outbounds: Vec<outbound::OutboundStats>,
+    #[serde(default)]
+    pub probes: Vec<probes::Probe>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -303,6 +307,7 @@ impl Node {
                 control_secret: Zeroizing::new(control_secret),
                 accepted: AtomicU64::new(0),
                 origin: AtomicU64::new(0),
+                probes: probes::Recorder::default(),
                 next_session: AtomicU64::new(1),
                 sessions: Mutex::new(HashMap::new()),
                 retired: Mutex::new(Vec::new()),
@@ -609,8 +614,9 @@ impl Node {
     pub fn accepted(&self) {
         self.inner.accepted.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn sent_to_origin(&self) {
+    pub fn sent_to_origin(&self, probe: probes::Probe) {
         self.inner.origin.fetch_add(1, Ordering::Relaxed);
+        self.inner.probes.push(probe);
     }
 
     pub fn health(&self) -> Health {
@@ -686,6 +692,7 @@ impl Node {
             handshakes_accepted: self.inner.accepted.swap(0, Ordering::Relaxed),
             handshakes_origin: self.inner.origin.swap(0, Ordering::Relaxed),
             outbounds: snapshot.router.stats(),
+            probes: self.inner.probes.drain(),
         }
     }
 

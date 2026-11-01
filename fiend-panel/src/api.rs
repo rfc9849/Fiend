@@ -37,6 +37,7 @@ pub fn routes() -> Router<App> {
         .route("/wizard/done", post(wizard_done))
         .route("/dashboard", get(dashboard))
         .route("/traffic", get(traffic))
+        .route("/probes", get(probes))
         .route("/nodes", get(list_nodes))
         .route("/nodes/update", post(update_nodes))
         .route(
@@ -2545,6 +2546,84 @@ async fn restore(State(app): State<App>, admin: Admin, body: Bytes) -> ApiResult
         std::process::exit(0);
     });
     Ok(StatusCode::ACCEPTED)
+}
+
+type ProbeRow = (
+    i64,
+    i64,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    i64,
+    Vec<u8>,
+);
+
+#[derive(Deserialize)]
+struct ProbeQuery {
+    range: Option<String>,
+    peer: Option<String>,
+}
+
+async fn probes(
+    State(app): State<App>,
+    _admin: Admin,
+    Query(query): Query<ProbeQuery>,
+) -> ApiResult<Json<ProbeReport>> {
+    let (range, span) = match query.range.as_deref().unwrap_or("24h") {
+        "1h" => ("1h", 3600),
+        "7d" => ("7d", 7 * 86400),
+        "30d" => ("30d", 30 * 86400),
+        _ => ("24h", 86400),
+    };
+    let since = now() - span;
+    let peer = query.peer.filter(|peer| !peer.is_empty());
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM probes WHERE ts >= ? AND (? IS NULL OR peer = ?)")
+            .bind(since)
+            .bind(&peer)
+            .bind(&peer)
+            .fetch_one(&app.db)
+            .await?;
+    let peers: Vec<(String, i64, i64, i64, String)> = sqlx::query_as("SELECT peer, COUNT(*), MIN(ts), MAX(ts), GROUP_CONCAT(DISTINCT reason) FROM probes WHERE ts >= ? AND (? IS NULL OR peer = ?) GROUP BY peer ORDER BY COUNT(*) DESC, MAX(ts) DESC LIMIT 200")
+        .bind(since)
+        .bind(&peer)
+        .bind(&peer)
+        .fetch_all(&app.db)
+        .await?;
+    let rows: Vec<ProbeRow> = sqlx::query_as("SELECT probes.id, probes.ts, nodes.name, probes.peer, probes.reason, probes.sni, probes.size, probes.head FROM probes LEFT JOIN nodes ON nodes.id = probes.node_id WHERE probes.ts >= ? AND (? IS NULL OR probes.peer = ?) ORDER BY probes.id DESC LIMIT 200")
+        .bind(since)
+        .bind(&peer)
+        .bind(&peer)
+        .fetch_all(&app.db)
+        .await?;
+    Ok(Json(ProbeReport {
+        range: range.into(),
+        total,
+        peers: peers
+            .into_iter()
+            .map(|(peer, count, first, last, reasons)| ProbePeer {
+                peer,
+                count,
+                first,
+                last,
+                reasons: reasons.split(',').map(str::to_owned).collect(),
+            })
+            .collect(),
+        probes: rows
+            .into_iter()
+            .map(|(id, ts, node, peer, reason, sni, size, head)| ProbeView {
+                id,
+                ts,
+                node: node.unwrap_or_default(),
+                peer,
+                reason,
+                sni,
+                size,
+                head: hex::encode(head),
+            })
+            .collect(),
+    }))
 }
 
 #[derive(Deserialize)]

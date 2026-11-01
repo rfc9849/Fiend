@@ -5,7 +5,7 @@ use fiend_core::fingerprint::{
     X25519_MLKEM768, X25519_MLKEM768_SIZE, X25519_SIZE, parse_client_hello,
 };
 use fiend_core::transport::{
-    AcceptOutcome, FreshnessCheck, OriginProfile, ServerFlight, Session, accept,
+    AcceptOutcome, FreshnessCheck, OriginProfile, PassthroughReason, ServerFlight, Session, accept,
     bridge_passthrough, build_server_flight, connect, parse_server_hello, probe_origin_at,
     server_hello_extension_order,
 };
@@ -297,7 +297,12 @@ async fn replayed_client_hello_is_passed_through() {
         .await
         .expect("accept replay");
     match outcome {
-        AcceptOutcome::Passthrough { buffered, .. } => assert_eq!(buffered, hello),
+        AcceptOutcome::Passthrough {
+            buffered, reason, ..
+        } => {
+            assert_eq!(buffered, hello);
+            assert_eq!(reason, PassthroughReason::Replay);
+        }
         AcceptOutcome::Session(_) => panic!("replayed ClientHello was accepted"),
     }
 }
@@ -307,11 +312,14 @@ async fn stalled_probes_are_passed_through() {
     let secret = [0x42u8; 32];
     let replay = FreshnessCheck::new(Duration::from_secs(3600));
     let profile = OriginProfile::default();
-    for probe in [
-        &[][..],
-        &[0x16, 0x03][..],
-        &[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00][..],
-        &[0x47][..],
+    for (probe, expected) in [
+        (&[][..], PassthroughReason::NotTls),
+        (&[0x16, 0x03][..], PassthroughReason::Truncated),
+        (
+            &[0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00][..],
+            PassthroughReason::Truncated,
+        ),
+        (&[0x47][..], PassthroughReason::NotTls),
     ] {
         let (mut client, server) = tokio::io::duplex(64 * 1024);
         client.write_all(probe).await.expect("write probe");
@@ -319,7 +327,12 @@ async fn stalled_probes_are_passed_through() {
             .await
             .expect("stalled probe must not fail");
         match outcome {
-            AcceptOutcome::Passthrough { buffered, .. } => assert_eq!(buffered, probe),
+            AcceptOutcome::Passthrough {
+                buffered, reason, ..
+            } => {
+                assert_eq!(buffered, probe);
+                assert_eq!(reason, expected);
+            }
             AcceptOutcome::Session(_) => panic!("probe was accepted"),
         }
         drop(client);
@@ -399,7 +412,9 @@ async fn active_probe_is_forwarded_to_origin() {
     let serve = tokio::spawn(async move {
         match accept(server_io, &secret, &replay, &profile).await? {
             AcceptOutcome::Session(session) => Ok(Some(*session)),
-            AcceptOutcome::Passthrough { stream, buffered } => {
+            AcceptOutcome::Passthrough {
+                stream, buffered, ..
+            } => {
                 bridge_passthrough(stream, buffered, "127.0.0.1", port).await?;
                 Ok::<_, fiend_core::transport::Error>(None)
             }
@@ -461,7 +476,9 @@ async fn unauthenticated_client_hello_reaches_origin_unchanged() {
     let serve = tokio::spawn(async move {
         match accept(server_io, &secret, &replay, &profile).await? {
             AcceptOutcome::Session(session) => Ok(Some(*session)),
-            AcceptOutcome::Passthrough { stream, buffered } => {
+            AcceptOutcome::Passthrough {
+                stream, buffered, ..
+            } => {
                 bridge_passthrough(stream, buffered, "127.0.0.1", port).await?;
                 Ok::<_, fiend_core::transport::Error>(None)
             }

@@ -30,7 +30,40 @@ const EARLY_DATA_MAX: usize = 1400;
 
 pub enum AcceptOutcome<S> {
     Session(Box<Session<S>>),
-    Passthrough { stream: S, buffered: Vec<u8> },
+    Passthrough {
+        stream: S,
+        buffered: Vec<u8>,
+        reason: PassthroughReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassthroughReason {
+    NotTls,
+    BadRecord,
+    Truncated,
+    NotClientHello,
+    UnknownKey,
+    Replay,
+    BadClientHello,
+    BadEarlyData,
+    KeyShare,
+}
+
+impl PassthroughReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotTls => "not_tls",
+            Self::BadRecord => "bad_record",
+            Self::Truncated => "truncated",
+            Self::NotClientHello => "not_client_hello",
+            Self::UnknownKey => "unknown_key",
+            Self::Replay => "replay",
+            Self::BadClientHello => "bad_client_hello",
+            Self::BadEarlyData => "bad_early_data",
+            Self::KeyShare => "key_share",
+        }
+    }
 }
 
 pub async fn connect<S>(mut stream: S, secret: &[u8], template: &Template) -> Result<Session<S>>
@@ -155,44 +188,44 @@ where
     let mut buffered = Vec::with_capacity(2048);
     if !read_prefix(&mut stream, &mut buffered, 1, deadline).await? || buffered[0] != REC_HANDSHAKE
     {
-        return passthrough(stream, buffered);
+        return passthrough(stream, buffered, PassthroughReason::NotTls);
     }
     if !read_prefix(&mut stream, &mut buffered, 5, deadline).await? {
-        return passthrough(stream, buffered);
+        return passthrough(stream, buffered, PassthroughReason::Truncated);
     }
     let length = u16::from_be_bytes([buffered[3], buffered[4]]) as usize;
     if !(4..=MAX_HANDSHAKE_RECORD).contains(&length) {
-        return passthrough(stream, buffered);
+        return passthrough(stream, buffered, PassthroughReason::BadRecord);
     }
     if !read_prefix(&mut stream, &mut buffered, 5 + length, deadline).await? {
-        return passthrough(stream, buffered);
+        return passthrough(stream, buffered, PassthroughReason::Truncated);
     }
 
     let body = &buffered[5..];
     if body.len() < 71 || body[0] != 0x01 || body[38] != 32 {
-        return passthrough(stream, buffered);
+        return passthrough(stream, buffered, PassthroughReason::NotClientHello);
     }
     let Some(secret) = select(body, unix_time()) else {
-        return passthrough(stream, buffered);
+        return passthrough(stream, buffered, PassthroughReason::UnknownKey);
     };
     let secret = Zeroizing::new(secret);
     let secret = secret.as_slice();
     let tls_random: [u8; 32] = body[6..38].try_into().expect("32-byte slice");
     let session_id: [u8; 32] = body[39..71].try_into().expect("32-byte slice");
     if !replay.check(&tls_random) {
-        return passthrough(stream, buffered);
+        return passthrough(stream, buffered, PassthroughReason::Replay);
     }
 
     let template = match parse_client_hello(&buffered) {
         Ok(template) => template,
-        Err(_) => return passthrough(stream, buffered),
+        Err(_) => return passthrough(stream, buffered, PassthroughReason::BadClientHello),
     };
 
     if template.early_data {
         let deadline = Instant::now() + PRE_AUTH_TIMEOUT;
         let start = buffered.len();
         if !read_prefix(&mut stream, &mut buffered, start + 5, deadline).await? {
-            return passthrough(stream, buffered);
+            return passthrough(stream, buffered, PassthroughReason::BadEarlyData);
         }
         let early_header = &buffered[start..start + 5];
         let early_len = u16::from_be_bytes([early_header[3], early_header[4]]) as usize;
@@ -201,20 +234,20 @@ where
             || early_len == 0
             || early_len > MAX_HANDSHAKE_RECORD
         {
-            return passthrough(stream, buffered);
+            return passthrough(stream, buffered, PassthroughReason::BadEarlyData);
         }
         if !read_prefix(&mut stream, &mut buffered, start + 5 + early_len, deadline).await? {
-            return passthrough(stream, buffered);
+            return passthrough(stream, buffered, PassthroughReason::BadEarlyData);
         }
     }
 
     let chosen = match choose_server_share(&template, origin.key_share_group) {
         Ok(share) => share,
-        Err(_) => return passthrough(stream, buffered),
+        Err(_) => return passthrough(stream, buffered, PassthroughReason::KeyShare),
     };
     let server_share = match generate_server_share(&chosen) {
         Ok(share) => share,
-        Err(_) => return passthrough(stream, buffered),
+        Err(_) => return passthrough(stream, buffered, PassthroughReason::KeyShare),
     };
     let cipher_suite = choose_cipher_suite(&template, origin.cipher_suite);
     let mut nonce = [0u8; crypto::SERVER_NONCE_SIZE];
@@ -267,8 +300,16 @@ where
     ))))
 }
 
-fn passthrough<S>(stream: S, buffered: Vec<u8>) -> Result<AcceptOutcome<S>> {
-    Ok(AcceptOutcome::Passthrough { stream, buffered })
+fn passthrough<S>(
+    stream: S,
+    buffered: Vec<u8>,
+    reason: PassthroughReason,
+) -> Result<AcceptOutcome<S>> {
+    Ok(AcceptOutcome::Passthrough {
+        stream,
+        buffered,
+        reason,
+    })
 }
 
 pub struct ServerFlight<'a> {

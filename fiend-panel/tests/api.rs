@@ -582,6 +582,28 @@ async fn local_node_sync_links_statistics_and_limits() {
     let (_, dashboard) = panel.get("/api/dashboard").await;
     assert_eq!(dashboard["nodes_online"], 1, "{dashboard}");
     assert_eq!(dashboard["nodes"][0]["status"], "online");
+    let mut prober = tokio::net::TcpStream::connect(node_address).await.unwrap();
+    prober
+        .write_all(b"GET /probe HTTP/1.1\r\nHost: test\r\n\r\n")
+        .await
+        .unwrap();
+    assert!(
+        wait_for(async || {
+            let (_, report) = panel.get("/api/probes?range=1h").await;
+            report["probes"].as_array().is_some_and(|probes| {
+                probes.iter().any(|probe| {
+                    probe["peer"] == "127.0.0.1"
+                        && probe["reason"] == "not_tls"
+                        && probe["head"].as_str().is_some_and(|head| {
+                            head.starts_with(&hex::encode("GET /probe HTTP/1.1"))
+                        })
+                })
+            }) && report["peers"][0]["peer"] == "127.0.0.1"
+        })
+        .await,
+        "the panel stores probes"
+    );
+    drop(prober);
     lane.write_all(&vec![1u8; 150_000]).await.unwrap();
     let mut rest = vec![0u8; 150_000];
     let _ = tokio::time::timeout(Duration::from_secs(5), lane.read_exact(&mut rest)).await;

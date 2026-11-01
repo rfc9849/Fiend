@@ -11,7 +11,8 @@
     { href: '/nodes', label: 'Nodes', icon: 'server' },
     { href: '/users', label: 'Users', icon: 'key' },
     { href: '/disguises', label: 'Disguises', icon: 'globe' },
-    { href: '/routing', label: 'Routing', icon: 'route' }
+    { href: '/routing', label: 'Routing', icon: 'route' },
+    { href: '/probes', label: 'Probes', icon: 'shield' }
   ];
   async function signOut() {
     try {

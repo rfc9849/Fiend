@@ -78,7 +78,7 @@ impl Server {
                 .acquire_owned()
                 .await
                 .map_err(|_| io::Error::other("connection limit closed"))?;
-            let (stream, _) = crate::net::accept(&listener).await;
+            let (stream, peer) = crate::net::accept(&listener).await;
             if let Err(error) = crate::net::set_link_buffers(&stream) {
                 tracing::debug!(%error, "cannot set link buffers");
             }
@@ -96,7 +96,7 @@ impl Server {
             let server = self.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(error) = server.handle(stream).await {
+                if let Err(error) = server.handle(stream, peer).await {
                     tracing::debug!(%error, "connection handler failed");
                 }
             });
@@ -110,7 +110,7 @@ impl Server {
         });
     }
 
-    async fn handle(&self, stream: TcpStream) -> mux::Result<()> {
+    async fn handle(&self, stream: TcpStream, peer: std::net::SocketAddr) -> mux::Result<()> {
         use crate::node::Principal;
         use crate::transport::AcceptOutcome;
         let node = self.inner.node.clone();
@@ -125,8 +125,15 @@ impl Server {
             })
             .await?;
         match outcome {
-            AcceptOutcome::Passthrough { stream, buffered } => {
-                node.sent_to_origin();
+            AcceptOutcome::Passthrough {
+                stream,
+                mut buffered,
+                reason,
+            } => {
+                if reason == transport::PassthroughReason::NotTls && !buffered.is_empty() {
+                    read_more(&stream, &mut buffered).await;
+                }
+                node.sent_to_origin(crate::node::probes::Probe::new(peer, reason, &buffered));
                 transport::bridge_passthrough(
                     stream,
                     buffered,
@@ -153,6 +160,32 @@ impl Server {
             }
         }
         Ok(())
+    }
+}
+
+async fn read_more(stream: &TcpStream, buffered: &mut Vec<u8>) {
+    let wait = tokio::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        if buffered.len() >= crate::node::probes::MAX_HEAD
+            || tokio::time::timeout_at(wait, stream.readable())
+                .await
+                .is_err()
+        {
+            return;
+        }
+        let start = buffered.len();
+        buffered.resize(crate::node::probes::MAX_HEAD, 0);
+        match stream.try_read(&mut buffered[start..]) {
+            Ok(count) => {
+                buffered.truncate(start + count);
+                return;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => buffered.truncate(start),
+            Err(_) => {
+                buffered.truncate(start);
+                return;
+            }
+        }
     }
 }
 

@@ -433,6 +433,18 @@ async fn ingest(app: &App, node_id: i64, stats: &Stats) -> Result<(), sqlx::Erro
         .bind(stats.handshakes_origin as i64)
         .execute(&mut *transaction)
         .await?;
+    for probe in &stats.probes {
+        sqlx::query("INSERT INTO probes (ts, node_id, peer, reason, sni, size, head) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(probe.at.min(i64::MAX as u64) as i64)
+            .bind(node_id)
+            .bind(&probe.peer)
+            .bind(&probe.reason)
+            .bind(&probe.sni)
+            .bind(probe.size.min(i64::MAX as u64) as i64)
+            .bind(hex::decode(&probe.head).unwrap_or_default())
+            .execute(&mut *transaction)
+            .await?;
+    }
     transaction.commit().await?;
     {
         let mut live = app
@@ -601,6 +613,7 @@ pub async fn maintenance(app: &App) -> Result<(), sqlx::Error> {
         ("traffic_day", 730 * 86400),
         ("node_metrics", 30 * 86400),
         ("audit", 365 * 86400),
+        ("probes", 30 * 86400),
     ] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM {table} WHERE ts < ?"
@@ -609,6 +622,9 @@ pub async fn maintenance(app: &App) -> Result<(), sqlx::Error> {
         .execute(&app.db)
         .await?;
     }
+    sqlx::query("DELETE FROM probes WHERE id <= (SELECT id FROM probes ORDER BY id DESC LIMIT 1 OFFSET 50000)")
+        .execute(&app.db)
+        .await?;
     let users = state::users(app)
         .await
         .map_err(|error| sqlx::Error::Protocol(error.message))?;

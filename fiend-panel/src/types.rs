@@ -439,6 +439,35 @@ pub struct Dashboard {
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
+pub struct ProbeView {
+    pub id: i64,
+    pub ts: i64,
+    pub node: String,
+    pub peer: String,
+    pub reason: String,
+    pub sni: Option<String>,
+    pub size: i64,
+    pub head: String,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+pub struct ProbePeer {
+    pub peer: String,
+    pub count: i64,
+    pub first: i64,
+    pub last: i64,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+pub struct ProbeReport {
+    pub range: String,
+    pub total: i64,
+    pub peers: Vec<ProbePeer>,
+    pub probes: Vec<ProbeView>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct Event {
     pub kind: String,
     pub id: Option<String>,
@@ -512,6 +541,9 @@ pub fn export(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         TrafficPoint,
         TrafficSeries,
         Dashboard,
+        ProbeView,
+        ProbePeer,
+        ProbeReport,
         Event,
         Created,
         JobStarted,
