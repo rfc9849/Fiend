@@ -11,3 +11,4 @@ packaging
 Dockerfile
 compose.yaml
 .dockerignore
+docs
