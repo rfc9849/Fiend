@@ -258,7 +258,19 @@ fn write_icon() {
         .open_window(size(px(512.), px(512.)), |_, cx| cx.new(|_| Icon))
         .unwrap();
     cx.run_until_parked();
-    let image = cx.capture_screenshot(window.into()).unwrap();
+    let mut image = cx.capture_screenshot(window.into()).unwrap();
+    let (width, height) = image.dimensions();
+    let scale = width as f32 / 512.;
+    let half = 240. * scale;
+    let radius = 108. * scale;
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let dx = ((x as f32 + 0.5 - width as f32 / 2.).abs() - (half - radius)).max(0.);
+        let dy = ((y as f32 + 0.5 - height as f32 / 2.).abs() - (half - radius)).max(0.);
+        let coverage = (0.5 - ((dx * dx + dy * dy).sqrt() - radius)).clamp(0., 1.);
+        if coverage < 1. {
+            pixel.0 = [0x17, 0x1a, 0x1d, (coverage * 255.).round() as u8];
+        }
+    }
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icon-1024.png");
     image.save(&path).unwrap();
     println!("icon written to {}", path.display());
