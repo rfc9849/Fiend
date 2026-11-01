@@ -1482,12 +1482,14 @@ impl AppView {
 
 fn relative_time(elapsed_ms: u64) -> String {
     let seconds = elapsed_ms / 1000;
-    match seconds {
-        0..=59 => "just now".to_owned(),
-        60..=3599 => format!("{} minutes ago", seconds / 60),
-        3600..=86399 => format!("{} hours ago", seconds / 3600),
-        _ => format!("{} days ago", seconds / 86400),
-    }
+    let (count, unit) = match seconds {
+        0..=59 => return "just now".to_owned(),
+        60..=3599 => (seconds / 60, "minute"),
+        3600..=86399 => (seconds / 3600, "hour"),
+        _ => (seconds / 86400, "day"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural} ago")
 }
 
 #[cfg(test)]
@@ -1500,5 +1502,8 @@ mod tests {
         assert_eq!(relative_time(12 * 60_000), "12 minutes ago");
         assert_eq!(relative_time(5 * 3_600_000), "5 hours ago");
         assert_eq!(relative_time(3 * 86_400_000), "3 days ago");
+        assert_eq!(relative_time(60_000), "1 minute ago");
+        assert_eq!(relative_time(3_600_000), "1 hour ago");
+        assert_eq!(relative_time(26 * 3_600_000), "1 day ago");
     }
 }

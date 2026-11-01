@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fiend_desktop::{
     AppView, Assets, Backend, Page, Prefs, ServiceState, SettingsTab, ThemeMode, Update, ValueKind,
@@ -46,6 +47,11 @@ pub fn logs() -> Vec<LogEntry> {
     .collect()
 }
 
+fn ago_ms(seconds: u64) -> u64 {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    now.as_millis() as u64 - seconds * 1000
+}
+
 pub fn connected_updates() -> Vec<Update> {
     let list = profiles();
     let active = list[0].id.clone();
@@ -67,7 +73,7 @@ pub fn connected_updates() -> Vec<Update> {
                     name: String::new(),
                     url: "https://rules.example/privacy.txt".into(),
                     kind: fiend_ipc::RuleKind::Block,
-                    updated_at_ms: 1,
+                    updated_at_ms: ago_ms(3 * 3600),
                     entries: 1842,
                     error: None,
                 },
@@ -76,7 +82,7 @@ pub fn connected_updates() -> Vec<Update> {
                     name: "Blocked in Russia".into(),
                     url: "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-ru-blocked.srs".into(),
                     kind: fiend_ipc::RuleKind::Proxy,
-                    updated_at_ms: 1,
+                    updated_at_ms: ago_ms(26 * 3600),
                     entries: 74739,
                     error: None,
                 },
@@ -84,7 +90,9 @@ pub fn connected_updates() -> Vec<Update> {
             ..Settings::default()
         }),
         Update::Status(Status {
-            state: TunnelState::Connected { since_ms: 1 },
+            state: TunnelState::Connected {
+                since_ms: ago_ms(5084),
+            },
             profile_id: Some(active),
             stats: Some(Stats {
                 sent_bytes: 120_000_000,
