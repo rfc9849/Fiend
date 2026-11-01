@@ -260,6 +260,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
       - uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           platforms: linux/amd64,linux/arm64
