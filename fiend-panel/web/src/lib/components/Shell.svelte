@@ -3,6 +3,7 @@
   import { page } from '$app/state';
   import Brand from './Brand.svelte';
   import Icon from './Icon.svelte';
+  import { api } from '#lib/api/client.ts';
   let { children, admin, version = '' }: { children: Snippet; admin: string; version?: string } = $props();
   let menu = $state(false);
   const items = [
@@ -12,6 +13,13 @@
     { href: '/disguises', label: 'Disguises', icon: 'globe' },
     { href: '/routing', label: 'Routing', icon: 'route' }
   ];
+  async function signOut() {
+    try {
+      await api.post('/logout');
+    } finally {
+      location.assign('/login');
+    }
+  }
   const current = (href: string) => (href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href));
 </script>
 
@@ -34,6 +42,9 @@
         <a class="item" href="/settings" aria-current={current('/settings') ? 'page' : undefined} onclick={() => (menu = false)}>
           <Icon name="settings" size={16} /><span>Settings</span>
         </a>
+        <button type="button" class="item" aria-label="Sign out" onclick={signOut}>
+          <Icon name="power" size={16} /><span>Sign out</span>
+        </button>
         <p class="who">Signed in as {admin}</p>
         {#if version}<p class="who">fiend {version}</p>{/if}
       </div>
@@ -54,7 +65,7 @@
   .menu { display: none; width: 34px; height: 34px; border-radius: 6px; align-items: center; justify-content: center; color: var(--muted); }
   .menu:hover { background: var(--hover); }
   nav { display: flex; flex-direction: column; gap: 3px; flex: 1; }
-  .item { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 12px; border-radius: 4px; color: var(--muted); text-decoration: none; font-size: 13px; }
+  .item { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 12px; border-radius: 4px; color: var(--muted); text-decoration: none; font-size: 13px; width: 100%; text-align: left; }
   .item:hover { background: var(--hover); color: var(--text); }
   .item[aria-current=page] { background: var(--panel); color: var(--text); font-weight: 500; box-shadow: inset 0 0 0 1px var(--line); }
   .bottom { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
