@@ -105,9 +105,9 @@ jobs:
         working-directory: fiend-android
         env:
           FIEND_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          FIEND_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          FIEND_ANDROID_KEY_ALIAS: fiend
           FIEND_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon lintRelease testReleaseUnitTest assembleRelease
+        run: ./gradlew --no-daemon lintRelease testDebugUnitTest assembleRelease
       - name: Package
         run: |
           mkdir dist
