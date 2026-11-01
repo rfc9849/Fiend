@@ -247,6 +247,16 @@ impl<T: std::io::Read> TakeLimited for T {
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
+    use futures::StreamExt;
+
+    #[test]
+    fn messages_round_trip_and_reject_other_schemes() {
+        for message in [Message::Show, Message::Open("fiend://abc".into())] {
+            assert_eq!(Message::decode(&message.encode()), Some(message));
+        }
+        assert_eq!(Message::decode("open https://example.com"), None);
+        assert_eq!(Message::decode("quit"), None);
+    }
 
     #[test]
     fn the_instance_id_is_stable_and_hex() {
@@ -258,6 +268,25 @@ mod windows_tests {
         assert_eq!(first, second);
         assert_eq!(first.len(), 32);
         assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn second_instance_forwards_its_link_to_the_first() {
+        let dir = std::env::temp_dir().join(format!("fiend-single-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("desktop.sock");
+        let Role::Primary(mut receiver) = acquire(&path, &Message::Show) else {
+            panic!("first instance is not primary");
+        };
+        let link = Message::Open("fiend://xyz".into());
+        assert!(matches!(acquire(&path, &link), Role::Secondary));
+        let got = futures::executor::block_on(async {
+            let first = receiver.next().await;
+            let second = receiver.next().await;
+            (first, second)
+        });
+        assert_eq!(got, (Some(Message::Show), Some(link)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

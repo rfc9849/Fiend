@@ -71,10 +71,13 @@ fn wide_path(path: &Path) -> Vec<u16> {
 }
 
 pub fn valid_sid(sid: &str) -> bool {
-    sid.starts_with("S-1-")
-        && sid
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+    let mut parts = sid.split('-');
+    parts.next() == Some("S")
+        && parts.next() == Some("1")
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.all(|part| {
+            !part.is_empty() && part.len() <= 10 && part.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn sid_string(sid: PSID) -> io::Result<String> {
@@ -418,8 +421,18 @@ mod tests {
         assert!(valid_sid("S-1-5-18"));
         assert!(valid_sid("S-1-5-21-100-200-300-1001"));
         assert!(!valid_sid(""));
+        assert!(!valid_sid("S-1-"));
+        assert!(!valid_sid("S-1--5-18"));
+        assert!(!valid_sid("S-2-5-18"));
         assert!(!valid_sid("S-1-5-21-abc"));
         assert!(!valid_sid("D:P(A;;GA;;;SY)"));
+    }
+
+    #[test]
+    fn the_current_user_sid_is_valid_and_makes_a_pipe_security() {
+        let sid = current_user_sid().unwrap();
+        assert!(valid_sid(&sid), "{sid}");
+        PipeSecurity::new().unwrap();
     }
 
     #[test]
