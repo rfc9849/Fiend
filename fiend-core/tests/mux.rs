@@ -400,12 +400,16 @@ async fn concurrent_lane_opens_do_not_serialize_dials() {
     let template = Arc::new(Template::from_json(TEMPLATE_JSON).expect("load sample template"));
     let (sender, receiver) = mpsc::unbounded_channel();
     start_server(receiver, Config::default(), echo_handler());
+    let completed = Arc::new(AtomicUsize::new(0));
+    let dials = completed.clone();
     let pool = Arc::new(LinkPool::new(Config::default(), move || {
         let template = template.clone();
         let sender = sender.clone();
+        let completed = dials.clone();
         Box::pin(async move {
             sleep(Duration::from_millis(150)).await;
             let (client, server) = connect_pair(&template).await?;
+            completed.fetch_add(1, Ordering::SeqCst);
             sender
                 .send(server)
                 .map_err(|_| fiend_core::transport::Error::invalid("server task stopped"))?;
@@ -413,7 +417,6 @@ async fn concurrent_lane_opens_do_not_serialize_dials() {
         })
     }));
 
-    let start = Instant::now();
     let mut handles = Vec::new();
     for index in 0..6 {
         let pool = pool.clone();
@@ -425,10 +428,10 @@ async fn concurrent_lane_opens_do_not_serialize_dials() {
     for handle in handles {
         handle.await.expect("task").expect("open lane");
     }
+    let completed = completed.load(Ordering::SeqCst);
     assert!(
-        start.elapsed() < Duration::from_millis(700),
-        "lane opens serialized the dials: {:?}",
-        start.elapsed()
+        completed < 4,
+        "lane opens serialized the dials: {completed} dials before all lanes opened"
     );
 }
 
@@ -600,7 +603,7 @@ async fn interactive_latency_stays_low_under_bulk() {
     wait_for_links(&pool, 2).await;
     let mut samples = Vec::with_capacity(20);
     for index in 0..20u16 {
-        let started = Instant::now();
+        let started = tokio::time::Instant::now();
         let mut lane = pool
             .open_lane(&format!("click.test:{index}"), LaneKind::Tcp)
             .await
@@ -613,9 +616,13 @@ async fn interactive_latency_stays_low_under_bulk() {
         drop(lane);
     }
     samples.sort_unstable();
-    let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
+    let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
     eprintln!("interactive p95 under bulk: {p95:?}");
     assert!(p95 < Duration::from_secs(2), "p95 was {p95:?}");
+    assert!(
+        !writer.is_finished(),
+        "the clicks waited until the bulk transfer ended"
+    );
 
     let total = writer.await.expect("bulk writer");
     assert_eq!(total, 64 * 1024 * 1024 + 4 * (512 << 10));
