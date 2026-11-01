@@ -432,7 +432,10 @@ mod tests {
     fn the_current_user_sid_is_valid_and_makes_a_pipe_security() {
         let sid = current_user_sid().unwrap();
         assert!(valid_sid(&sid), "{sid}");
-        PipeSecurity::new().unwrap();
+        let security = PipeSecurity::new().unwrap();
+        assert!(security.allows(&sid));
+        assert!(!security.allows("S-1-5-21-1-2-3-1001"));
+        assert!(!security.allows(""));
     }
 
     #[test]

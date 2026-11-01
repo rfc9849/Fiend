@@ -598,6 +598,7 @@ async fn subscriptions_are_renamed_and_rechecked_for_a_new_type() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_peer_without_permission_is_refused() {
     let fixture = Fixture::new("peer", PeerPolicy::default()).await;
