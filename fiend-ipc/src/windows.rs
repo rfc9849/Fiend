@@ -26,6 +26,20 @@ use windows_sys::Win32::System::Threading::{
 const SYSTEM_SID: &str = "S-1-5-18";
 const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owners_that_cannot_be_forged_are_trusted() {
+        assert!(trusted_owner("S-1-5-18"));
+        assert!(trusted_owner("s-1-5-18"));
+        assert!(trusted_owner("S-1-5-32-544"));
+        assert!(!trusted_owner("S-1-5-21-1-2-3-1001"));
+        assert!(!trusted_owner(""));
+    }
+}
+
 pub(crate) const IDENTIFY_ONLY: u32 = SECURITY_IDENTIFICATION;
 
 fn sid_string(sid: PSID) -> io::Result<String> {
@@ -125,7 +139,37 @@ fn image_path(process: HANDLE) -> io::Result<PathBuf> {
     )))
 }
 
+fn trusted_owner(owner: &str) -> bool {
+    owner.eq_ignore_ascii_case(SYSTEM_SID) || owner.eq_ignore_ascii_case(ADMINISTRATORS_SID)
+}
+
 pub(crate) fn verify_server(pipe: &NamedPipeClient) -> io::Result<()> {
+    let owner = pipe_owner(pipe).or_else(|error| {
+        let mut process_id = 0u32;
+        let ok =
+            unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle() as HANDLE, &mut process_id) };
+        if ok == 0 {
+            return Err(error);
+        }
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+        if process.is_null() {
+            return Err(error);
+        }
+        let sid = process_sid(process);
+        unsafe {
+            CloseHandle(process);
+        }
+        sid
+    })?;
+    if trusted_owner(&owner) {
+        return Ok(());
+    }
+    if !current_user_sid()?.eq_ignore_ascii_case(&owner) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "The pipe server is not the Fiend daemon.",
+        ));
+    }
     let mut process_id = 0u32;
     let ok =
         unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle() as HANDLE, &mut process_id) };
@@ -136,28 +180,19 @@ pub(crate) fn verify_server(pipe: &NamedPipeClient) -> io::Result<()> {
     if process.is_null() {
         return Err(io::Error::last_os_error());
     }
-    let result = (|| {
-        let owner = pipe_owner(pipe).or_else(|_| process_sid(process))?;
-        if owner.eq_ignore_ascii_case(SYSTEM_SID) || owner.eq_ignore_ascii_case(ADMINISTRATORS_SID)
-        {
-            return Ok(());
-        }
-        let daemon = image_path(process).is_ok_and(|path| {
-            path.file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new("fiend-daemon.exe")))
-        });
-        let same_user = current_user_sid()?.eq_ignore_ascii_case(&owner);
-        if daemon && same_user {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "The pipe server is not the Fiend daemon.",
-            ))
-        }
-    })();
+    let daemon = image_path(process).is_ok_and(|path| {
+        path.file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new("fiend-daemon.exe")))
+    });
     unsafe {
         CloseHandle(process);
     }
-    result
+    if daemon {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "The pipe server is not the Fiend daemon.",
+        ))
+    }
 }
