@@ -12,7 +12,6 @@
     <string name="home_step_dialing">Reaching server</string>
     <string name="home_step_handshake">Securing the handshake</string>
     <string name="home_step_routing">Setting up routes</string>
-    <string name="home_via">via %1$s</string>
     <string name="home_action_connect">Connect</string>
     <string name="home_action_disconnect">Disconnect</string>
     <string name="home_server">Server</string>

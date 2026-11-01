@@ -21,9 +21,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class Field { Name, Host, Port, MoreServers, Secret, Handshake, Connections, UdpIdle, UdpKeepalive }
+enum class Field { Name, Host, Port, MoreServers, Secret, Handshake, Connections, UdpIdle }
 
-enum class FieldError { Required, Port, Servers, Secret, Number, Keepalive }
+enum class FieldError { Required, Port, Servers, Secret, Number }
 
 data class ProfileForm(
     val name: String = "",
@@ -36,7 +36,6 @@ data class ProfileForm(
     val handshake: String = Tuning().handshakeTimeoutMs.toString(),
     val connections: String = Tuning().maxConnections.toString(),
     val udpIdle: String = Tuning().udpIdleMs.toString(),
-    val udpKeepalive: String = Tuning().udpKeepaliveMs.toString(),
 )
 
 data class ProfileEditUiState(
@@ -140,7 +139,6 @@ class ProfileEditViewModel @AssistedInject constructor(
                         handshakeTimeoutMs = f.handshake.toInt(),
                         maxConnections = f.connections.toInt(),
                         udpIdleMs = f.udpIdle.toInt(),
-                        udpKeepaliveMs = f.udpKeepalive.toInt(),
                         maxUdpFlows = base.tuning.maxUdpFlows,
                     ),
                 ),
@@ -163,14 +161,8 @@ class ProfileEditViewModel @AssistedInject constructor(
             Field.Handshake to f.handshake,
             Field.Connections to f.connections,
             Field.UdpIdle to f.udpIdle,
-            Field.UdpKeepalive to f.udpKeepalive,
         ).forEach { (field, value) ->
             if ((value.toIntOrNull() ?: 0) <= 0) put(field, FieldError.Number)
-        }
-        val idle = f.udpIdle.toIntOrNull()
-        val keepalive = f.udpKeepalive.toIntOrNull()
-        if (idle != null && keepalive != null && keepalive >= idle && !containsKey(Field.UdpKeepalive)) {
-            put(Field.UdpKeepalive, FieldError.Keepalive)
         }
     }
 
@@ -185,7 +177,6 @@ class ProfileEditViewModel @AssistedInject constructor(
         handshake = tuning.handshakeTimeoutMs.toString(),
         connections = tuning.maxConnections.toString(),
         udpIdle = tuning.udpIdleMs.toString(),
-        udpKeepalive = tuning.udpKeepaliveMs.toString(),
     )
 
     private companion object {

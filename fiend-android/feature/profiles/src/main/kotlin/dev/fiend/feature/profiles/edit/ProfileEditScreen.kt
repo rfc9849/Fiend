@@ -210,7 +210,7 @@ internal fun ProfileEditScreen(
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             NumberField(f.udpIdle, { v -> onChange { it.copy(udpIdle = v) } }, R.string.edit_udp_idle, state.errors[Field.UdpIdle], Modifier.weight(1f))
-                            NumberField(f.udpKeepalive, { v -> onChange { it.copy(udpKeepalive = v) } }, R.string.edit_udp_keepalive, state.errors[Field.UdpKeepalive], Modifier.weight(1f))
+                            Spacer(Modifier.weight(1f))
                         }
                     }
                 }
@@ -249,7 +249,6 @@ private fun errorText(error: FieldError?): String? = error?.let {
             FieldError.Servers -> R.string.edit_error_servers
             FieldError.Secret -> R.string.edit_error_secret
             FieldError.Number -> R.string.edit_error_number
-            FieldError.Keepalive -> R.string.edit_error_keepalive
         },
     )
 }

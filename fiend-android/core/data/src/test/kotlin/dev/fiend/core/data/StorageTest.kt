@@ -1,6 +1,7 @@
 package dev.fiend.core.data
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import com.google.crypto.tink.Aead
 import com.google.crypto.tink.KeysetHandle
@@ -96,7 +97,7 @@ class StorageTest {
             val store = PreferencesStore(context, scope)
             val repository = RealSettingsRepository(store, RealLogRepository(), scope)
             repository.awaitReady()
-            repository.update { it.copy(themeMode = ThemeMode.Dark, dynamicColor = false, connectOnStart = true, ipv6 = false, splitTunnelApps = setOf("dev.fiend.test"), directRules = "domain:ru\nip:1.2.3.0/24", blockRules = "domain:ads.example", proxyRules = "domain:blocked.ru", dpiRules = "domain:youtube.com", subscriptions = listOf(RuleSubscription("one", "https://example.com/list.srs", RuleKind.Proxy, updatedAtMs = 5, entries = 7)), directResolver = "1.1.1.1", mtu = 9999) }
+            repository.update { it.copy(themeMode = ThemeMode.Dark, connectOnStart = true, ipv6 = false, splitTunnelApps = setOf("dev.fiend.test"), directRules = "domain:ru\nip:1.2.3.0/24", blockRules = "domain:ads.example", proxyRules = "domain:blocked.ru", dpiRules = "domain:youtube.com", subscriptions = listOf(RuleSubscription("one", "https://example.com/list.srs", RuleKind.Proxy, updatedAtMs = 5, entries = 7)), directResolver = "1.1.1.1", mtu = 9999) }
             val settings = withTimeout(5_000) { repository.settings.first { it.themeMode == ThemeMode.Dark } }
             assertEquals("domain:ru\nip:1.2.3.0/24", settings.directRules)
             assertEquals("domain:ads.example", settings.blockRules)
@@ -105,7 +106,6 @@ class StorageTest {
             assertEquals(listOf(RuleSubscription("one", "https://example.com/list.srs", RuleKind.Proxy, updatedAtMs = 5, entries = 7)), settings.subscriptions)
             assertEquals("1.1.1.1", settings.directResolver)
             assertEquals(9000, settings.mtu)
-            assertFalse(settings.dynamicColor)
             assertTrue(settings.connectOnStart)
             assertFalse(settings.ipv6)
             assertEquals(setOf("dev.fiend.test"), settings.splitTunnelApps)
@@ -205,5 +205,27 @@ class StorageTest {
         assertTrue(repository.read(android.net.Uri.fromFile(large).toString()).isFailure)
         val binary = java.io.File(context.cacheDir, "binary.txt").apply { writeBytes(byteArrayOf(0xff.toByte(), 0xfe.toByte(), 0x00)) }
         assertTrue(repository.read(android.net.Uri.fromFile(binary).toString()).isFailure)
+    }
+
+    @Test
+    fun migrationFromVersionThreeKeepsEncryptedRows() = runBlocking {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val file = context.getDatabasePath("migration-test.db")
+        file.parentFile!!.mkdirs()
+        val secretCipher = cipher()
+        val encrypted = secretCipher.encrypt("one", "42".repeat(32))
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { database ->
+            database.execSQL("CREATE TABLE IF NOT EXISTS `profiles` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `host` TEXT NOT NULL, `port` INTEGER NOT NULL, `encrypted_secret` BLOB NOT NULL, `template_id` TEXT NOT NULL, `template_json` TEXT, `country_code` TEXT, `latency_ms` INTEGER, `last_connected_at` INTEGER, `handshake_timeout_ms` INTEGER NOT NULL, `max_connections` INTEGER NOT NULL, `udp_idle_ms` INTEGER NOT NULL, `udp_keepalive_ms` INTEGER NOT NULL, `max_udp_flows` INTEGER NOT NULL, `more_servers` TEXT NOT NULL DEFAULT '', PRIMARY KEY(`id`))")
+            database.execSQL("INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 10000, 1024, 60000, 20000, 64, ?)", arrayOf("one", "Local test", "127.0.0.1", 443, encrypted, "captured-wikipedia-v1", "a.example:443"))
+            database.version = 3
+        }
+        val database = Room.databaseBuilder(context, ProfileDatabase::class.java, file.name).build()
+        try {
+            val restored = database.profiles().get("one")!!
+            assertEquals("42".repeat(32), secretCipher.decrypt("one", restored.encryptedSecret))
+            assertEquals(60000, restored.udpIdleMs)
+            assertEquals(64, restored.maxUdpFlows)
+            assertEquals("a.example:443", restored.moreServers)
+        } finally { database.close(); context.deleteDatabase(file.name) }
     }
 }

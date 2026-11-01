@@ -354,7 +354,6 @@ private fun TuningGroup(profile: Profile) {
         item { InfoItem(stringResource(R.string.detail_handshake), seconds(t.handshakeTimeoutMs), icon = FiendIcons.Timer) }
         item { InfoItem(stringResource(R.string.detail_connections), t.maxConnections.toString(), icon = FiendIcons.Devices) }
         item { InfoItem(stringResource(R.string.detail_udp_idle), seconds(t.udpIdleMs), icon = FiendIcons.Schedule) }
-        item { InfoItem(stringResource(R.string.detail_udp_keepalive), seconds(t.udpKeepaliveMs), icon = FiendIcons.History) }
         item { InfoItem(stringResource(R.string.detail_udp_flows), t.maxUdpFlows.toString(), icon = FiendIcons.Memory) }
     }
 }

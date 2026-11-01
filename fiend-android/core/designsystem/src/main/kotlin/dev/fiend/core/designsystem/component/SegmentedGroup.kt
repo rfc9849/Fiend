@@ -26,9 +26,6 @@ fun SegmentedGroup(
 ) = FiendGroup(modifier = modifier, title = title, content = content)
 
 @Composable
-fun GroupHeader(text: String, modifier: Modifier = Modifier) = FiendSectionTitle(text, modifier)
-
-@Composable
 fun ActionItem(
     headline: String,
     onClick: () -> Unit,

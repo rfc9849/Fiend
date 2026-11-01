@@ -49,7 +49,6 @@ internal class RealSettingsRepository @Inject constructor(
         store.data.edit { values ->
             val next = transform(decode(values))
             values[THEME] = next.themeMode.name
-            values[DYNAMIC] = next.dynamicColor
             values[CONNECT] = next.connectOnStart
             values[LAN] = next.bypassLan
             values[IPV6] = next.ipv6
@@ -67,7 +66,6 @@ internal class RealSettingsRepository @Inject constructor(
 
     private fun decode(values: Preferences) = AppSettings(
         themeMode = ThemeMode.entries.firstOrNull { it.name == values[THEME] } ?: ThemeMode.System,
-        dynamicColor = values[DYNAMIC] ?: true,
         connectOnStart = values[CONNECT] ?: false,
         bypassLan = values[LAN] ?: true,
         ipv6 = values[IPV6] ?: true,
@@ -94,7 +92,6 @@ internal class RealSettingsRepository @Inject constructor(
         val json = Json { ignoreUnknownKeys = true }
 
         val THEME = stringPreferencesKey("theme_mode")
-        val DYNAMIC = booleanPreferencesKey("dynamic_color")
         val CONNECT = booleanPreferencesKey("connect_on_start")
         val LAN = booleanPreferencesKey("bypass_lan")
         val IPV6 = booleanPreferencesKey("ipv6")

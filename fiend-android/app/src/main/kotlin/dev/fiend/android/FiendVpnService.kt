@@ -148,7 +148,6 @@ class FiendVpnService : VpnService() {
                 mtu = appSettings.mtu.toUShort(),
                 ipv6 = appSettings.ipv6,
                 bypassLan = appSettings.bypassLan,
-                directAll = false,
                 directRules = appSettings.directRules,
                 blockRules = appSettings.blockRules,
                 proxyRules = appSettings.proxyRules,
@@ -168,7 +167,6 @@ class FiendVpnService : VpnService() {
                 handshakeTimeoutMs = profile.tuning.handshakeTimeoutMs.toULong(),
                 maxConnections = profile.tuning.maxConnections.toUInt(),
                 udpIdleMs = profile.tuning.udpIdleMs.toULong(),
-                udpKeepaliveMs = profile.tuning.udpKeepaliveMs.toULong(),
                 maxUdpFlows = profile.tuning.maxUdpFlows.toUInt(),
             )
             val platform = ServicePlatform(this, session)

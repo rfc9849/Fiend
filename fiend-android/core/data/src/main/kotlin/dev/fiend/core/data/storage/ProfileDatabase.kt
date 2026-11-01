@@ -1,13 +1,16 @@
 package dev.fiend.core.data.storage
 
+import androidx.room.AutoMigration
 import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
+import androidx.room.DeleteColumn
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
 import androidx.room.Upsert
+import androidx.room.migration.AutoMigrationSpec
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "profiles")
@@ -25,7 +28,6 @@ internal data class ProfileEntity(
     @ColumnInfo(name = "handshake_timeout_ms") val handshakeTimeoutMs: Int,
     @ColumnInfo(name = "max_connections") val maxConnections: Int,
     @ColumnInfo(name = "udp_idle_ms") val udpIdleMs: Int,
-    @ColumnInfo(name = "udp_keepalive_ms") val udpKeepaliveMs: Int,
     @ColumnInfo(name = "max_udp_flows") val maxUdpFlows: Int,
     @ColumnInfo(name = "more_servers", defaultValue = "") val moreServers: String = "",
 )
@@ -41,7 +43,15 @@ internal interface ProfileDao {
     @Query("UPDATE profiles SET last_connected_at = :time WHERE id = :id") suspend fun connected(id: String, time: Long)
 }
 
-@Database(entities = [ProfileEntity::class], version = 3, exportSchema = true)
+@Database(
+    entities = [ProfileEntity::class],
+    version = 4,
+    exportSchema = true,
+    autoMigrations = [AutoMigration(from = 3, to = 4, spec = ProfileDatabase.DropUdpKeepalive::class)],
+)
 internal abstract class ProfileDatabase : RoomDatabase() {
     abstract fun profiles(): ProfileDao
+
+    @DeleteColumn(tableName = "profiles", columnName = "udp_keepalive_ms")
+    class DropUdpKeepalive : AutoMigrationSpec
 }

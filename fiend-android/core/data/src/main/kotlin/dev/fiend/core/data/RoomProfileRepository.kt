@@ -92,7 +92,7 @@ internal class RoomProfileRepository @Inject constructor(
             val stored = profile.copy(id = profile.id.ifEmpty { UUID.randomUUID().toString() }, templateJson = template)
             validateProfile(stored.engineConfig())
             require(stored.port in 1..65535) { "Port must be between 1 and 65535" }
-            require(stored.tuning.handshakeTimeoutMs > 0 && stored.tuning.maxConnections > 0 && stored.tuning.udpIdleMs > stored.tuning.udpKeepaliveMs && stored.tuning.udpKeepaliveMs > 0 && stored.tuning.maxUdpFlows in 1..4096) { "Connection settings are not valid" }
+            require(stored.tuning.handshakeTimeoutMs > 0 && stored.tuning.maxConnections > 0 && stored.tuning.udpIdleMs > 0 && stored.tuning.maxUdpFlows in 1..4096) { "Connection settings are not valid" }
             dao.upsert(stored.entity())
             if (active.value == null) {
                 store.data.edit { it[PreferencesStore.ACTIVE_PROFILE] = stored.id }
@@ -154,11 +154,11 @@ internal class RoomProfileRepository @Inject constructor(
     }
 
     private fun Profile.entity() = ProfileEntity(id, name, host, port, cipher.encrypt(id, secret), templateId, templateJson,
-        countryCode, latencyMs, lastConnectedAt, tuning.handshakeTimeoutMs, tuning.maxConnections, tuning.udpIdleMs, tuning.udpKeepaliveMs, tuning.maxUdpFlows,
+        countryCode, latencyMs, lastConnectedAt, tuning.handshakeTimeoutMs, tuning.maxConnections, tuning.udpIdleMs, tuning.maxUdpFlows,
         moreServers.joinToString("\n"))
     private fun ProfileEntity.model() = Profile(id, name, host, port, cipher.decrypt(id, encryptedSecret), templateId,
         templateJson = templateJson, countryCode = countryCode, latencyMs = latencyMs, lastConnectedAt = lastConnectedAt,
-        tuning = Tuning(handshakeTimeoutMs, maxConnections, udpIdleMs, udpKeepaliveMs, maxUdpFlows),
+        tuning = Tuning(handshakeTimeoutMs, maxConnections, udpIdleMs, maxUdpFlows),
         moreServers = moreServers.split('\n').filter { it.isNotBlank() })
 
     private companion object {

@@ -25,7 +25,6 @@ data class Tuning(
     val handshakeTimeoutMs: Int = 10_000,
     val maxConnections: Int = 1_024,
     val udpIdleMs: Int = 60_000,
-    val udpKeepaliveMs: Int = 20_000,
     val maxUdpFlows: Int = 64,
 )
 

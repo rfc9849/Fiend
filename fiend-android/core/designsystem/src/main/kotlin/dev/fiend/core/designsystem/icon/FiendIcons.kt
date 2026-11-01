@@ -9,14 +9,8 @@ object FiendIcons {
     val Add: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_add)
 
-    val AddLink: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_add_link)
-
     val AltRoute: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_alt_route)
-
-    val Apps: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_apps)
 
     val ArrowBack: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_arrow_back)
@@ -39,14 +33,8 @@ object FiendIcons {
     val Bolt: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_bolt)
 
-    val BugReport: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_bug_report)
-
     val Check: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_check)
-
-    val CheckCircleFilled: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_check_circle_filled)
 
     val ChevronRight: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_chevron_right)
@@ -59,9 +47,6 @@ object FiendIcons {
 
     val ContentPaste: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_content_paste)
-
-    val Contrast: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_contrast)
 
     val DarkMode: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_dark_mode)
@@ -78,14 +63,8 @@ object FiendIcons {
     val Dns: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_dns)
 
-    val DnsFilled: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_dns_filled)
-
     val Edit: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_edit)
-
-    val ExpandLess: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_expand_less)
 
     val ExpandMore: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_expand_more)
@@ -96,14 +75,8 @@ object FiendIcons {
     val Flag: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_flag)
 
-    val History: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_history)
-
     val Home: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_home)
-
-    val HomeFilled: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_home_filled)
 
     val Hub: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_hub)
@@ -126,26 +99,17 @@ object FiendIcons {
     val Link: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_link)
 
-    val Lock: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_lock)
-
     val Memory: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_memory)
 
     val MoreVert: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_more_vert)
 
-    val NetworkPing: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_network_ping)
-
     val NorthEast: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_north_east)
 
     val OpenInNew: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_open_in_new)
-
-    val Palette: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_palette)
 
     val Policy: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_policy)
@@ -156,14 +120,8 @@ object FiendIcons {
     val Public: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_public)
 
-    val QrCode: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_qr_code)
-
     val QrCodeScanner: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_qr_code_scanner)
-
-    val RadioButtonChecked: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_radio_button_checked)
 
     val RestartAlt: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_restart_alt)
@@ -177,38 +135,23 @@ object FiendIcons {
     val Settings: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_settings)
 
-    val SettingsFilled: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_settings_filled)
-
     val Share: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_share)
 
     val Shield: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_shield)
 
-    val ShieldFilled: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_shield_filled)
-
     val SignalCellularAlt: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_signal_cellular_alt)
 
-    val SouthWest: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_south_west)
-
     val Speed: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_speed)
-
-    val Storage: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_storage)
 
     val Timer: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_timer)
 
     val Tune: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_tune)
-
-    val UnfoldMore: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_unfold_more)
 
     val UploadFile: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_upload_file)
@@ -218,10 +161,4 @@ object FiendIcons {
 
     val VisibilityOff: ImageVector
         @Composable get() = ImageVector.vectorResource(R.drawable.ic_visibility_off)
-
-    val VpnKey: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_vpn_key)
-
-    val Wifi: ImageVector
-        @Composable get() = ImageVector.vectorResource(R.drawable.ic_wifi)
 }
