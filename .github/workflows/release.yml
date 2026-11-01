@@ -200,8 +200,6 @@ jobs:
           mkdir dist
           lipo -info target/bundle/Fiend.app/Contents/MacOS/fiend-desktop
           cp target/bundle/Fiend.dmg "dist/fiend-$VERSION-macos-universal.dmg"
-          tar -C target/bundle -czf "dist/fiend-$VERSION-macos-universal.tar.gz" Fiend.app
-          cp tools/package/install-macos.sh dist/install-macos.sh
       - uses: actions/upload-artifact@v7
         with:
           name: macos
