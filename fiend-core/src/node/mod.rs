@@ -859,7 +859,9 @@ pub fn save_private(path: &Path, raw: &[u8]) -> io::Result<()> {
         file.write_all(raw)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(directory)?.sync_all()
+        #[cfg(unix)]
+        fs::File::open(directory)?.sync_all()?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -876,4 +878,23 @@ pub fn unix_time() -> u64 {
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_documents_are_written_and_replaced() {
+        let path = std::env::temp_dir().join(format!(
+            "fiend-private-{}-{}.json",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        save_private(&path, b"one").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"one");
+        save_private(&path, b"two").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"two");
+        let _ = fs::remove_file(&path);
+    }
 }
