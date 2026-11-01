@@ -16,14 +16,24 @@ use std::time::Duration;
 use fiend_core::net::ProtectSocket;
 use fiend_ipc::ConnectStep;
 use tun_rs::{AsyncDevice, DeviceBuilder};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS,
+};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    ConvertInterfaceAliasToLuid, FreeMibTable, GetIpForwardTable2, GetIpInterfaceEntry,
-    InitializeIpInterfaceEntry, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
+    ConvertInterfaceAliasToLuid, CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable,
+    GetIpForwardTable2, GetIpInterfaceEntry, InitializeIpForwardEntry, InitializeIpInterfaceEntry,
+    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{
-    AF_INET, AF_INET6, IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, SO_PROTOCOL_INFOW,
-    SOCKET, SOL_SOCKET, WSAPROTOCOL_INFOW, getsockopt, setsockopt,
+    AF_INET, AF_INET6, IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF,
+    MIB_IPPROTO_NETMGMT, NlroManual, SO_PROTOCOL_INFOW, SOCKADDR_INET, SOCKET, SOL_SOCKET,
+    WSAPROTOCOL_INFOW, getsockopt, setsockopt,
+};
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_DWORD, REG_MULTI_SZ,
+    REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteKeyExW,
+    RegSetValueExW,
 };
 
 use super::commands::{Runner, Step, SystemRunner, apply_steps, undo_all};
@@ -37,10 +47,14 @@ const TUN_V4: Ipv4Addr = Ipv4Addr::new(10, 42, 0, 2);
 const TUN_V6: Ipv6Addr = Ipv6Addr::new(0xfd42, 0x6669, 0x656e, 0x6400, 0, 0, 0, 2);
 const LOCAL_DNS: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 const NRPT_NAME: &str = "Fiend VPN";
-const NRPT_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{4669656E-6456-504E-0000-000000000002}";
+const NRPT_KEY: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{4669656E-6456-504E-0000-000000000002}";
 const MONITOR_PERIOD: Duration = Duration::from_secs(2);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ADAPTER_GUID: u128 = 0x4669_656e_6456_504e_0000_0000_0000_0001;
+const ROUTE_ADD: &str = "@route-add";
+const ROUTE_DELETE: &str = "@route-delete";
+const NRPT_SET: &str = "@nrpt-set";
+const NRPT_DELETE: &str = "@nrpt-delete";
 
 pub struct WindowsPlatform {
     journal: JournalFile,
@@ -62,13 +76,6 @@ fn system_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
 }
 
-fn netsh_path() -> String {
-    system_root()
-        .join(r"System32\netsh.exe")
-        .to_string_lossy()
-        .into_owned()
-}
-
 fn powershell_path() -> String {
     system_root()
         .join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
@@ -78,12 +85,6 @@ fn powershell_path() -> String {
 
 fn hidden(command: &mut Command) -> &mut Command {
     command.creation_flags(CREATE_NO_WINDOW)
-}
-
-fn netsh(arguments: &[&str]) -> Vec<String> {
-    let mut argv = vec![netsh_path()];
-    argv.extend(arguments.iter().map(|argument| (*argument).to_owned()));
-    argv
 }
 
 fn run_powershell(script: &str) -> io::Result<String> {
@@ -219,11 +220,9 @@ fn protect(bound: Arc<AtomicU32>) -> ProtectSocket {
 }
 
 fn split_routes_remain(alias: &str) -> bool {
-    let wide: Vec<u16> = alias.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
-    if unsafe { ConvertInterfaceAliasToLuid(wide.as_ptr(), &mut luid) } != 0 {
+    let Some(luid) = interface_luid(alias) else {
         return false;
-    }
+    };
     let luid = unsafe { luid.Value };
     [AF_INET, AF_INET6].into_iter().any(|family| {
         let mut table: *mut MIB_IPFORWARD_TABLE2 = ptr::null_mut();
@@ -247,6 +246,9 @@ fn split_routes_remain(alias: &str) -> bool {
 
 fn route_undo_interface(argv: &[String]) -> Option<&str> {
     let program = argv.first()?;
+    if program == ROUTE_DELETE {
+        return argv.get(2).map(String::as_str);
+    }
     if !program.to_ascii_lowercase().ends_with("netsh.exe")
         || !argv.iter().any(|word| word == "delete")
         || !argv.iter().any(|word| word == "route")
@@ -270,39 +272,104 @@ fn restore(journal: &Journal) {
     if skipped > 0 {
         tracing::info!(skipped, "the tunnel routes are already removed");
     }
-    undo_all(&pending, &mut SystemRunner);
+    undo_all(&pending, &mut WindowsRunner);
 }
 
 fn route_steps(iface: &str) -> Vec<Step> {
-    let interface = format!("interface={iface}");
     split_routes()
         .into_iter()
         .map(|(address, prefix)| {
-            let destination = format!("prefix={address}/{prefix}");
-            let family = if address.is_ipv4() { "ipv4" } else { "ipv6" };
+            let destination = format!("{address}/{prefix}");
+            let command = |name: &str| vec![name.to_owned(), destination.clone(), iface.to_owned()];
             Step {
-                apply: netsh(&[
-                    "interface",
-                    family,
-                    "add",
-                    "route",
-                    &destination,
-                    &interface,
-                    "metric=1",
-                    "store=active",
-                ]),
-                undo: Some(netsh(&[
-                    "interface",
-                    family,
-                    "delete",
-                    "route",
-                    &destination,
-                    &interface,
-                    "store=active",
-                ])),
+                apply: command(ROUTE_ADD),
+                undo: Some(command(ROUTE_DELETE)),
             }
         })
         .collect()
+}
+
+fn interface_luid(alias: &str) -> Option<NET_LUID_LH> {
+    let wide: Vec<u16> = alias.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
+    (unsafe { ConvertInterfaceAliasToLuid(wide.as_ptr(), &mut luid) } == 0).then_some(luid)
+}
+
+fn socket_address(address: IpAddr) -> SOCKADDR_INET {
+    let mut socket = SOCKADDR_INET::default();
+    match address {
+        IpAddr::V4(address) => {
+            socket.Ipv4.sin_family = AF_INET;
+            socket.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes(address.octets());
+        }
+        IpAddr::V6(address) => {
+            socket.Ipv6.sin6_family = AF_INET6;
+            socket.Ipv6.sin6_addr.u.Byte = address.octets();
+        }
+    }
+    socket
+}
+
+fn route_row(arguments: &[String]) -> io::Result<MIB_IPFORWARD_ROW2> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "bad route command");
+    let [destination, iface] = arguments else {
+        return Err(invalid());
+    };
+    let (address, prefix) = destination.split_once('/').ok_or_else(invalid)?;
+    let address: IpAddr = address.parse().map_err(|_| invalid())?;
+    let prefix: u8 = prefix.parse().map_err(|_| invalid())?;
+    let luid = interface_luid(iface)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no interface {iface}")))?;
+    let unspecified = if address.is_ipv4() {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    };
+    let mut row = MIB_IPFORWARD_ROW2::default();
+    unsafe { InitializeIpForwardEntry(&mut row) };
+    row.InterfaceLuid = luid;
+    row.DestinationPrefix.Prefix = socket_address(address);
+    row.DestinationPrefix.PrefixLength = prefix;
+    row.SitePrefixLength = 0;
+    row.NextHop = socket_address(unspecified);
+    row.Metric = 1;
+    row.Protocol = MIB_IPPROTO_NETMGMT;
+    row.Origin = NlroManual;
+    Ok(row)
+}
+
+struct WindowsRunner;
+
+impl Runner for WindowsRunner {
+    fn run(&mut self, argv: &[String]) -> io::Result<()> {
+        let Some((program, arguments)) = argv.split_first() else {
+            return Ok(());
+        };
+        let (code, ignored) = match program.as_str() {
+            ROUTE_ADD => {
+                let row = route_row(arguments)?;
+                (
+                    unsafe { CreateIpForwardEntry2(&row) },
+                    ERROR_OBJECT_ALREADY_EXISTS,
+                )
+            }
+            ROUTE_DELETE => {
+                let row = match route_row(arguments) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                    row => row?,
+                };
+                (unsafe { DeleteIpForwardEntry2(&row) }, ERROR_NOT_FOUND)
+            }
+            NRPT_SET => return nrpt_set(),
+            NRPT_DELETE => return nrpt_remove(),
+            _ => return SystemRunner.run(argv),
+        };
+        if code == 0 || code == ignored {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(code as i32))
+        }
+    }
 }
 
 fn nrpt_remove_script() -> String {
@@ -315,51 +382,90 @@ fn nrpt_remove_script() -> String {
 }
 
 pub fn remove_nrpt() -> io::Result<()> {
-    let _ = SystemRunner.run(&nrpt_delete());
+    let _ = nrpt_remove();
     run_powershell(&nrpt_remove_script()).map(|_| ())
 }
 
-fn reg_path() -> String {
-    system_root()
-        .join(r"System32\reg.exe")
-        .to_string_lossy()
-        .into_owned()
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn nrpt_delete() -> Vec<String> {
-    vec![reg_path(), "delete".into(), NRPT_KEY.into(), "/f".into()]
+fn win32(code: u32) -> io::Result<()> {
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(code as i32))
+    }
+}
+
+fn nrpt_values() -> [(&'static str, REG_VALUE_TYPE, Vec<u8>); 5] {
+    let text = |value: &str| -> Vec<u8> {
+        wide(value)
+            .iter()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect()
+    };
+    let mut names = text(".");
+    names.extend_from_slice(&[0, 0]);
+    [
+        ("Version", REG_DWORD, 2u32.to_le_bytes().to_vec()),
+        ("ConfigOptions", REG_DWORD, 8u32.to_le_bytes().to_vec()),
+        ("GenericDNSServers", REG_SZ, text(&LOCAL_DNS.to_string())),
+        ("DisplayName", REG_SZ, text(NRPT_NAME)),
+        ("Name", REG_MULTI_SZ, names),
+    ]
+}
+
+fn nrpt_set() -> io::Result<()> {
+    let mut key: HKEY = ptr::null_mut();
+    win32(unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(NRPT_KEY).as_ptr(),
+            0,
+            ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE | KEY_WOW64_64KEY,
+            ptr::null(),
+            &mut key,
+            ptr::null_mut(),
+        )
+    })?;
+    let result = nrpt_values().iter().try_for_each(|(name, kind, data)| {
+        win32(unsafe {
+            RegSetValueExW(
+                key,
+                wide(name).as_ptr(),
+                0,
+                *kind,
+                data.as_ptr(),
+                data.len() as u32,
+            )
+        })
+    });
+    unsafe { RegCloseKey(key) };
+    result
+}
+
+fn nrpt_remove() -> io::Result<()> {
+    match unsafe {
+        RegDeleteKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide(NRPT_KEY).as_ptr(),
+            KEY_WOW64_64KEY,
+            0,
+        )
+    } {
+        ERROR_FILE_NOT_FOUND => Ok(()),
+        code => win32(code),
+    }
 }
 
 fn nrpt_steps() -> Vec<Step> {
-    let servers = LOCAL_DNS.to_string();
-    let values = [
-        ("Version", "REG_DWORD", "2"),
-        ("ConfigOptions", "REG_DWORD", "8"),
-        ("GenericDNSServers", "REG_SZ", servers.as_str()),
-        ("DisplayName", "REG_SZ", NRPT_NAME),
-        ("Name", "REG_MULTI_SZ", "."),
-    ];
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, (name, kind, data))| Step {
-            apply: [
-                reg_path().as_str(),
-                "add",
-                NRPT_KEY,
-                "/v",
-                name,
-                "/t",
-                kind,
-                "/d",
-                data,
-                "/f",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
-            undo: (index == 0).then(nrpt_delete),
-        })
-        .collect()
+    vec![Step {
+        apply: vec![NRPT_SET.to_owned()],
+        undo: Some(vec![NRPT_DELETE.to_owned()]),
+    }]
 }
 
 pub struct WindowsGuard {
@@ -462,7 +568,7 @@ impl Platform for WindowsPlatform {
                 &route_steps(&iface),
                 &mut journal,
                 &self.journal,
-                &mut SystemRunner,
+                &mut WindowsRunner,
             )?;
         }
 
@@ -479,7 +585,7 @@ impl Platform for WindowsPlatform {
                 &nrpt_steps(),
                 &mut journal,
                 &self.journal,
-                &mut SystemRunner,
+                &mut WindowsRunner,
             )?;
         }
 
@@ -546,22 +652,55 @@ mod tests {
     }
 
     #[test]
-    fn split_routes_create_sixteen_netsh_steps() {
+    fn split_routes_create_sixteen_route_steps() {
         let steps = route_steps(IFACE);
         assert_eq!(steps.len(), 16);
-        assert!(steps.iter().all(|step| step.undo.is_some()));
+        assert!(steps.iter().all(|step| step.apply[0] == ROUTE_ADD));
+        assert!(steps.iter().all(|step| {
+            step.undo
+                .as_ref()
+                .is_some_and(|undo| undo[0] == ROUTE_DELETE)
+        }));
         assert_eq!(
             steps
                 .iter()
-                .filter(|step| step.apply.iter().any(|word| word == "ipv4"))
+                .filter(|step| step.apply[1].contains('.'))
                 .count(),
             8
         );
-        assert!(
-            steps
-                .iter()
-                .all(|step| step.apply.iter().any(|word| word == "store=active"))
+        let bad = ["1.0.0.0".to_owned(), IFACE.to_owned()];
+        assert_eq!(
+            route_row(&bad).err().map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidInput)
         );
+        let missing = ["1.0.0.0/8".to_owned(), "fiend-no-such-interface".to_owned()];
+        assert_eq!(
+            route_row(&missing).err().map(|error| error.kind()),
+            Some(io::ErrorKind::NotFound)
+        );
+        let delete = [
+            ROUTE_DELETE.to_owned(),
+            missing[0].clone(),
+            missing[1].clone(),
+        ];
+        WindowsRunner.run(&delete).unwrap();
+    }
+
+    #[test]
+    fn legacy_netsh_route_undo_is_still_recognized() {
+        let argv: Vec<String> = [
+            r"C:\WINDOWS\System32\netsh.exe",
+            "interface",
+            "ipv4",
+            "delete",
+            "route",
+            "prefix=1.0.0.0/8",
+            "interface=Fiend",
+            "store=active",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(route_undo_interface(&argv), Some("Fiend"));
     }
 
     #[test]
@@ -570,32 +709,50 @@ mod tests {
         journal
             .undo
             .extend(route_steps(IFACE).into_iter().filter_map(|step| step.undo));
-        journal.undo.push(nrpt_delete());
+        journal.undo.push(vec![NRPT_DELETE.to_owned()]);
         let kept = pending_undo(&journal, |_| true);
         assert_eq!(kept.undo.len(), 17);
         let kept = pending_undo(&journal, |_| false);
-        assert_eq!(kept.undo, vec![nrpt_delete()]);
+        assert_eq!(kept.undo, vec![vec![NRPT_DELETE.to_owned()]]);
         assert!(!split_routes_remain("fiend-no-such-interface"));
     }
 
     #[test]
     fn the_nrpt_rule_uses_the_local_resolver() {
         let steps = nrpt_steps();
-        let text: Vec<String> = steps.iter().map(|step| step.apply.join(" ")).collect();
-        assert!(text.iter().all(|line| line.contains(NRPT_KEY)));
-        assert!(
-            text.iter()
-                .any(|line| line.contains("/v GenericDNSServers /t REG_SZ /d 127.0.0.1"))
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].apply, [NRPT_SET]);
+        assert_eq!(
+            steps[0].undo.as_deref(),
+            Some([NRPT_DELETE.to_owned()].as_slice())
         );
-        assert!(
-            text.iter()
-                .any(|line| line.contains("/v ConfigOptions /t REG_DWORD /d 8"))
+        let values = nrpt_values();
+        let value = |name: &str| {
+            values
+                .iter()
+                .find(|(key, _, _)| *key == name)
+                .map(|(_, kind, data)| (*kind, data.clone()))
+        };
+        let utf16 = |text: &str| -> Vec<u8> {
+            wide(text)
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect()
+        };
+        assert_eq!(
+            value("ConfigOptions"),
+            Some((REG_DWORD, 8u32.to_le_bytes().to_vec()))
         );
-        assert!(
-            text.last()
-                .is_some_and(|line| line.contains("/v Name /t REG_MULTI_SZ /d ."))
+        assert_eq!(
+            value("GenericDNSServers"),
+            Some((REG_SZ, utf16("127.0.0.1")))
         );
-        assert_eq!(steps[0].undo.as_deref(), Some(nrpt_delete().as_slice()));
-        assert!(steps[1..].iter().all(|step| step.undo.is_none()));
+        assert_eq!(
+            values
+                .last()
+                .map(|(name, kind, data)| (*name, *kind, data.clone())),
+            Some(("Name", REG_MULTI_SZ, [utf16("."), vec![0, 0]].concat()))
+        );
+        assert!(NRPT_KEY.starts_with(r"SYSTEM\CurrentControlSet\Services\Dnscache"));
     }
 }
