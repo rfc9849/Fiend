@@ -25,6 +25,7 @@ pub struct Machine {
     profile_id: Option<String>,
     stats: Option<Stats>,
     applied: Option<Applied>,
+    session: u64,
 }
 
 impl Default for Machine {
@@ -40,7 +41,12 @@ impl Machine {
             profile_id: None,
             stats: None,
             applied: None,
+            session: 0,
         }
+    }
+
+    pub fn session(&self) -> u64 {
+        self.session
     }
 
     pub fn state(&self) -> &TunnelState {
@@ -75,6 +81,7 @@ impl Machine {
         self.profile_id = Some(applied.profile.id.clone());
         self.applied = Some(applied);
         self.stats = None;
+        self.session += 1;
         self.state = TunnelState::Connecting {
             step: ConnectStep::Server,
         };
@@ -202,6 +209,18 @@ mod tests {
         assert!(machine.finish(None));
         assert_eq!(machine.state(), &TunnelState::Disconnected);
         assert!(machine.profile_id().is_none() && machine.applied().is_none());
+    }
+
+    #[test]
+    fn each_connect_starts_a_new_session() {
+        let mut machine = Machine::new();
+        assert!(machine.begin_connect(applied()));
+        let first = machine.session();
+        assert!(!machine.begin_connect(applied()));
+        assert_eq!(machine.session(), first);
+        assert!(machine.finish(None));
+        assert!(machine.begin_connect(applied()));
+        assert_eq!(machine.session(), first + 1);
     }
 
     #[test]

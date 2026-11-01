@@ -225,32 +225,44 @@ impl<P: Platform> Inner<P> {
         self.emit(Event::Settings(settings));
     }
 
-    fn set_step(&self, step: ConnectStep) {
-        if lock(&self.machine).set_step(step) {
+    fn set_step(&self, session: u64, step: ConnectStep) {
+        let changed = {
+            let mut machine = lock(&self.machine);
+            machine.session() == session && machine.set_step(step)
+        };
+        if changed {
             self.emit_state();
         }
     }
 
     async fn run_session(
         self: Arc<Self>,
+        session: u64,
         profile: Profile,
         engine: EngineSettings,
         rule_files: Vec<fiend_tun::rules::RuleFile>,
         cancel: CancellationToken,
     ) {
-        let outcome = self.session(&profile, &engine, rule_files, &cancel).await;
+        let outcome = self
+            .session(session, &profile, &engine, rule_files, &cancel)
+            .await;
         let failure = outcome.err();
         match &failure {
             Some(reason) => tracing::error!(%reason, "tunnel stopped with an error"),
             None => tracing::info!("tunnel stopped"),
         }
-        if lock(&self.machine).finish(failure) {
+        let finished = {
+            let mut machine = lock(&self.machine);
+            machine.session() == session && machine.finish(failure)
+        };
+        if finished {
             self.emit_state();
         }
     }
 
     async fn session(
         self: &Arc<Self>,
+        session: u64,
         profile: &Profile,
         engine: &EngineSettings,
         rule_files: Vec<fiend_tun::rules::RuleFile>,
@@ -300,7 +312,7 @@ impl<P: Platform> Inner<P> {
             let engine = tun.clone();
             let changed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || engine.network_changed());
             tokio::task::spawn_blocking(move || {
-                platform.open(&request, &|step| inner.set_step(step), changed)
+                platform.open(&request, &|step| inner.set_step(session, step), changed)
             })
             .await
             .map_err(|error| error.to_string())?
@@ -312,7 +324,11 @@ impl<P: Platform> Inner<P> {
             return Ok(());
         }
 
-        if lock(&self.machine).connected(now_ms(), rtt_ms(&client)) {
+        let connected = {
+            let mut machine = lock(&self.machine);
+            machine.session() == session && machine.connected(now_ms(), rtt_ms(&client))
+        };
+        if connected {
             self.emit_state();
         }
         tracing::info!("tunnel connected");
@@ -525,16 +541,20 @@ impl<P: Platform> Daemon<P> {
         if changed {
             self.inner.emit_settings();
         }
-        let started = lock(&self.inner.machine).begin_connect(Applied {
-            profile: profile.clone(),
-            engine: engine.clone(),
-        });
-        if !started {
-            return Err(error(ErrorCode::Busy, "The tunnel is busy"));
-        }
+        let session = {
+            let mut machine = lock(&self.inner.machine);
+            if !machine.begin_connect(Applied {
+                profile: profile.clone(),
+                engine: engine.clone(),
+            }) {
+                return Err(error(ErrorCode::Busy, "The tunnel is busy"));
+            }
+            machine.session()
+        };
         self.inner.emit_state();
         let cancel = CancellationToken::new();
         let task = tokio::spawn(self.inner.clone().run_session(
+            session,
             profile,
             engine,
             rule_files,
