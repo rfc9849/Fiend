@@ -17,15 +17,16 @@ use fiend_core::net::ProtectSocket;
 use fiend_ipc::ConnectStep;
 use tun_rs::{AsyncDevice, DeviceBuilder};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    FreeMibTable, GetIpForwardTable2, GetIpInterfaceEntry, InitializeIpInterfaceEntry,
-    MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
+    ConvertInterfaceAliasToLuid, FreeMibTable, GetIpForwardTable2, GetIpInterfaceEntry,
+    InitializeIpInterfaceEntry, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
 };
+use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, SO_PROTOCOL_INFOW,
     SOCKET, SOL_SOCKET, WSAPROTOCOL_INFOW, getsockopt, setsockopt,
 };
 
-use super::commands::{Step, SystemRunner, apply_steps, undo_all};
+use super::commands::{Runner, Step, SystemRunner, apply_steps, undo_all};
 use super::local_dns::LocalDns;
 use super::split_routes;
 use super::{NetworkRequest, Platform};
@@ -36,6 +37,7 @@ const TUN_V4: Ipv4Addr = Ipv4Addr::new(10, 42, 0, 2);
 const TUN_V6: Ipv6Addr = Ipv6Addr::new(0xfd42, 0x6669, 0x656e, 0x6400, 0, 0, 0, 2);
 const LOCAL_DNS: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 const NRPT_NAME: &str = "Fiend VPN";
+const NRPT_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{4669656E-6456-504E-0000-000000000002}";
 const MONITOR_PERIOD: Duration = Duration::from_secs(2);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ADAPTER_GUID: u128 = 0x4669_656e_6456_504e_0000_0000_0000_0001;
@@ -76,18 +78,6 @@ fn powershell_path() -> String {
 
 fn hidden(command: &mut Command) -> &mut Command {
     command.creation_flags(CREATE_NO_WINDOW)
-}
-
-fn powershell(script: &str) -> Vec<String> {
-    vec![
-        powershell_path(),
-        "-NoProfile".to_owned(),
-        "-NonInteractive".to_owned(),
-        "-ExecutionPolicy".to_owned(),
-        "Bypass".to_owned(),
-        "-Command".to_owned(),
-        script.to_owned(),
-    ]
 }
 
 fn netsh(arguments: &[&str]) -> Vec<String> {
@@ -228,6 +218,61 @@ fn protect(bound: Arc<AtomicU32>) -> ProtectSocket {
     })
 }
 
+fn split_routes_remain(alias: &str) -> bool {
+    let wide: Vec<u16> = alias.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
+    if unsafe { ConvertInterfaceAliasToLuid(wide.as_ptr(), &mut luid) } != 0 {
+        return false;
+    }
+    let luid = unsafe { luid.Value };
+    [AF_INET, AF_INET6].into_iter().any(|family| {
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = ptr::null_mut();
+        if unsafe { GetIpForwardTable2(family, &mut table) } != 0 {
+            return true;
+        }
+        let found = {
+            let table = unsafe { &*table };
+            let rows = unsafe {
+                std::slice::from_raw_parts(table.Table.as_ptr(), table.NumEntries as usize)
+            };
+            rows.iter().any(|row| {
+                let row_luid = unsafe { row.InterfaceLuid.Value };
+                row_luid == luid && (1..=8).contains(&row.DestinationPrefix.PrefixLength)
+            })
+        };
+        unsafe { FreeMibTable(table as *const _) };
+        found
+    })
+}
+
+fn route_undo_interface(argv: &[String]) -> Option<&str> {
+    let program = argv.first()?;
+    if !program.to_ascii_lowercase().ends_with("netsh.exe")
+        || !argv.iter().any(|word| word == "delete")
+        || !argv.iter().any(|word| word == "route")
+    {
+        return None;
+    }
+    argv.iter().find_map(|word| word.strip_prefix("interface="))
+}
+
+fn pending_undo(journal: &Journal, routes_remain: impl Fn(&str) -> bool) -> Journal {
+    let mut journal = journal.clone();
+    journal
+        .undo
+        .retain(|argv| route_undo_interface(argv).is_none_or(&routes_remain));
+    journal
+}
+
+fn restore(journal: &Journal) {
+    let pending = pending_undo(journal, split_routes_remain);
+    let skipped = journal.undo.len() - pending.undo.len();
+    if skipped > 0 {
+        tracing::info!(skipped, "the tunnel routes are already removed");
+    }
+    undo_all(&pending, &mut SystemRunner);
+}
+
 fn route_steps(iface: &str) -> Vec<Step> {
     let interface = format!("interface={iface}");
     split_routes()
@@ -270,22 +315,51 @@ fn nrpt_remove_script() -> String {
 }
 
 pub fn remove_nrpt() -> io::Result<()> {
+    let _ = SystemRunner.run(&nrpt_delete());
     run_powershell(&nrpt_remove_script()).map(|_| ())
 }
 
-fn nrpt_step() -> Step {
-    let apply = format!(
-        "$ErrorActionPreference='Stop'; \
-         $d='{NRPT_NAME}'; \
-         Get-DnsClientNrptRule -ErrorAction SilentlyContinue | \
-           Where-Object {{ $_.DisplayName -eq $d }} | \
-           Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue; \
-         Add-DnsClientNrptRule -Namespace '.' -NameServers '127.0.0.1' -DisplayName $d"
-    );
-    Step {
-        apply: powershell(&apply),
-        undo: Some(powershell(&nrpt_remove_script())),
-    }
+fn reg_path() -> String {
+    system_root()
+        .join(r"System32\reg.exe")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn nrpt_delete() -> Vec<String> {
+    vec![reg_path(), "delete".into(), NRPT_KEY.into(), "/f".into()]
+}
+
+fn nrpt_steps() -> Vec<Step> {
+    let servers = LOCAL_DNS.to_string();
+    let values = [
+        ("Version", "REG_DWORD", "2"),
+        ("ConfigOptions", "REG_DWORD", "8"),
+        ("GenericDNSServers", "REG_SZ", servers.as_str()),
+        ("DisplayName", "REG_SZ", NRPT_NAME),
+        ("Name", "REG_MULTI_SZ", "."),
+    ];
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, (name, kind, data))| Step {
+            apply: [
+                reg_path().as_str(),
+                "add",
+                NRPT_KEY,
+                "/v",
+                name,
+                "/t",
+                kind,
+                "/d",
+                data,
+                "/f",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            undo: (index == 0).then(nrpt_delete),
+        })
+        .collect()
 }
 
 pub struct WindowsGuard {
@@ -309,7 +383,7 @@ impl Drop for WindowsGuard {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        undo_all(&journal, &mut SystemRunner);
+        restore(&journal);
         if let Err(error) = self.file.clear() {
             tracing::warn!(%error, "cannot remove the network journal");
         }
@@ -339,7 +413,7 @@ impl Platform for WindowsPlatform {
             return self.journal.clear();
         }
         tracing::warn!("restoring network settings from an earlier run");
-        undo_all(&journal, &mut SystemRunner);
+        restore(&journal);
         self.journal.clear()
     }
 
@@ -402,7 +476,7 @@ impl Platform for WindowsPlatform {
         {
             let mut journal = state.lock().unwrap_or_else(|error| error.into_inner());
             apply_steps(
-                &[nrpt_step()],
+                &nrpt_steps(),
                 &mut journal,
                 &self.journal,
                 &mut SystemRunner,
@@ -491,16 +565,37 @@ mod tests {
     }
 
     #[test]
+    fn route_undo_is_skipped_only_when_its_interface_is_gone() {
+        let mut journal = Journal::default();
+        journal
+            .undo
+            .extend(route_steps(IFACE).into_iter().filter_map(|step| step.undo));
+        journal.undo.push(nrpt_delete());
+        let kept = pending_undo(&journal, |_| true);
+        assert_eq!(kept.undo.len(), 17);
+        let kept = pending_undo(&journal, |_| false);
+        assert_eq!(kept.undo, vec![nrpt_delete()]);
+        assert!(!split_routes_remain("fiend-no-such-interface"));
+    }
+
+    #[test]
     fn the_nrpt_rule_uses_the_local_resolver() {
-        let step = nrpt_step();
+        let steps = nrpt_steps();
+        let text: Vec<String> = steps.iter().map(|step| step.apply.join(" ")).collect();
+        assert!(text.iter().all(|line| line.contains(NRPT_KEY)));
         assert!(
-            step.apply
-                .iter()
-                .any(|word| word.contains("Add-DnsClientNrptRule"))
+            text.iter()
+                .any(|line| line.contains("/v GenericDNSServers /t REG_SZ /d 127.0.0.1"))
         );
-        assert!(step.undo.is_some_and(|undo| {
-            undo.iter()
-                .any(|word| word.contains("Remove-DnsClientNrptRule"))
-        }));
+        assert!(
+            text.iter()
+                .any(|line| line.contains("/v ConfigOptions /t REG_DWORD /d 8"))
+        );
+        assert!(
+            text.last()
+                .is_some_and(|line| line.contains("/v Name /t REG_MULTI_SZ /d ."))
+        );
+        assert_eq!(steps[0].undo.as_deref(), Some(nrpt_delete().as_slice()));
+        assert!(steps[1..].iter().all(|step| step.undo.is_none()));
     }
 }
