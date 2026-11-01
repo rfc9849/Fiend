@@ -6,7 +6,6 @@
 .github
 fiend-android
 fiend-panel/web/build
-docs
 tools
 packaging
 Dockerfile

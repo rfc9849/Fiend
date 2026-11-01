@@ -1,6 +1,8 @@
 [package]
 name = "fiend-desktop"
-version = "0.1.0"
+version.workspace = true
+license.workspace = true
+description = "Fiend VPN desktop client, daemon, and command line tool."
 edition = "2024"
 
 [lib]
@@ -48,13 +50,14 @@ harness = false
 name = "fiend"
 section = "net"
 priority = "optional"
-depends = "$auto, systemd"
+depends = "$auto, systemd, libvulkan1"
 extended-description = "Fiend VPN desktop client, daemon, and command line tool."
 maintainer-scripts = "../packaging/linux"
+copyright = "2026, rfc9849"
 assets = [
-    ["../target/release/fiend-desktop", "usr/bin/", "755"],
-    ["../target/release/fiend-daemon", "usr/bin/", "755"],
-    ["../target/release/fiend", "usr/bin/", "755"],
+    ["target/release/fiend-desktop", "usr/bin/", "755"],
+    ["target/release/fiend-daemon", "usr/bin/", "755"],
+    ["target/release/fiend", "usr/bin/", "755"],
     ["../packaging/linux/fiend.desktop", "usr/share/applications/", "644"],
     ["../packaging/linux/fiend.service", "usr/lib/systemd/system/", "644"],
     ["../packaging/linux/fiend.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
@@ -64,9 +67,9 @@ assets = [
 [package.metadata.generate-rpm]
 name = "fiend"
 assets = [
-    { source = "../target/release/fiend-desktop", dest = "/usr/bin/fiend-desktop", mode = "755" },
-    { source = "../target/release/fiend-daemon", dest = "/usr/bin/fiend-daemon", mode = "755" },
-    { source = "../target/release/fiend", dest = "/usr/bin/fiend", mode = "755" },
+    { source = "target/release/fiend-desktop", dest = "/usr/bin/fiend-desktop", mode = "755" },
+    { source = "target/release/fiend-daemon", dest = "/usr/bin/fiend-daemon", mode = "755" },
+    { source = "target/release/fiend", dest = "/usr/bin/fiend", mode = "755" },
     { source = "../packaging/linux/fiend.desktop", dest = "/usr/share/applications/fiend.desktop", mode = "644" },
     { source = "../packaging/linux/fiend.service", dest = "/usr/lib/systemd/system/fiend.service", mode = "644" },
     { source = "../packaging/linux/fiend.svg", dest = "/usr/share/icons/hicolor/scalable/apps/fiend.svg", mode = "644" },

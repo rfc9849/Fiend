@@ -3,6 +3,8 @@
 #
 #   tools/package/macos-bundle.sh            release build
 #   FIEND_PROFILE=debug tools/package/macos-bundle.sh
+#   FIEND_TARGETS="aarch64-apple-darwin x86_64-apple-darwin" tools/package/macos-bundle.sh
+#                                            universal release build
 #
 # Output: target/bundle/Fiend.app and target/bundle/Fiend.dmg
 set -eu
@@ -11,10 +13,24 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 PROFILE=${FIEND_PROFILE:-release}
 OUT=$ROOT/target/bundle
 APP=$OUT/Fiend.app
-VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/fiend-desktop/Cargo.toml" | head -1)
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
 
 cd "$ROOT"
-if [ "$PROFILE" = release ]; then
+if [ -n "${FIEND_TARGETS:-}" ]; then
+    BIN=$OUT/universal
+    rm -rf "$BIN"
+    mkdir -p "$BIN"
+    for target in $FIEND_TARGETS; do
+        cargo build --release --locked --target "$target" -p fiend-desktop -p fiend-daemon -p fiend-cli
+    done
+    for name in fiend-desktop fiend-daemon fiend; do
+        set --
+        for target in $FIEND_TARGETS; do
+            set -- "$@" "$ROOT/target/$target/release/$name"
+        done
+        lipo -create "$@" -output "$BIN/$name"
+    done
+elif [ "$PROFILE" = release ]; then
     cargo build --release -p fiend-desktop -p fiend-daemon -p fiend-cli
     BIN=$ROOT/target/release
 else

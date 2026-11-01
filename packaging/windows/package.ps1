@@ -7,7 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$versionMatch = Select-String -Path (Join-Path $root "fiend-desktop\Cargo.toml") `
+$versionMatch = Select-String -Path (Join-Path $root "Cargo.toml") `
     -Pattern '^version = "(.+)"' | Select-Object -First 1
 if (-not $versionMatch) {
     throw "Cannot read the version."
@@ -36,7 +36,7 @@ if (-not (Test-Path $dll)) {
 
 Push-Location $root
 try {
-    cargo build --release -p fiend-desktop -p fiend-daemon -p fiend-cli
+    cargo build --release --locked -p fiend-desktop -p fiend-daemon -p fiend-cli
     if ($LASTEXITCODE -ne 0) {
         throw "The build failed."
     }

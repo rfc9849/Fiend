@@ -8,10 +8,24 @@ plugins {
 android {
     namespace = "dev.fiend.android"
 
+    val cargoVersion = providers.fileContents(rootProject.layout.projectDirectory.file("../Cargo.toml")).asText.get()
+        .lineSequence().first { it.startsWith("version = ") }.substringAfter('"').substringBefore('"')
+    val (major, minor, patch) = cargoVersion.substringBefore('-').split('.').map(String::toInt)
+
     defaultConfig {
         applicationId = "dev.fiend.android"
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = major * 1_000_000 + minor * 1_000 + patch
+        versionName = cargoVersion
+    }
+
+    val keystore = providers.environmentVariable("FIEND_ANDROID_KEYSTORE").orNull
+    if (keystore != null) {
+        signingConfigs.create("release") {
+            storeFile = file(keystore)
+            storePassword = providers.environmentVariable("FIEND_ANDROID_KEYSTORE_PASSWORD").get()
+            keyAlias = providers.environmentVariable("FIEND_ANDROID_KEY_ALIAS").get()
+            keyPassword = providers.environmentVariable("FIEND_ANDROID_KEY_PASSWORD").get()
+        }
     }
 
     buildTypes {
@@ -19,6 +33,7 @@ android {
             applicationIdSuffix = ".debug"
         }
         release {
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
