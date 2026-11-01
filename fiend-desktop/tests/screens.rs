@@ -158,7 +158,9 @@ pub fn render(
     .unwrap();
     cx.run_until_parked();
     let image = cx.capture_screenshot(window.into()).unwrap();
-    let dir = std::env::temp_dir().join("fiend-shots");
+    let dir = std::env::var_os("FIEND_SHOTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("fiend-shots"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{}.png", shot.name));
     image.save(&path).unwrap();

@@ -1,11 +1,11 @@
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[path = "e2e/unix.rs"]
-mod e2e_unix;
+mod e2e_desktop;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn main() {
-    e2e_unix::main();
+    e2e_desktop::main();
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn main() {}

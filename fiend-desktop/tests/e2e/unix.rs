@@ -25,7 +25,10 @@ fn start_backend() -> Backend {
     let dir = std::env::temp_dir().join(format!("fiend-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
     let socket = dir.join("d.sock");
+    #[cfg(windows)]
+    let socket = PathBuf::from(format!(r"\\.\pipe\fiend-e2e-{}", std::process::id()));
     let stop_daemon = CancellationToken::new();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let thread_dir = dir.clone();
@@ -48,14 +51,17 @@ fn start_backend() -> Backend {
             });
             let store = Store::open(thread_dir.join("store")).unwrap();
             let daemon = Daemon::new(NullPlatform, store, Arc::new(LogBuffer::new()));
-            let unix = bind_socket(&thread_socket, None, &SystemDirectory).unwrap();
+            let listener = bind_socket(&thread_socket, None, &SystemDirectory).unwrap();
+            #[cfg(unix)]
             let policy = PeerPolicy {
                 console: true,
                 uids: vec![current_uid()],
                 group: None,
             };
+            #[cfg(windows)]
+            let policy = PeerPolicy::default();
             let shutdown = CancellationToken::new();
-            tokio::spawn(serve(daemon.clone(), unix, policy, shutdown.clone()));
+            tokio::spawn(serve(daemon.clone(), listener, policy, shutdown.clone()));
             ready_tx.send(server_addr).unwrap();
             stop.cancelled().await;
             daemon.shutdown().await;
@@ -99,6 +105,7 @@ fn managed_server(
     fiend_core::server::Server::managed(config, node)
 }
 
+#[cfg(unix)]
 fn current_uid() -> u32 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(std::env::temp_dir()).unwrap().uid()

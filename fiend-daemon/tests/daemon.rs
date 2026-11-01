@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
@@ -30,7 +30,10 @@ impl Fixture {
         let dir = std::env::temp_dir().join(format!("fiend-it-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
         let socket = dir.join("daemon.sock");
+        #[cfg(windows)]
+        let socket = PathBuf::from(format!(r"\\.\pipe\fiend-it-{name}-{}", std::process::id()));
         let store = Store::open(dir.join("store")).unwrap();
         let daemon = Daemon::new(NullPlatform, store, Arc::new(LogBuffer::new()));
         let listener = bind_socket(&socket, None, &SystemDirectory).unwrap();
@@ -45,14 +48,7 @@ impl Fixture {
     }
 
     async fn allowed(name: &str) -> Self {
-        let fixture = Self::new(
-            name,
-            PeerPolicy {
-                uids: vec![current_uid()],
-                ..PeerPolicy::default()
-            },
-        )
-        .await;
+        let fixture = Self::new(name, policy()).await;
         fixture.daemon.allow_local_subscription_urls();
         fixture
     }
@@ -69,9 +65,46 @@ impl Drop for Fixture {
     }
 }
 
+fn policy() -> PeerPolicy {
+    #[cfg(unix)]
+    {
+        PeerPolicy {
+            uids: vec![current_uid()],
+            ..PeerPolicy::default()
+        }
+    }
+    #[cfg(windows)]
+    {
+        PeerPolicy::default()
+    }
+}
+
+#[cfg(unix)]
 fn current_uid() -> u32 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(std::env::temp_dir()).unwrap().uid()
+}
+
+#[cfg(unix)]
+async fn raw_connect(path: &std::path::Path) -> tokio::net::UnixStream {
+    tokio::net::UnixStream::connect(path).await.unwrap()
+}
+
+#[cfg(windows)]
+async fn raw_connect(path: &std::path::Path) -> tokio::net::windows::named_pipe::NamedPipeClient {
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    const ERROR_PIPE_BUSY: i32 = 231;
+    for _ in 0..20 {
+        match ClientOptions::new().open(path.as_os_str()) {
+            Ok(client) => return client,
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => panic!("cannot connect to the test pipe: {error}"),
+        }
+    }
+    panic!("the test pipe stayed busy");
 }
 
 fn managed_server(
@@ -579,9 +612,7 @@ async fn a_peer_without_permission_is_refused() {
 async fn an_unknown_protocol_major_is_refused() {
     use fiend_ipc::{ClientMessage, Hello, ServerMessage, read_frame, write_frame};
     let fixture = Fixture::allowed("version").await;
-    let mut stream = tokio::net::UnixStream::connect(&fixture.socket)
-        .await
-        .unwrap();
+    let mut stream = raw_connect(&fixture.socket).await;
     let mut hello = Hello::new("test");
     hello.major = 99;
     write_frame(&mut stream, &ClientMessage::Hello(hello), 4096)
@@ -600,9 +631,7 @@ async fn an_unknown_protocol_major_is_refused() {
 async fn garbage_and_oversize_frames_close_only_that_connection() {
     use tokio::io::AsyncWriteExt;
     let fixture = Fixture::allowed("garbage").await;
-    let mut raw = tokio::net::UnixStream::connect(&fixture.socket)
-        .await
-        .unwrap();
+    let mut raw = raw_connect(&fixture.socket).await;
     raw.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).await.unwrap();
     let mut buffer = [0u8; 16];
     let read = tokio::io::AsyncReadExt::read(&mut raw, &mut buffer)
@@ -653,14 +682,7 @@ async fn connect_at_startup_connects_the_active_profile() {
 
 #[tokio::test]
 async fn rule_lists_on_this_computer_are_refused() {
-    let fixture = Fixture::new(
-        "strict",
-        PeerPolicy {
-            uids: vec![current_uid()],
-            ..PeerPolicy::default()
-        },
-    )
-    .await;
+    let fixture = Fixture::new("strict", policy()).await;
     let client = fixture.client().await;
     let result = client
         .add_subscription(
