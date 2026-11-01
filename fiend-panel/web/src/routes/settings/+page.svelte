@@ -209,13 +209,13 @@
 
 <section class="card" aria-labelledby="admins-title">
   <div class="card-header"><h2 id="admins-title">Admins</h2><Button icon="plus" disabled={!me?.totp} onclick={() => { admin = { name: '', password: '', code: '' }; adminFields = {}; adminError = ''; adminOpen = true; }}>Add admin</Button></div>
-  {#if !me?.totp}<p class="note warn">Needs two-factor sign-in.</p>{/if}
+  {#if !me?.totp}<p class="note warn admins-note">Turn on two-factor sign-in to add or remove admins.</p>{/if}
   <div class="table-wrap">
     <table>
       <thead><tr><th>Name</th><th>Two-factor</th><th>Added</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
       <tbody>
         {#each admins as item (item.id)}
-          <tr><td>{item.name}{#if item.id === me?.id} <span class="badge">you</span>{/if}</td><td>{item.totp ? 'On' : 'Off'}</td><td>{date(item.created_at)}</td>
+          <tr><td>{item.name}{#if item.id === me?.id}<span class="badge you">you</span>{/if}</td><td>{item.totp ? 'On' : 'Off'}</td><td>{date(item.created_at)}</td>
             <td class="actions">{#if item.id !== me?.id}<Button kind="ghost" disabled={!me?.totp} onclick={() => { removingAdmin = item; removeCode = ''; removeAdminOpen = true; }}>Remove</Button>{/if}</td></tr>
         {/each}
       </tbody>
@@ -289,6 +289,8 @@
 </Dialog>
 
 <style>
+  .admins-note { margin-bottom: 12px; }
+  .you { margin-left: 8px; }
   .columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; align-items: start; }
   .columns :global(.card + .card) { margin-top: 0; }
   .status { margin: 12px 0 16px; }

@@ -9,7 +9,7 @@
   const items = [
     { href: '/', label: 'Dashboard', icon: 'home' },
     { href: '/nodes', label: 'Nodes', icon: 'server' },
-    { href: '/users', label: 'Users', icon: 'key' },
+    { href: '/users', label: 'Users', icon: 'users' },
     { href: '/disguises', label: 'Disguises', icon: 'globe' },
     { href: '/routing', label: 'Routing', icon: 'route' },
     { href: '/probes', label: 'Probes', icon: 'shield' }
