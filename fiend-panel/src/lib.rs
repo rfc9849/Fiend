@@ -3,11 +3,8 @@
 pub mod address;
 pub mod api;
 pub mod auth;
-pub mod bundle;
 pub mod db;
-pub mod jobs;
 pub mod qr;
-pub mod ssh;
 pub mod state;
 pub mod sync;
 pub mod types;
@@ -15,7 +12,7 @@ pub mod types;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,12 +32,10 @@ use tokio::sync::broadcast;
 #[folder = "web/build/"]
 struct Assets;
 
+pub const PANEL_PORT: u16 = 38029;
+
 fn default_database() -> PathBuf {
     PathBuf::from("/var/lib/fiend/panel.db")
-}
-
-fn default_bundles() -> PathBuf {
-    PathBuf::from("/var/lib/fiend/bundles")
 }
 
 fn default_local_node() -> PathBuf {
@@ -55,8 +50,6 @@ pub struct Config {
     pub setup_expires_at: u64,
     #[serde(default = "default_database")]
     pub database: PathBuf,
-    #[serde(default = "default_bundles")]
-    pub bundles: PathBuf,
     #[serde(default = "default_local_node")]
     pub local_node: PathBuf,
 }
@@ -84,13 +77,11 @@ impl Config {
         if path.exists() {
             return Self::load(path);
         }
-        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
         let config = Self {
-            listen: listener.local_addr().map_err(|e| e.to_string())?,
+            listen: SocketAddr::from((Ipv4Addr::UNSPECIFIED, PANEL_PORT)),
             setup_token: hex::encode(rand::random::<[u8; 32]>()),
             setup_expires_at: now() as u64 + 3600,
             database: default_database(),
-            bundles: default_bundles(),
             local_node: default_local_node(),
         };
         let raw = toml::to_string(&config).map_err(|e| e.to_string())?;
@@ -210,8 +201,6 @@ pub struct Inner {
     pub events: broadcast::Sender<types::Event>,
     pub limiter: auth::Limiter,
     pub sync: sync::Sync,
-    pub jobs: jobs::Jobs,
-    pub scans: Mutex<HashMap<String, ssh::Scan>>,
     pub totp_steps: Mutex<HashMap<i64, u64>>,
 }
 
@@ -232,8 +221,6 @@ impl App {
             events,
             limiter: auth::Limiter::default(),
             sync: sync::Sync::default(),
-            jobs: jobs::Jobs::default(),
-            scans: Mutex::new(HashMap::new()),
             totp_steps: Mutex::new(HashMap::new()),
         })))
     }

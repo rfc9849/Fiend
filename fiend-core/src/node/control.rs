@@ -56,11 +56,6 @@ pub enum Call {
     WarpRegister,
     WarpRotate,
     WarpDelete,
-    UpdateBegin(super::update::Begin),
-    UpdateChunk(super::update::Chunk),
-    UpdateFinish {
-        upload_id: String,
-    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,18 +76,6 @@ async fn dispatch(node: Node, request: Request) -> Response {
     } else {
         match request.call {
             Call::Health => serde_json::to_value(node.health()).map_err(io::Error::other),
-            Call::UpdateBegin(request) => node
-                .update_begin(request)
-                .await
-                .map(|id| serde_json::json!({"upload_id": id})),
-            Call::UpdateChunk(request) => node
-                .update_chunk(request)
-                .await
-                .map(|offset| serde_json::json!({"received": offset})),
-            Call::UpdateFinish { upload_id } => node
-                .update_finish(&upload_id)
-                .await
-                .map(|()| serde_json::json!({"restart_required": true})),
             Call::Logs { limit } => {
                 serde_json::to_value(super::logs::recent(limit)).map_err(io::Error::other)
             }

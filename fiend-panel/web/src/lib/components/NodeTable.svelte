@@ -5,7 +5,7 @@
 </script>
 
 {#if nodes.length === 0}
-  <p class="empty">No nodes yet. Add a node to start.</p>
+  <p class="empty">No node yet. Finish the setup wizard to add the local node.</p>
 {:else}
   <div class="table-wrap">
     <table>

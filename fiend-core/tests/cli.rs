@@ -83,7 +83,7 @@ fn managed_node_starts_checks_saved_state_and_stops_cleanly() {
         &dir,
         "node.toml",
         &format!(
-            "listen = \"127.0.0.1:{port}\"\norigin_host = \"127.0.0.1\"\norigin_port = 1\n[origin]\nrecord_sizes = [35, 3400, 286, 74]\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"{}\"\nupdates_dir = \"updates\"\n",
+            "listen = \"127.0.0.1:{port}\"\norigin_host = \"127.0.0.1\"\norigin_port = 1\n[origin]\nrecord_sizes = [35, 3400, 286, 74]\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"{}\"\n",
             socket.display()
         ),
     );

@@ -24,7 +24,6 @@ fn config(dir: &std::path::Path) -> Config {
         setup_token: "ab".repeat(32),
         setup_expires_at: u64::MAX,
         database: dir.join("panel.db"),
-        bundles: dir.join("bundles"),
         local_node: dir.join("node.toml"),
     }
 }
@@ -95,7 +94,7 @@ fn init_is_private_and_keeps_existing_config() {
     assert_eq!(raw, fs::read(&path).unwrap());
     first.validate().unwrap();
     assert!(first.listen.ip().is_unspecified());
-    assert_ne!(first.listen.port(), 0);
+    assert_eq!(first.listen.port(), fiend_panel::PANEL_PORT);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

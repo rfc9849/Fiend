@@ -63,7 +63,7 @@
 <Centered wide>
   {#if valid === false}
     <h1>Setup link expired</h1>
-    <p class="lead">New link: <code>sudo /opt/fiend/bin/fiend-panel renew-setup /etc/fiend/panel.toml && sudo systemctl restart fiend-panel</code></p>
+    <p class="lead">New link: <code>docker compose exec panel fiend-panel renew-setup /etc/fiend/panel.toml && docker compose restart panel</code></p>
   {:else if valid}
     <p class="step">Step 1 of 4</p>
     <h1 class="title">Admin account</h1>

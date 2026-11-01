@@ -47,7 +47,6 @@ impl Panel {
             setup_token: TOKEN.into(),
             setup_expires_at: u64::MAX,
             database: dir.join("panel.db"),
-            bundles: dir.join("bundles"),
             local_node: dir.join("node.toml"),
         };
         let app = App::open(config).await.unwrap();
@@ -344,7 +343,7 @@ fn write_node_files(dir: &Path, port: u16) {
     fs::write(
         dir.join("node.toml"),
         format!(
-            "listen = \"127.0.0.1:{port}\"\norigin_host = \"127.0.0.1\"\norigin_port = 9\n\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"control.sock\"\nupdates_dir = \"updates\"\n",
+            "listen = \"127.0.0.1:{port}\"\norigin_host = \"127.0.0.1\"\norigin_port = 9\n\n[node]\nstate_file = \"state.json\"\ncontrol_secret_file = \"control.secret\"\ncontrol_socket = \"control.sock\"\n",
         ),
     )
     .unwrap();
@@ -782,11 +781,4 @@ async fn unreachable_nodes_report_errors() {
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     let (status, body) = panel.get("/api/users/999").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    let (status, _) = panel
-        .post(
-            "/api/nodes/update",
-            json!({"node_ids": [id], "bundle_id": 1}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
 }

@@ -18,9 +18,7 @@ pub struct NodeRow {
     pub arch: Option<String>,
     pub control_secret: String,
     pub service_secret: String,
-    pub ssh_host_key: Option<String>,
     pub version: Option<String>,
-    pub binary_sha256: Option<String>,
     pub applied_version: i64,
     pub status: String,
     pub last_error: Option<String>,
@@ -117,7 +115,7 @@ pub struct RuleRow {
     pub outbound: String,
 }
 
-pub const NODE_COLUMNS: &str = "id, name, address, port, local, arch, control_secret, service_secret, ssh_host_key, version, binary_sha256, applied_version, status, last_error, last_seen, started_at, disguise_id, created_at";
+pub const NODE_COLUMNS: &str = "id, name, address, port, local, arch, control_secret, service_secret, version, applied_version, status, last_error, last_seen, started_at, disguise_id, created_at";
 pub const USER_COLUMNS: &str = "id, name, secret, enabled, note, traffic_limit, used_up, used_down, expire_at, hold_days, reset_period, reset_at, usage_epoch, last_seen, online, created_at";
 
 pub async fn node(app: &App, id: i64) -> ApiResult<NodeRow> {

@@ -56,7 +56,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let config = Config::load(Path::new(path)).map_err(io_error)?;
             let listen = config.listen;
             let app = App::open(config).await.map_err(io_error)?;
-            fiend_panel::bundle::import_inbox(&app).await;
             app.start();
             let listener = tokio::net::TcpListener::bind(listen).await?;
             eprintln!("panel listening on {}", listener.local_addr()?);

@@ -1,0 +1,29 @@
+name: fiend
+
+x-fiend: &fiend
+  image: ghcr.io/rfc9849/fiend:${FIEND_VERSION:-latest}
+  build: .
+  network_mode: host
+  restart: unless-stopped
+  stop_grace_period: 15s
+  volumes:
+    - etc:/etc/fiend
+    - data:/var/lib/fiend
+    - run:/run/fiend
+
+services:
+  node:
+    <<: *fiend
+    command: node
+    environment:
+      FIEND_NODE_PORT: ${FIEND_NODE_PORT:-443}
+  panel:
+    <<: *fiend
+    command: panel
+    depends_on:
+      - node
+
+volumes:
+  etc:
+  data:
+  run:

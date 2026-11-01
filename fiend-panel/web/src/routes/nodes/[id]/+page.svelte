@@ -8,7 +8,6 @@
   import Confirm from '#lib/components/Confirm.svelte';
   import WarpCard from '#lib/components/WarpCard.svelte';
   import RoutingEditor from '#lib/components/RoutingEditor.svelte';
-  import UpdateNodes from '#lib/components/UpdateNodes.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
   import { onEvent } from '#lib/stores/events.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
@@ -27,7 +26,6 @@
   let saving = $state(false);
   let restarting = $state(false);
   let removing = $state(false);
-  let updating = $state(false);
   let loadingLogs = $state(false);
 
   async function load(reset = false) {
@@ -87,7 +85,6 @@
 {#if node}
   <TopBar title={node.name} subtitle="{node.address}:{node.port}{node.local ? ' · local node' : ''}">
     {#snippet actions()}
-      <Button icon="refresh" onclick={() => (updating = true)}>Update</Button>
       <Button icon="power" onclick={() => (restarting = true)}>Restart</Button>
     {/snippet}
   </TopBar>
@@ -144,7 +141,6 @@
   </section>
   <Confirm bind:open={restarting} title="Restart {node.name}" message="Open connections close." action="Restart" onconfirm={async () => { await api.post(`/nodes/${id}/restart`); toast('The node restarts'); }} />
   <Confirm bind:open={removing} title="Remove {node.name} from the panel" message="The node keeps running with its last settings." action="Remove" onconfirm={async () => { await api.del(`/nodes/${id}`); toast('Node removed'); await goto('/nodes'); }} />
-  <UpdateNodes bind:open={updating} nodes={[node]} selected={[id]} ondone={() => load()} />
 {:else if error}
   <p class="note error" role="alert">{error}</p>
 {:else}

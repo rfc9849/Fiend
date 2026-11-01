@@ -1,0 +1,14 @@
+**/target
+**/node_modules
+**/.svelte-kit
+**/.DS_Store
+.git
+.github
+fiend-android
+fiend-panel/web/build
+docs
+tools
+packaging
+Dockerfile
+compose.yaml
+.dockerignore

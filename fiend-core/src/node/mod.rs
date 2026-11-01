@@ -3,7 +3,6 @@ pub mod logs;
 pub mod metrics;
 pub mod outbound;
 pub mod probes;
-pub mod update;
 mod usage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod warp;
@@ -202,12 +201,10 @@ struct Inner {
     started: Instant,
     started_at: u64,
     metrics: Mutex<metrics::Sampler>,
-    updates: tokio::sync::Mutex<Option<update::Manager>>,
     restart: tokio::sync::Notify,
     origin_cache: Mutex<Option<(u64, OriginProfile)>>,
     warp: warp::Manager,
     resolver: Mutex<Option<outbound::Resolver>>,
-    binary_sha256: std::sync::OnceLock<String>,
     listen_port: AtomicU64,
 }
 
@@ -248,16 +245,7 @@ pub struct Health {
     pub uptime: u64,
     pub started_at: u64,
     pub state_version: u64,
-    pub binary_sha256: String,
     pub listen_port: u16,
-}
-
-fn binary_sha256() -> String {
-    use sha2::{Digest, Sha256};
-    std::env::current_exe()
-        .and_then(fs::read)
-        .map(|bytes| hex::encode(Sha256::digest(bytes)))
-        .unwrap_or_default()
 }
 
 impl Node {
@@ -270,7 +258,7 @@ impl Node {
             path,
             control_secret,
             initial,
-            PathBuf::from("/opt/fiend/bin/wireproxy"),
+            PathBuf::from("/usr/local/bin/wireproxy"),
         )
     }
 
@@ -314,7 +302,6 @@ impl Node {
                 started: Instant::now(),
                 started_at: unix_time(),
                 metrics: Mutex::new(metrics::Sampler::default()),
-                updates: tokio::sync::Mutex::new(None),
                 restart: tokio::sync::Notify::new(),
                 origin_cache: Mutex::new(None),
                 warp: warp::Manager::new(
@@ -325,7 +312,6 @@ impl Node {
                     wireproxy,
                 ),
                 resolver: Mutex::new(None),
-                binary_sha256: std::sync::OnceLock::new(),
                 listen_port: AtomicU64::new(0),
             }),
         };
@@ -339,51 +325,6 @@ impl Node {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-    }
-
-    pub async fn configure_updates(&self, directory: PathBuf, config_path: PathBuf) {
-        *self.inner.updates.lock().await = Some(update::Manager::new(
-            directory,
-            config_path,
-            self.inner.state_path.clone(),
-        ));
-    }
-
-    pub async fn update_begin(&self, request: update::Begin) -> io::Result<String> {
-        self.inner
-            .updates
-            .lock()
-            .await
-            .as_mut()
-            .ok_or_else(|| invalid("binary updates are not configured"))?
-            .begin(request)
-    }
-
-    pub async fn update_chunk(&self, request: update::Chunk) -> io::Result<u64> {
-        self.inner
-            .updates
-            .lock()
-            .await
-            .as_mut()
-            .ok_or_else(|| invalid("binary updates are not configured"))?
-            .chunk(request)
-    }
-
-    pub async fn update_finish(&self, id: &str) -> io::Result<()> {
-        self.inner
-            .updates
-            .lock()
-            .await
-            .as_mut()
-            .ok_or_else(|| invalid("binary updates are not configured"))?
-            .finish(id)
-            .await?;
-        let node = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            node.request_restart();
-        });
-        Ok(())
     }
 
     pub async fn wait_for_restart(&self) {
@@ -627,7 +568,6 @@ impl Node {
             uptime: self.inner.started.elapsed().as_secs(),
             started_at: self.inner.started_at,
             state_version: self.snapshot().state.version,
-            binary_sha256: self.inner.binary_sha256.get_or_init(binary_sha256).clone(),
             listen_port: self.inner.listen_port.load(Ordering::Relaxed) as u16,
         }
     }

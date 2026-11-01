@@ -3,8 +3,6 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fiend_core::client::ClientConfig;
-use fiend_core::fingerprint::Template;
 use fiend_core::node::control::{Call, Client as ControlClient};
 use fiend_core::node::{Health, Stats};
 use tokio::sync::Notify;
@@ -15,7 +13,6 @@ use crate::{App, now};
 
 const TICK: Duration = Duration::from_secs(5);
 const SAMPLES: usize = 60;
-const BUNDLED: &str = include_str!("../../fiend-core/testdata/template.json");
 
 #[derive(Clone, Copy, Default)]
 pub struct Sample {
@@ -149,48 +146,27 @@ pub fn start(app: App) {
     });
 }
 
-pub fn template_for(app_disguise: Option<Template>) -> Template {
-    app_disguise.unwrap_or_else(|| Template::from_json(BUNDLED).expect("bundled template"))
-}
-
 pub async fn connect(app: &App, node: &NodeRow) -> io::Result<ControlClient> {
-    if node.local {
-        let settings = fiend_core::config::load_server(&app.config.local_node)
-            .map_err(|error| io::Error::other(format!("local node config: {error}")))?;
-        #[cfg(unix)]
-        {
-            let stream = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::net::UnixStream::connect(&settings.node.control_socket),
-            )
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "local control socket timed out")
-            })??;
-            return ControlClient::handshake(stream).await;
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = settings;
-            return Err(io::Error::other("local control needs Unix"));
-        }
+    if !node.local {
+        return Err(io::Error::other("only the local node is supported"));
     }
-    let template = match node.disguise_id {
-        Some(id) => state::disguise(app, id)
-            .await
-            .ok()
-            .and_then(|row| row.template().ok()),
-        None => None,
-    };
-    let secret = fiend_core::share::decode_secret(&node.control_secret)
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let mut config = ClientConfig::new(
-        state::authority(&node.address, node.port),
-        secret.to_vec(),
-        template_for(template),
-    );
-    config.mux.attempts = 1;
-    ControlClient::connect(&config).await
+    let settings = fiend_core::config::load_server(&app.config.local_node)
+        .map_err(|error| io::Error::other(format!("local node config: {error}")))?;
+    #[cfg(unix)]
+    {
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::UnixStream::connect(&settings.node.control_socket),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "local control socket timed out"))??;
+        ControlClient::handshake(stream).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = settings;
+        Err(io::Error::other("local control needs Unix"))
+    }
 }
 
 pub async fn call(app: &App, node_id: i64, call: Call) -> io::Result<serde_json::Value> {
@@ -307,10 +283,9 @@ async fn session(
         let node = state::node(app, node_id)
             .await
             .map_err(|_| io::Error::other("node removed"))?;
-        sqlx::query("UPDATE nodes SET version = ?, arch = ?, binary_sha256 = ?, last_seen = ?, started_at = ? WHERE id = ?")
+        sqlx::query("UPDATE nodes SET version = ?, arch = ?, last_seen = ?, started_at = ? WHERE id = ?")
             .bind(&health.version)
             .bind(&health.architecture)
-            .bind(&health.binary_sha256)
             .bind(now())
             .bind(health.started_at as i64)
             .bind(node_id)

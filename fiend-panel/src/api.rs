@@ -39,7 +39,6 @@ pub fn routes() -> Router<App> {
         .route("/traffic", get(traffic))
         .route("/probes", get(probes))
         .route("/nodes", get(list_nodes))
-        .route("/nodes/update", post(update_nodes))
         .route(
             "/nodes/{id}",
             get(get_node).put(edit_node).delete(delete_node),
@@ -52,10 +51,6 @@ pub fn routes() -> Router<App> {
         )
         .route("/nodes/{id}/warp/register", post(warp_register))
         .route("/nodes/{id}/warp/rotate", post(warp_rotate))
-        .route("/ssh/scan", post(ssh_scan))
-        .route("/ssh/install", post(ssh_install))
-        .route("/jobs", get(list_jobs))
-        .route("/jobs/{id}", get(get_job))
         .route("/users", get(list_users).post(create_user))
         .route(
             "/users/{id}",
@@ -91,13 +86,6 @@ pub fn routes() -> Router<App> {
             "/account/totp",
             get(new_totp).post(enable_totp).delete(disable_totp),
         )
-        .route(
-            "/bundles",
-            get(list_bundles)
-                .post(upload_bundle)
-                .layer(DefaultBodyLimit::max(crate::bundle::MAX_BUNDLE)),
-        )
-        .route("/bundles/{id}", delete(delete_bundle))
         .route("/backup", post(backup))
         .route(
             "/restore",
@@ -182,9 +170,7 @@ async fn local_state(app: &App) -> std::io::Result<fiend_core::node::DesiredStat
         arch: None,
         control_secret: String::new(),
         service_secret: String::new(),
-        ssh_host_key: None,
         version: None,
-        binary_sha256: None,
         applied_version: 0,
         status: String::new(),
         last_error: None,
@@ -281,7 +267,6 @@ async fn node_view(
         local: node.local,
         arch: node.arch.clone(),
         version: node.version.clone(),
-        binary_sha256: node.binary_sha256.clone(),
         status,
         last_error: node.last_error.clone(),
         last_seen: node.last_seen,
@@ -813,259 +798,6 @@ async fn warp_delete(
     )
     .await;
     Ok(Json(warp_view(warp_row(&app, id).await?, None, None)))
-}
-
-async fn ssh_scan(
-    State(app): State<App>,
-    _admin: Admin,
-    Json(input): Json<SshScan>,
-) -> ApiResult<Json<HostKeyView>> {
-    check_address(&input.host)
-        .map_err(|_| ApiError::field("host", "Enter a host name or an IP address."))?;
-    if input.port == 0 {
-        return Err(ApiError::field("ssh_port", "Enter a port from 1 to 65535."));
-    }
-    let scan = crate::ssh::scan(&input.host, input.port)
-        .await
-        .map_err(|error| ApiError::field("host", error))?;
-    let algorithm = scan.key.split_whitespace().next().unwrap_or("").to_owned();
-    let id = hex::encode(rand::random::<[u8; 16]>());
-    let view = HostKeyView {
-        scan_id: id.clone(),
-        fingerprint: scan.fingerprint.clone(),
-        algorithm,
-    };
-    let mut scans = app.scans.lock().unwrap_or_else(|error| error.into_inner());
-    scans.retain(|_, scan| scan.created.elapsed() < Duration::from_secs(900));
-    scans.insert(id, scan);
-    Ok(Json(view))
-}
-
-async fn ssh_install(
-    State(app): State<App>,
-    admin: Admin,
-    Json(input): Json<SshInstall>,
-) -> ApiResult<Json<JobStarted>> {
-    auth::check_name(&input.name, "name")?;
-    check_address(&input.address)?;
-    if input.user.is_empty()
-        || input.user.len() > 64
-        || !input
-            .user
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-    {
-        return Err(ApiError::field("user", "Enter a valid user name."));
-    }
-    if input.node_port == 0 {
-        return Err(ApiError::field(
-            "node_port",
-            "Enter a port from 1 to 65535.",
-        ));
-    }
-    let taken: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE name = ?")
-        .bind(&input.name)
-        .fetch_one(&app.db)
-        .await?;
-    if taken > 0 {
-        return Err(ApiError::field("name", "This name is already in use."));
-    }
-    if let Some(disguise) = input.disguise_id {
-        state::disguise(&app, disguise).await?;
-    }
-    let scan = app
-        .scans
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .remove(&input.scan_id)
-        .ok_or_else(|| ApiError::bad("Check the host key again. The confirmation expired."))?;
-    let bundles: Vec<(i64, String)> =
-        sqlx::query_as("SELECT id, arch FROM bundles ORDER BY uploaded_at DESC, id DESC")
-            .fetch_all(&app.db)
-            .await?;
-    if bundles.is_empty() {
-        return Err(ApiError::bad("Upload a server bundle in Settings first."));
-    }
-    let job = app.jobs.create("install", &input.name, crate::ssh::STEPS);
-    app.audit(
-        Some(admin.id),
-        "node install started",
-        &format!("node {}", input.name),
-        &format!("{} host key {}", input.address, scan.fingerprint),
-    )
-    .await;
-    let task_app = app.clone();
-    let job_id = job.clone();
-    tokio::spawn(async move {
-        let session = crate::ssh::Session::connect(&scan, &input).await;
-        let arch = match &session {
-            Ok(session) => session
-                .run("uname -m", None)
-                .await
-                .ok()
-                .map(|output| output.stdout.trim().to_owned()),
-            Err(_) => None,
-        };
-        if let Ok(session) = session {
-            session.close().await;
-        }
-        let wanted = match arch.as_deref() {
-            Some("aarch64") | Some("arm64") => "arm64",
-            _ => "amd64",
-        };
-        let chosen = bundles
-            .iter()
-            .find(|(_, arch)| arch == wanted)
-            .or(bundles.first())
-            .cloned();
-        let (bundle_id, arch) = chosen.expect("bundles are not empty");
-        match crate::bundle::find(&task_app, bundle_id).await {
-            Ok((_, _, path, _)) => {
-                crate::ssh::install(
-                    task_app,
-                    job_id,
-                    scan,
-                    input,
-                    path.join("bundle.tar.gz"),
-                    arch,
-                )
-                .await
-            }
-            Err(error) => {
-                crate::jobs::Progress::new(&task_app, &job_id).finish(Some(error.message))
-            }
-        }
-    });
-    Ok(Json(JobStarted { job_id: job }))
-}
-
-async fn list_jobs(State(app): State<App>, _admin: Admin) -> Json<Vec<JobView>> {
-    Json(app.jobs.list())
-}
-
-async fn get_job(
-    State(app): State<App>,
-    _admin: Admin,
-    Path(id): Path<String>,
-) -> ApiResult<Json<JobView>> {
-    app.jobs.get(&id).map(Json).ok_or_else(ApiError::not_found)
-}
-
-async fn update_nodes(
-    State(app): State<App>,
-    admin: Admin,
-    Json(input): Json<NodeUpdate>,
-) -> ApiResult<Json<JobStarted>> {
-    let (version, arch, path, core) = crate::bundle::find(&app, input.bundle_id).await?;
-    let mut nodes = Vec::new();
-    for id in &input.node_ids {
-        let node = state::node(&app, *id).await?;
-        let node_arch = match node.arch.as_deref() {
-            Some("x86_64") => "amd64",
-            Some("aarch64") => "arm64",
-            _ => {
-                return Err(ApiError::bad(format!(
-                    "The architecture of node {} is not known yet.",
-                    node.name
-                )));
-            }
-        };
-        if node_arch != arch {
-            return Err(ApiError::bad(format!(
-                "Node {} is {node_arch}, but the bundle is {arch}.",
-                node.name
-            )));
-        }
-        nodes.push(node);
-    }
-    if nodes.is_empty() {
-        return Err(ApiError::bad("Select at least one node."));
-    }
-    let steps: Vec<String> = nodes
-        .iter()
-        .map(|node| format!("Update {}", node.name))
-        .collect();
-    let step_names: Vec<&str> = steps.iter().map(String::as_str).collect();
-    let job = app
-        .jobs
-        .create("update", &format!("bundle {version} {arch}"), &step_names);
-    app.audit(
-        Some(admin.id),
-        "node update started",
-        &format!("bundle {version} {arch}"),
-        &steps.join(", "),
-    )
-    .await;
-    let task_app = app.clone();
-    let job_id = job.clone();
-    tokio::spawn(async move {
-        let progress = crate::jobs::Progress::new(&task_app, &job_id);
-        let binary = match tokio::fs::read(path.join("files/fiend-core")).await {
-            Ok(binary) => binary,
-            Err(error) => return progress.finish(Some(format!("Cannot read the bundle: {error}"))),
-        };
-        let mut failed = None;
-        for (index, node) in nodes.iter().enumerate() {
-            let result = progress
-                .run(index, update_one(&task_app, node, &binary, &core))
-                .await;
-            if let Err(error) = result {
-                failed = Some(format!("{}: {error}", node.name));
-            }
-        }
-        progress.finish(failed);
-    });
-    Ok(Json(JobStarted { job_id: job }))
-}
-
-async fn update_one(app: &App, node: &NodeRow, binary: &[u8], core: &str) -> Result<(), String> {
-    use fiend_core::node::update::{Begin, Chunk};
-    if node.binary_sha256.as_deref() == Some(core) {
-        return Ok(());
-    }
-    let mut client = crate::sync::connect(app, node)
-        .await
-        .map_err(|error| error.to_string())?;
-    let begin = client
-        .call(Call::UpdateBegin(Begin {
-            size: binary.len() as u64,
-            sha256: core.to_owned(),
-        }))
-        .await
-        .map_err(|error| error.to_string())?;
-    let upload = begin["upload_id"]
-        .as_str()
-        .ok_or("The node sent no upload id")?
-        .to_owned();
-    for (index, chunk) in binary.chunks(128 * 1024).enumerate() {
-        client
-            .call(Call::UpdateChunk(Chunk {
-                upload_id: upload.clone(),
-                offset: (index * 128 * 1024) as u64,
-                data: hex::encode(chunk),
-            }))
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    client
-        .call(Call::UpdateFinish { upload_id: upload })
-        .await
-        .map_err(|error| error.to_string())?;
-    drop(client);
-    for _ in 0..60 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        if let Ok(health) = crate::sync::call(app, node.id, Call::Health).await {
-            let sha = health["binary_sha256"].as_str().unwrap_or("");
-            if sha == core {
-                app.sync.wake(node.id);
-                return Ok(());
-            }
-            if health["started_at"].as_i64() > node.started_at {
-                return Err("Update failed and was rolled back.".into());
-            }
-        }
-    }
-    Err("The node did not restart with the new binary in two minutes.".into())
 }
 
 fn user_view(user: &UserRow, nodes: &HashMap<i64, Vec<i64>>) -> UserView {
@@ -2371,79 +2103,6 @@ async fn disable_totp(
         Some(admin.id),
         "two-factor off",
         &format!("admin {}", admin.name),
-        "",
-    )
-    .await;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn list_bundles(State(app): State<App>, _admin: Admin) -> ApiResult<Json<Vec<BundleView>>> {
-    let rows: Vec<(i64, String, String, String, String, String, i64)> = sqlx::query_as("SELECT id, version, arch, sha256, core_sha256, path, uploaded_at FROM bundles ORDER BY uploaded_at DESC, id DESC").fetch_all(&app.db).await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(
-                |(id, version, arch, sha256, core_sha256, path, uploaded_at)| BundleView {
-                    id,
-                    version,
-                    arch,
-                    sha256,
-                    core_sha256,
-                    uploaded_at,
-                    size: std::fs::metadata(std::path::Path::new(&path).join("bundle.tar.gz"))
-                        .map(|meta| meta.len() as i64)
-                        .unwrap_or(0),
-                },
-            )
-            .collect(),
-    ))
-}
-
-async fn upload_bundle(
-    State(app): State<App>,
-    admin: Admin,
-    body: Bytes,
-) -> ApiResult<Json<BundleView>> {
-    if body.is_empty() {
-        return Err(ApiError::bad("Choose a bundle file."));
-    }
-    std::fs::create_dir_all(&app.config.bundles).map_err(ApiError::internal)?;
-    let temporary = app.config.bundles.join(format!(
-        ".upload-{}.tar.gz",
-        hex::encode(rand::random::<[u8; 8]>())
-    ));
-    tokio::fs::write(&temporary, &body)
-        .await
-        .map_err(ApiError::internal)?;
-    let result = crate::bundle::import(&app, temporary.clone()).await;
-    let _ = std::fs::remove_file(&temporary);
-    let bundle = result?;
-    app.audit(
-        Some(admin.id),
-        "bundle uploaded",
-        &format!("bundle {} {}", bundle.version, bundle.arch),
-        &bundle.sha256,
-    )
-    .await;
-    Ok(Json(bundle))
-}
-
-async fn delete_bundle(
-    State(app): State<App>,
-    admin: Admin,
-    Path(id): Path<i64>,
-) -> ApiResult<StatusCode> {
-    let (version, arch, path, _) = crate::bundle::find(&app, id).await?;
-    sqlx::query("DELETE FROM bundles WHERE id = ?")
-        .bind(id)
-        .execute(&app.db)
-        .await?;
-    if path.starts_with(&app.config.bundles) {
-        let _ = std::fs::remove_dir_all(&path);
-    }
-    app.audit(
-        Some(admin.id),
-        "bundle removed",
-        &format!("bundle {version} {arch}"),
         "",
     )
     .await;

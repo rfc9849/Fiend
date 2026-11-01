@@ -43,7 +43,6 @@ pub struct NodeSettings {
     pub state_file: PathBuf,
     pub control_secret_file: PathBuf,
     pub control_socket: PathBuf,
-    pub updates_dir: PathBuf,
     pub wireproxy: PathBuf,
 }
 
@@ -53,8 +52,7 @@ impl Default for NodeSettings {
             state_file: PathBuf::from("/var/lib/fiend/state.json"),
             control_secret_file: PathBuf::from("/etc/fiend/control.secret"),
             control_socket: PathBuf::from("/run/fiend/control.sock"),
-            updates_dir: PathBuf::from("/var/lib/fiend/updates"),
-            wireproxy: PathBuf::from("/opt/fiend/bin/wireproxy"),
+            wireproxy: PathBuf::from("/usr/local/bin/wireproxy"),
         }
     }
 }
@@ -108,7 +106,6 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
         &mut node.state_file,
         &mut node.control_secret_file,
         &mut node.control_socket,
-        &mut node.updates_dir,
         &mut node.wireproxy,
     ] {
         if path.is_relative() {

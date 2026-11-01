@@ -105,11 +105,6 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     .map_err(|error| format!("node state: {error}"))?;
     let listener =
         net::bind_listener(settings.listen).map_err(|error| format!("listen: {error}"))?;
-    node.configure_updates(
-        settings.node.updates_dir,
-        fs::canonicalize(path).map_err(|error| error.to_string())?,
-    )
-    .await;
     node.set_listen_port(settings.listen.port());
     {
         let node = node.clone();
@@ -127,7 +122,7 @@ async fn run_node(args: &[String]) -> Result<(), String> {
         result = control::serve_unix(&settings.node.control_socket, node.clone()) => result.map_err(|error| format!("control socket: {error}"))?,
         _ = node.maintain_usage() => {},
         _ = warp.maintain() => {},
-        _ = node.wait_for_restart() => tracing::info!("binary update restart requested"),
+        _ = node.wait_for_restart() => tracing::info!("restart requested"),
         _ = shutdown_signal() => tracing::info!("shutdown signal received"),
     }
     node.persist_usage()

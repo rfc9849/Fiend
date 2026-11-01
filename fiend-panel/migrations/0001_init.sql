@@ -35,9 +35,7 @@ CREATE TABLE nodes (
     arch TEXT,
     control_secret TEXT NOT NULL,
     service_secret TEXT NOT NULL,
-    ssh_host_key TEXT,
     version TEXT,
-    binary_sha256 TEXT,
     applied_version INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'unknown',
     last_error TEXT,
@@ -144,17 +142,6 @@ CREATE TABLE node_metrics (
     handshakes_ok INTEGER NOT NULL,
     handshakes_origin INTEGER NOT NULL,
     PRIMARY KEY (ts, node_id)
-);
-
-CREATE TABLE bundles (
-    id INTEGER PRIMARY KEY,
-    version TEXT NOT NULL,
-    arch TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    core_sha256 TEXT NOT NULL,
-    path TEXT NOT NULL,
-    uploaded_at INTEGER NOT NULL,
-    UNIQUE (version, arch, sha256)
 );
 
 CREATE TABLE audit (

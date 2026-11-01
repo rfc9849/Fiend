@@ -84,7 +84,6 @@ pub struct NodeView {
     pub local: bool,
     pub arch: Option<String>,
     pub version: Option<String>,
-    pub binary_sha256: Option<String>,
     pub status: String,
     pub last_error: Option<String>,
     pub last_seen: Option<i64>,
@@ -108,60 +107,8 @@ pub struct NodeInput {
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
-pub struct SshScan {
-    pub host: String,
-    pub port: u16,
-}
-
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-pub struct HostKeyView {
-    pub scan_id: String,
-    pub fingerprint: String,
-    pub algorithm: String,
-}
-
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-pub struct SshInstall {
-    pub scan_id: String,
-    pub name: String,
-    pub address: String,
-    pub ssh_port: u16,
-    pub user: String,
-    pub private_key: Option<String>,
-    pub passphrase: Option<String>,
-    pub password: Option<String>,
-    pub sudo_password: Option<String>,
-    pub node_port: u16,
-    pub disguise_id: Option<i64>,
-}
-
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-pub struct JobStep {
-    pub name: String,
-    pub state: String,
-    pub detail: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-pub struct JobView {
-    pub id: String,
-    pub kind: String,
-    pub target: String,
-    pub steps: Vec<JobStep>,
-    pub done: bool,
-    pub error: Option<String>,
-    pub node_id: Option<i64>,
-}
-
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct NodeLogs {
     pub lines: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-pub struct NodeUpdate {
-    pub node_ids: Vec<i64>,
-    pub bundle_id: i64,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
@@ -389,17 +336,6 @@ pub struct CodeInput {
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
-pub struct BundleView {
-    pub id: i64,
-    pub version: String,
-    pub arch: String,
-    pub sha256: String,
-    pub core_sha256: String,
-    pub uploaded_at: i64,
-    pub size: i64,
-}
-
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct AuditView {
     pub id: i64,
     pub ts: i64,
@@ -478,11 +414,6 @@ pub struct Created {
     pub id: i64,
 }
 
-#[derive(Serialize, Deserialize, TS, Clone, Debug)]
-pub struct JobStarted {
-    pub job_id: String,
-}
-
 pub fn export(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let config = ts_rs::Config::new()
         .with_large_int("number")
@@ -503,13 +434,7 @@ pub fn export(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         LocalNodeInput,
         NodeView,
         NodeInput,
-        SshScan,
-        HostKeyView,
-        SshInstall,
-        JobStep,
-        JobView,
         NodeLogs,
-        NodeUpdate,
         WarpView,
         WarpSettingsInput,
         WarpRotation,
@@ -536,7 +461,6 @@ pub fn export(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         PasswordInput,
         TotpInput,
         CodeInput,
-        BundleView,
         AuditView,
         TrafficPoint,
         TrafficSeries,
@@ -546,7 +470,6 @@ pub fn export(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         ProbeReport,
         Event,
         Created,
-        JobStarted,
     );
     let mut names: Vec<String> = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok())

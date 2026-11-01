@@ -34,7 +34,7 @@ async function request<T>(method: Method, path: string, body?: unknown, raw?: Bl
   try {
     response = await fetch(`/api${path}`, { method, headers, body: payload, credentials: 'same-origin' });
   } catch {
-    throw new ApiError(0, 'The panel does not answer. Check the SSH tunnel.');
+    throw new ApiError(0, 'The panel does not answer.');
   }
   if (response.status === 401 && !path.startsWith('/login') && !path.startsWith('/setup')) {
     if (!location.pathname.startsWith('/login') && !location.pathname.startsWith('/setup')) {

@@ -6,7 +6,7 @@ let source: EventSource | null = null;
 function connect() {
   if (source) return;
   source = new EventSource('/api/events');
-  for (const kind of ['nodes', 'stats', 'users', 'job']) {
+  for (const kind of ['nodes', 'stats', 'users']) {
     source.addEventListener(kind, (event) => {
       let id: string | null = null;
       try {

@@ -12,11 +12,10 @@
   import { session } from '#lib/stores/session.svelte.ts';
   import { setTheme, theme, type Theme } from '#lib/stores/theme.svelte.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
-  import { bytes, date } from '#lib/format.ts';
-  import type { AdminView, AuditView, BundleView, TotpSetup } from '#lib/api/generated/index.ts';
+  import { date } from '#lib/format.ts';
+  import type { AdminView, AuditView, TotpSetup } from '#lib/api/generated/index.ts';
 
   let admins = $state<AdminView[]>([]);
-  let bundles = $state<BundleView[]>([]);
   let audit = $state<AuditView[]>([]);
   let themeValue = $state<string>(theme.value);
   let error = $state('');
@@ -40,19 +39,16 @@
   let removeAdminOpen = $state(false);
   let removeCode = $state('');
 
-  let uploadBusy = $state(false);
   let backupCode = $state('');
   let backupBusy = $state(false);
   let restoreOpen = $state(false);
   let restoreFile = $state<File | null>(null);
-  let removingBundle = $state<BundleView | null>(null);
-  let removeBundleOpen = $state(false);
 
   const me = $derived(session.info?.admin);
 
   async function load() {
     try {
-      [admins, bundles, audit] = await Promise.all([api.get<AdminView[]>('/admins'), api.get<BundleView[]>('/bundles'), api.get<AuditView[]>('/audit?limit=100')]);
+      [admins, audit] = await Promise.all([api.get<AdminView[]>('/admins'), api.get<AuditView[]>('/audit?limit=100')]);
       session.info = await loadSession();
     } catch (failure) {
       error = fieldErrors(failure).form ?? '';
@@ -123,23 +119,6 @@
     }
   }
 
-  async function upload(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file) return;
-    uploadBusy = true;
-    try {
-      const bundle = await api.upload<BundleView>('/bundles', await file.arrayBuffer());
-      toast(`Bundle ${bundle.version} ${bundle.arch} added`);
-      await load();
-    } catch (failure) {
-      toast(fieldErrors(failure).form ?? 'The upload failed', true);
-    } finally {
-      uploadBusy = false;
-    }
-  }
-
   async function backup() {
     backupBusy = true;
     try {
@@ -206,31 +185,6 @@
   </div>
 </section>
 
-<section class="card" aria-labelledby="bundles-title">
-  <div class="card-header">
-    <h2 id="bundles-title">Server bundles</h2>
-    <label class="upload" class:busy={uploadBusy}>
-      <input class="visually-hidden" type="file" accept=".tar.gz,.tgz,application/gzip" disabled={uploadBusy} onchange={upload} />
-      {uploadBusy ? 'Uploading…' : 'Upload bundle'}
-    </label>
-  </div>
-  {#if bundles.length}
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Version</th><th>Architecture</th><th class="num">Size</th><th>SHA-256</th><th>Added</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-        <tbody>
-          {#each bundles as item (item.id)}
-            <tr><td class="mono">{item.version}</td><td>{item.arch}</td><td class="num">{bytes(item.size)}</td><td class="mono">{item.sha256.slice(0, 16)}</td><td>{date(item.uploaded_at)}</td>
-              <td class="actions"><Button kind="ghost" onclick={() => { removingBundle = item; removeBundleOpen = true; }}>Remove</Button></td></tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {:else}
-    <p class="note warn">No bundle. Build one with <code>tools/package/server-bundle.sh</code>.</p>
-  {/if}
-</section>
-
 <section class="card" aria-labelledby="backup-title">
   <h2 id="backup-title">Backup</h2>
   <p class="lead">Contains all secrets.</p>
@@ -287,7 +241,6 @@
 </Dialog>
 
 <Confirm bind:open={restoreOpen} title="Restore from {restoreFile?.name ?? ''}" message="All panel data is replaced. The panel restarts." action="Restore" onconfirm={async () => { if (restoreFile) await api.upload('/restore', await restoreFile.arrayBuffer()); toast('Restarting'); setTimeout(() => location.assign('/login'), 4000); }} />
-<Confirm bind:open={removeBundleOpen} title="Remove bundle {removingBundle?.version ?? ''} {removingBundle?.arch ?? ''}" action="Remove" onconfirm={async () => { if (removingBundle) await api.del(`/bundles/${removingBundle.id}`); toast('Bundle removed'); await load(); }} />
 
 <style>
   .columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; align-items: start; }
@@ -299,7 +252,6 @@
   .upload { display: inline-flex; align-items: center; min-height: 32px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; font-size: 12px; font-weight: 500; }
   .upload:hover { background: var(--hover); }
   .upload:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .upload.busy { opacity: .6; cursor: progress; }
   .code { width: 160px; }
   .actions { text-align: right; width: 1%; }
   .audit { max-height: 420px; overflow: auto; }
