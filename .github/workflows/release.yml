@@ -92,7 +92,12 @@ jobs:
       - name: Install the Rust tools
         run: |
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
-          cargo install --locked cargo-ndk --version 4.1.2
+          name=cargo-ndk-x86_64-unknown-linux-gnu-v4.1.2
+          curl -fsSL "https://github.com/bbqsrc/cargo-ndk/releases/download/v4.1.2/$name.tgz" -o "$RUNNER_TEMP/$name.tgz"
+          echo "9451622c4567e8abb2c8005001855e32901c0b716ccdd3a173a4375fd03426e1  $RUNNER_TEMP/$name.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tgz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/$name/cargo-ndk" "$HOME/.cargo/bin/cargo-ndk"
+          cargo ndk --version
       - name: Prepare the signing key
         env:
           KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
