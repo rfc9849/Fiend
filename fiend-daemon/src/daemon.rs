@@ -27,6 +27,7 @@ pub const MAX_SUBSCRIPTIONS: usize = 32;
 
 /// Reject hosts that point at this machine or at a link-local service. The
 /// daemon runs as root, so it must not fetch such a URL for a local user.
+/// The download checks every resolved address and every redirect again.
 pub fn check_subscription_host(url: &str) -> std::result::Result<(), String> {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -930,8 +931,17 @@ impl<P: Platform> Daemon<P> {
             };
             (item.url.clone(), item.kind, store.rule_path(id))
         };
+        let hosts = if self
+            .inner
+            .allow_local_urls
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            fiend_app::subscription::Hosts::Any
+        } else {
+            fiend_app::subscription::Hosts::Public
+        };
         let result = tokio::task::spawn_blocking(move || {
-            fiend_app::subscription::refresh_rule_file(&url, app_kind(kind), &path)
+            fiend_app::subscription::refresh_rule_file(&url, app_kind(kind), &path, hosts)
         })
         .await
         .map_err(|error| error.to_string())

@@ -1,11 +1,13 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::convert::Infallible;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash};
 use axum::Json;
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{ConnectInfo, FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -20,49 +22,140 @@ use crate::{ApiError, ApiResult, App, now};
 pub const COOKIE: &str = "fiend_session";
 const IDLE: i64 = 12 * 3600;
 const ABSOLUTE: i64 = 7 * 86400;
-const LOGIN_WINDOW: Duration = Duration::from_secs(60);
-const LOGIN_LIMIT: usize = 5;
+const FIRST_DELAY: Duration = Duration::from_secs(60);
+const MAX_DELAY: Duration = Duration::from_secs(15 * 60);
+const FORGET: Duration = Duration::from_secs(24 * 3600);
+const MAX_KEYS: usize = 10_000;
+pub const SOURCE_FREE: u32 = 5;
+pub const ACCOUNT_FREE: u32 = 50;
+pub const CODE_FREE: u32 = 5;
+pub const PASSWORD_FREE: u32 = 5;
+const MAX_NAME: usize = 64;
+
+struct Entry {
+    failures: u32,
+    last: Instant,
+    until: Instant,
+}
 
 #[derive(Default)]
 pub struct Limiter {
-    attempts: Mutex<HashMap<String, Vec<Instant>>>,
+    entries: Mutex<HashMap<String, Entry>>,
+}
+
+fn delay(failures: u32, free: u32) -> Duration {
+    if failures < free {
+        return Duration::ZERO;
+    }
+    FIRST_DELAY
+        .saturating_mul(1 << (failures - free).min(16))
+        .min(MAX_DELAY)
+}
+
+fn wait_message(wait: Duration) -> String {
+    let seconds = wait.as_secs().max(1);
+    if seconds <= 60 {
+        format!("Too many attempts. Wait {seconds} seconds and try again.")
+    } else {
+        format!(
+            "Too many attempts. Wait {} minutes and try again.",
+            seconds.div_ceil(60)
+        )
+    }
 }
 
 impl Limiter {
-    pub fn check(&self, key: &str) -> ApiResult<()> {
-        let mut attempts = self
-            .attempts
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let now = Instant::now();
-        attempts.retain(|_, list| {
-            list.retain(|at| now.duration_since(*at) < LOGIN_WINDOW);
-            !list.is_empty()
-        });
-        let used = attempts.get(key).map_or(0, Vec::len);
-        if used >= LOGIN_LIMIT {
-            return Err(ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Too many attempts. Wait one minute and try again.",
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn fail(&self, key: &str) {
-        self.attempts
+    fn entries(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
+        self.entries
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .entry(key.to_owned())
-            .or_default()
-            .push(Instant::now());
+    }
+
+    pub fn check(&self, key: &str) -> ApiResult<()> {
+        let now = Instant::now();
+        match self.entries().get(key) {
+            Some(entry) if entry.until > now => Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                wait_message(entry.until - now),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn fail(&self, key: &str, free: u32) {
+        let now = Instant::now();
+        let mut entries = self.entries();
+        if !entries.contains_key(key) && entries.len() >= MAX_KEYS {
+            entries.retain(|_, entry| now.duration_since(entry.last) < FORGET);
+            if entries.len() >= MAX_KEYS {
+                entries.retain(|_, entry| entry.until > now);
+            }
+            if entries.len() >= MAX_KEYS {
+                return;
+            }
+        }
+        let entry = entries.entry(key.to_owned()).or_insert(Entry {
+            failures: 0,
+            last: now,
+            until: now,
+        });
+        if now.duration_since(entry.last) >= FORGET {
+            entry.failures = 0;
+        }
+        entry.failures = entry.failures.saturating_add(1);
+        entry.last = now;
+        entry.until = now + delay(entry.failures, free);
     }
 
     pub fn clear(&self, key: &str) {
-        self.attempts
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(key);
+        self.entries().remove(key);
+    }
+}
+
+pub struct Client {
+    pub source: String,
+    pub https: bool,
+}
+
+fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn source_key(ip: IpAddr) -> String {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => {
+            let [a, b, c, d, ..] = ip.segments();
+            format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
+        }
+    }
+}
+
+pub fn client(headers: &HeaderMap, peer: Option<SocketAddr>) -> Client {
+    let proxied = peer.is_some_and(|peer| peer.ip().to_canonical().is_loopback());
+    let forwarded = proxied
+        .then(|| header_text(headers, "x-real-ip").and_then(|ip| ip.trim().parse::<IpAddr>().ok()))
+        .flatten();
+    let source = forwarded
+        .or(peer.map(|peer| peer.ip()))
+        .map_or_else(|| "unknown".to_owned(), source_key);
+    let https = header_text(headers, header::ORIGIN.as_str())
+        .is_some_and(|origin| origin.starts_with("https://"))
+        || (proxied
+            && header_text(headers, "x-forwarded-proto")
+                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https")));
+    Client { source, https }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for Client {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0);
+        Ok(client(&parts.headers, peer))
     }
 }
 
@@ -173,8 +266,23 @@ pub fn decode_base32(text: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
+fn code_key(admin_id: i64) -> String {
+    format!("code:{admin_id}")
+}
+
 impl App {
-    pub fn check_totp(&self, admin_id: i64, secret_hex: &str, code: &str) -> bool {
+    pub fn verify_code(&self, admin_id: i64, secret_hex: &str, code: &str) -> ApiResult<bool> {
+        let key = code_key(admin_id);
+        self.limiter.check(&key)?;
+        if self.totp_matches(admin_id, secret_hex, code) {
+            self.limiter.clear(&key);
+            return Ok(true);
+        }
+        self.limiter.fail(&key, CODE_FREE);
+        Ok(false)
+    }
+
+    fn totp_matches(&self, admin_id: i64, secret_hex: &str, code: &str) -> bool {
         let Ok(secret) = hex::decode(secret_hex) else {
             return false;
         };
@@ -310,9 +418,10 @@ async fn create_session(app: &App, admin_id: i64) -> ApiResult<String> {
     Ok(token)
 }
 
-fn session_cookie(token: &str) -> HeaderValue {
+fn session_cookie(token: &str, max_age: i64, secure: bool) -> HeaderValue {
+    let secure = if secure { "; Secure" } else { "" };
     HeaderValue::from_str(&format!(
-        "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={ABSOLUTE}"
+        "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
     ))
     .expect("cookie is ASCII")
 }
@@ -379,11 +488,13 @@ pub async fn setup_totp(
 
 pub async fn setup_admin(
     State(app): State<App>,
+    client: Client,
     Json(input): Json<SetupAdmin>,
 ) -> ApiResult<Response> {
-    app.limiter.check("setup")?;
+    let key = format!("setup:{}", client.source);
+    app.limiter.check(&key)?;
     if !app.setup_open().await || !token_matches(&input.token, &app.config.setup_token) {
-        app.limiter.fail("setup");
+        app.limiter.fail(&key, SOURCE_FREE);
         return Err(ApiError::not_found());
     }
     check_name(&input.name, "name")?;
@@ -419,28 +530,42 @@ pub async fn setup_admin(
     .await;
     let token = create_session(&app, id).await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, session_cookie(&token));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie(&token, ABSOLUTE, client.https),
+    );
     Ok(response)
 }
 
-pub async fn login(State(app): State<App>, Json(input): Json<Login>) -> ApiResult<Response> {
-    let key = format!("login:{}", input.name);
-    app.limiter.check(&key)?;
-    app.limiter.check("login")?;
+fn login_failed() -> ApiError {
+    ApiError::new(
+        StatusCode::UNAUTHORIZED,
+        "The name, password, or code is not correct.",
+    )
+}
+
+pub async fn login(
+    State(app): State<App>,
+    client: Client,
+    Json(input): Json<Login>,
+) -> ApiResult<Response> {
+    let source_key = format!("login-source:{}", client.source);
+    app.limiter.check(&source_key)?;
+    if input.name.len() > MAX_NAME {
+        app.limiter.fail(&source_key, SOURCE_FREE);
+        return Err(login_failed());
+    }
+    let account_key = format!("login-name:{}", input.name);
+    app.limiter.check(&account_key)?;
     let row: Option<(i64, String, Option<String>)> =
         sqlx::query_as("SELECT id, password_hash, totp_secret FROM admins WHERE name = ?")
             .bind(&input.name)
             .fetch_optional(&app.db)
             .await?;
     let fail = |app: &App| {
-        app.limiter.fail(&key);
-        app.limiter.fail("login");
-        ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "The name, password, or code is not correct.",
-        )
+        app.limiter.fail(&source_key, SOURCE_FREE);
+        app.limiter.fail(&account_key, ACCOUNT_FREE);
+        login_failed()
     };
     let Some((id, hash, totp_secret)) = row else {
         static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -448,36 +573,40 @@ pub async fn login(State(app): State<App>, Json(input): Json<Login>) -> ApiResul
         let _ = verify_password(&input.password, dummy);
         return Err(fail(&app));
     };
+    if totp_secret.is_some() {
+        app.limiter.check(&code_key(id))?;
+    }
     if !verify_password(&input.password, &hash) {
         return Err(fail(&app));
     }
     if let Some(secret) = &totp_secret {
         let code = input.totp_code.as_deref().unwrap_or("");
-        if !app.check_totp(id, secret, code) {
+        if !app.verify_code(id, secret, code)? {
             return Err(fail(&app));
         }
     }
-    app.limiter.clear(&key);
+    app.limiter.clear(&source_key);
+    app.limiter.clear(&account_key);
     let token = create_session(&app, id).await?;
     app.audit(Some(id), "login", &format!("admin {}", input.name), "")
         .await;
     let mut response = StatusCode::NO_CONTENT.into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, session_cookie(&token));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie(&token, ABSOLUTE, client.https),
+    );
     Ok(response)
 }
 
-pub async fn logout(State(app): State<App>, admin: Admin) -> ApiResult<Response> {
+pub async fn logout(State(app): State<App>, client: Client, admin: Admin) -> ApiResult<Response> {
     sqlx::query("DELETE FROM sessions WHERE id_hash = ?")
         .bind(&admin.session_hash)
         .execute(&app.db)
         .await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        HeaderValue::from_static("fiend_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
-    );
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, session_cookie("", 0, client.https));
     Ok(response)
 }
 
@@ -492,8 +621,68 @@ pub fn require_code(app: &App, admin: &Admin, code: &str) -> ApiResult<()> {
             "Turn on two-factor sign-in before you change admins.",
         )
     })?;
-    if !app.check_totp(admin.id, secret, code) {
+    if !app.verify_code(admin.id, secret, code)? {
         return Err(ApiError::field("current_code", "The code is not correct."));
     }
     Ok(())
+}
+
+pub async fn confirm_identity(
+    app: &App,
+    admin: &Admin,
+    password: &str,
+    code: Option<&str>,
+) -> ApiResult<()> {
+    let key = format!("password:{}", admin.id);
+    app.limiter.check(&key)?;
+    let hash: String = sqlx::query_scalar("SELECT password_hash FROM admins WHERE id = ?")
+        .bind(admin.id)
+        .fetch_one(&app.db)
+        .await?;
+    if !verify_password(password, &hash) {
+        app.limiter.fail(&key, PASSWORD_FREE);
+        return Err(ApiError::field(
+            "current",
+            "The current password is not correct.",
+        ));
+    }
+    app.limiter.clear(&key);
+    if let Some(secret) = &admin.totp_secret
+        && !app.verify_code(admin.id, secret, code.unwrap_or(""))?
+    {
+        return Err(ApiError::field("totp_code", "The code is not correct."));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delay_doubles_after_free_failures_and_stops_at_the_cap() {
+        assert_eq!(delay(4, 5), Duration::ZERO);
+        assert_eq!(delay(5, 5), FIRST_DELAY);
+        assert_eq!(delay(6, 5), FIRST_DELAY * 2);
+        assert_eq!(delay(8, 5), FIRST_DELAY * 8);
+        assert_eq!(delay(9, 5), MAX_DELAY);
+        assert_eq!(delay(u32::MAX, 5), MAX_DELAY);
+    }
+
+    #[test]
+    fn limiter_blocks_and_clears() {
+        let limiter = Limiter::default();
+        for _ in 0..4 {
+            limiter.fail("a", 5);
+        }
+        assert!(limiter.check("a").is_ok());
+        limiter.fail("a", 5);
+        assert_eq!(
+            limiter.check("a").unwrap_err().status,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert!(limiter.check("b").is_ok());
+        limiter.clear("a");
+        assert!(limiter.check("a").is_ok());
+    }
 }

@@ -5,10 +5,9 @@
   import Field from '#lib/components/Field.svelte';
   import Select from '#lib/components/Select.svelte';
   import Dialog from '#lib/components/Dialog.svelte';
-  import Confirm from '#lib/components/Confirm.svelte';
   import Qr from '#lib/components/Qr.svelte';
   import CopyField from '#lib/components/CopyField.svelte';
-  import { api, fieldErrors, loadSession } from '#lib/api/client.ts';
+  import { api, base64Text, fieldErrors, loadSession } from '#lib/api/client.ts';
   import { session } from '#lib/stores/session.svelte.ts';
   import { setTheme, theme, type Theme } from '#lib/stores/theme.svelte.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
@@ -43,6 +42,11 @@
   let backupBusy = $state(false);
   let restoreOpen = $state(false);
   let restoreFile = $state<File | null>(null);
+  let restorePassword = $state('');
+  let restoreCode = $state('');
+  let restoreFields = $state<Record<string, string>>({});
+  let restoreError = $state('');
+  let restoreBusy = $state(false);
 
   const me = $derived(session.info?.admin);
 
@@ -137,6 +141,40 @@
       backupBusy = false;
     }
   }
+
+  function openRestore(file: File | null) {
+    restoreFile = file;
+    restorePassword = '';
+    restoreCode = '';
+    restoreFields = {};
+    restoreError = '';
+    if (file) restoreOpen = true;
+  }
+
+  async function restore(event: SubmitEvent) {
+    event.preventDefault();
+    restoreFields = {};
+    restoreError = '';
+    if (!restorePassword) restoreFields.current = 'Enter the current password.';
+    if (me?.totp && !restoreCode.trim()) restoreFields.totp_code = 'Enter the code from your app.';
+    if (!restoreFile || Object.keys(restoreFields).length) return;
+    restoreBusy = true;
+    try {
+      const headers: Record<string, string> = { 'x-current-password': base64Text(restorePassword) };
+      if (me?.totp) headers['x-current-code'] = restoreCode.trim();
+      await api.upload('/restore', await restoreFile.arrayBuffer(), headers);
+      restoreOpen = false;
+      toast('Restarting');
+      setTimeout(() => location.assign('/login'), 4000);
+    } catch (failure) {
+      const result = fieldErrors(failure);
+      restoreError = result.form ?? '';
+      restoreFields = result.fields;
+    } finally {
+      restorePassword = '';
+      restoreBusy = false;
+    }
+  }
 </script>
 
 <svelte:head><title>Settings · fiend</title></svelte:head>
@@ -192,7 +230,7 @@
     {#if me?.totp}<div class="code"><Field label="Two-factor code" id="backup-code"><input id="backup-code" inputmode="numeric" autocomplete="one-time-code" bind:value={backupCode} /></Field></div>{/if}
     <Button icon="down" busy={backupBusy} onclick={backup}>Download backup</Button>
     <label class="upload">
-      <input class="visually-hidden" type="file" accept=".db,application/vnd.sqlite3,application/octet-stream" onchange={(event) => { restoreFile = (event.currentTarget as HTMLInputElement).files?.[0] ?? null; (event.currentTarget as HTMLInputElement).value = ''; if (restoreFile) restoreOpen = true; }} />
+      <input class="visually-hidden" type="file" accept=".db,application/vnd.sqlite3,application/octet-stream" onchange={(event) => { const input = event.currentTarget as HTMLInputElement; const file = input.files?.[0] ?? null; input.value = ''; openRestore(file); }} />
       Restore from file
     </label>
   </div>
@@ -240,7 +278,15 @@
   {#snippet actions()}<Button kind="ghost" onclick={() => (removeAdminOpen = false)}>Cancel</Button><Button kind="danger" onclick={async () => { try { await api.del(`/admins/${removingAdmin?.id}?code=${encodeURIComponent(removeCode)}`); removeAdminOpen = false; toast('Admin removed'); await load(); } catch (failure) { toast(fieldErrors(failure).form ?? Object.values(fieldErrors(failure).fields)[0] ?? 'Failed', true); } }}>Remove</Button>{/snippet}
 </Dialog>
 
-<Confirm bind:open={restoreOpen} title="Restore from {restoreFile?.name ?? ''}" message="All panel data is replaced. The panel restarts." action="Restore" onconfirm={async () => { if (restoreFile) await api.upload('/restore', await restoreFile.arrayBuffer()); toast('Restarting'); setTimeout(() => location.assign('/login'), 4000); }} />
+<Dialog bind:open={restoreOpen} title="Restore from {restoreFile?.name ?? ''}">
+  <form id="restore-form" novalidate class="stack" onsubmit={restore}>
+    <p>All panel data is replaced. The panel restarts.</p>
+    {#if restoreError}<p class="note error" role="alert">{restoreError}</p>{/if}
+    <Field label="Current password" id="restore-password" error={restoreFields.current}><input id="restore-password" type="password" autocomplete="current-password" bind:value={restorePassword} /></Field>
+    {#if me?.totp}<Field label="Two-factor code" id="restore-code" error={restoreFields.totp_code}><input id="restore-code" inputmode="numeric" autocomplete="one-time-code" bind:value={restoreCode} /></Field>{/if}
+  </form>
+  {#snippet actions()}<Button kind="ghost" onclick={() => (restoreOpen = false)}>Cancel</Button><Button kind="danger" type="submit" form="restore-form" busy={restoreBusy}>Restore</Button>{/snippet}
+</Dialog>
 
 <style>
   .columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; align-items: start; }

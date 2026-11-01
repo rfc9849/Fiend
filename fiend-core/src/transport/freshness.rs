@@ -1,13 +1,39 @@
-use std::collections::HashMap;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const SHARDS: usize = 64;
+pub const DEFAULT_MAX_ENTRIES: usize = 1 << 20;
+
+#[derive(Default)]
+struct Shard {
+    seen: HashSet<[u8; 32]>,
+    order: VecDeque<([u8; 32], Instant)>,
+}
+
+impl Shard {
+    fn expire(&mut self, now: Instant, ttl: Duration) {
+        while let Some((random, seen_at)) = self.order.front() {
+            if now.duration_since(*seen_at) <= ttl {
+                break;
+            }
+            self.seen.remove(random);
+            self.order.pop_front();
+        }
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some((random, _)) = self.order.pop_front() {
+            self.seen.remove(&random);
+        }
+    }
+}
 
 pub struct FreshnessCheck {
     ttl: Duration,
-    shards: Vec<Mutex<HashMap<[u8; 32], Instant>>>,
+    shard_limit: usize,
+    shards: Vec<Mutex<Shard>>,
     started: Instant,
     last_purge: AtomicU64,
     purge_interval: Duration,
@@ -15,9 +41,14 @@ pub struct FreshnessCheck {
 
 impl FreshnessCheck {
     pub fn new(ttl: Duration) -> Self {
+        Self::with_limit(ttl, DEFAULT_MAX_ENTRIES)
+    }
+
+    pub fn with_limit(ttl: Duration, max_entries: usize) -> Self {
         Self {
             ttl,
-            shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
+            shard_limit: max_entries.div_ceil(SHARDS).max(1),
+            shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
             started: Instant::now(),
             last_purge: AtomicU64::new(0),
             purge_interval: (ttl / 4).clamp(Duration::from_secs(1), Duration::from_secs(60)),
@@ -28,12 +59,37 @@ impl FreshnessCheck {
         self.maybe_purge();
 
         let shard = &self.shards[random[0] as usize % SHARDS];
-        let mut seen = shard.lock().expect("freshness shard lock");
-        if seen.contains_key(random) {
+        let mut shard = shard.lock().unwrap_or_else(|error| error.into_inner());
+        if shard.seen.contains(random) {
             return false;
         }
-        seen.insert(*random, Instant::now());
+        let now = Instant::now();
+        if shard.order.len() >= self.shard_limit {
+            shard.expire(now, self.ttl);
+        }
+        while shard.order.len() >= self.shard_limit {
+            shard.evict_oldest();
+        }
+        shard.seen.insert(*random);
+        shard.order.push_back((*random, now));
         true
+    }
+
+    pub fn len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .order
+                    .len()
+            })
+            .sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     fn maybe_purge(&self) {
@@ -54,8 +110,10 @@ impl FreshnessCheck {
     pub fn purge(&self) {
         let now = Instant::now();
         for shard in &self.shards {
-            let mut seen = shard.lock().expect("freshness shard lock");
-            seen.retain(|_, seen_at| now.duration_since(*seen_at) <= self.ttl);
+            shard
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .expire(now, self.ttl);
         }
     }
 }
@@ -78,7 +136,26 @@ mod tests {
         let guard = FreshnessCheck::new(Duration::ZERO);
         let random = [3u8; 32];
         assert!(guard.check(&random));
+        std::thread::sleep(Duration::from_millis(2));
         guard.purge();
+        assert!(guard.is_empty());
         assert!(guard.check(&random));
+    }
+
+    #[test]
+    fn size_is_capped_by_evicting_the_oldest_entry() {
+        let guard = FreshnessCheck::with_limit(Duration::from_secs(3600), SHARDS * 2);
+        let random = |index: u8| {
+            let mut random = [0u8; 32];
+            random[1] = index;
+            random
+        };
+        for index in 0..10 {
+            assert!(guard.check(&random(index)));
+        }
+        assert_eq!(guard.len(), 2);
+        assert!(!guard.check(&random(9)));
+        assert!(!guard.check(&random(8)));
+        assert!(guard.check(&random(0)), "the oldest entry was evicted");
     }
 }

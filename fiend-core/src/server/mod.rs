@@ -1,9 +1,11 @@
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use tokio::io::split;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, split};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
@@ -22,6 +24,9 @@ pub struct ServerConfig {
     pub mux: mux::Config,
     pub udp_idle: Duration,
     pub max_connections: usize,
+    pub max_user_sessions: usize,
+    pub max_user_lanes: usize,
+    pub tcp_idle: Duration,
     pub target: TargetPolicy,
     pub tcp_notsent_lowat: u32,
 }
@@ -36,6 +41,9 @@ impl ServerConfig {
             mux: mux::Config::default(),
             udp_idle: Duration::from_secs(60),
             max_connections: 1024,
+            max_user_sessions: 64,
+            max_user_lanes: 1024,
+            tcp_idle: Duration::from_secs(300),
             target: TargetPolicy::default(),
             tcp_notsent_lowat: 0,
         }
@@ -147,7 +155,9 @@ impl Server {
                 match principal {
                     Some(Principal::Control) => crate::node::control::serve(*session, node).await?,
                     Some(Principal::User(entry)) => {
-                        let Some(mut guard) = node.begin_session(entry.clone()) else {
+                        let Some(mut guard) =
+                            node.begin_session_within(entry.clone(), config.max_user_sessions)
+                        else {
                             return Ok(());
                         };
                         tokio::select! {
@@ -202,11 +212,17 @@ async fn serve_mux(
             incoming = connection.accept() => {
                 let Some(incoming) = incoming? else { return Ok(()); };
                 if !user.active(crate::node::unix_time()) { return Ok(()); }
+                let Some(lane) = user.begin_lane(config.max_user_lanes) else {
+                    tracing::debug!(user = %user.id(), "user lane limit reached");
+                    incoming.reject(http::StatusCode::SERVICE_UNAVAILABLE);
+                    continue;
+                };
                 let meter = user.clone();
                 let incoming = incoming.with_meter(Arc::new(move |count, inbound| meter.note_bytes(count, inbound)));
                 let config = config.clone();
                 let node = node.clone();
                 lanes.spawn(async move {
+                    let _lane = lane;
                     if let Err(error) = handle_routed(incoming, config, node).await {
                         tracing::debug!(%error, "lane handler failed");
                     }
@@ -239,7 +255,7 @@ async fn handle_routed(
         LaneKind::Tcp => {
             let runtime = router.route(&target);
             tracing::debug!(outbound = %runtime.config.id, authority = %target, "routed TCP lane");
-            let mut upstream = match runtime.connect_tcp(&target, &context).await {
+            let upstream = match runtime.connect_tcp(&target, &context).await {
                 Ok(upstream) => {
                     crate::node::outbound::Metered::new(upstream, runtime.counters.clone())
                 }
@@ -250,7 +266,19 @@ async fn handle_routed(
                 }
             };
             let mut lane = incoming.accept().await?;
-            let _ = tokio::io::copy_bidirectional(&mut lane, &mut upstream).await;
+            let activity = Arc::new(AtomicU64::new(0));
+            let epoch = Instant::now();
+            let mut upstream = Active {
+                inner: upstream,
+                activity: activity.clone(),
+                epoch,
+            };
+            tokio::select! {
+                _ = tokio::io::copy_bidirectional(&mut lane, &mut upstream) => {}
+                _ = idle(&activity, epoch, config.tcp_idle) => {
+                    tracing::debug!(authority = %target, "TCP lane idle timeout");
+                }
+            }
             Ok(())
         }
         LaneKind::Udp => {
@@ -322,19 +350,7 @@ async fn bridge_udp(
         }
     };
 
-    let check = idle_timeout
-        .min(Duration::from_secs(1))
-        .max(Duration::from_millis(10));
-    let idle = async {
-        loop {
-            sleep(check).await;
-            if elapsed_ms(epoch).saturating_sub(activity.load(Ordering::Relaxed))
-                >= millis(idle_timeout)
-            {
-                return;
-            }
-        }
-    };
+    let idle = idle(&activity, epoch, idle_timeout);
 
     tokio::select! {
         _ = lane_to_socket => {}
@@ -357,4 +373,59 @@ fn millis(duration: Duration) -> u64 {
 
 fn touch(activity: &AtomicU64, epoch: Instant) {
     activity.store(elapsed_ms(epoch), Ordering::Relaxed);
+}
+
+async fn idle(activity: &AtomicU64, epoch: Instant, timeout: Duration) {
+    let check = timeout
+        .min(Duration::from_secs(1))
+        .max(Duration::from_millis(10));
+    loop {
+        sleep(check).await;
+        if elapsed_ms(epoch).saturating_sub(activity.load(Ordering::Relaxed)) >= millis(timeout) {
+            return;
+        }
+    }
+}
+
+struct Active<S> {
+    inner: S,
+    activity: Arc<AtomicU64>,
+    epoch: Instant,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Active<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            touch(&self.activity, self.epoch);
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Active<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(cx, data);
+        if matches!(result, Poll::Ready(Ok(count)) if count > 0) {
+            touch(&self.activity, self.epoch);
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }

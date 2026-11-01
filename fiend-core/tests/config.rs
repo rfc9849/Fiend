@@ -42,6 +42,9 @@ origin_host = "origin.example"
     );
     assert_eq!(settings.config.udp_idle, Duration::from_secs(60));
     assert_eq!(settings.config.max_connections, 1024);
+    assert_eq!(settings.config.max_user_sessions, 64);
+    assert_eq!(settings.config.max_user_lanes, 1024);
+    assert_eq!(settings.config.tcp_idle, Duration::from_secs(300));
     assert_eq!(settings.config.tcp_notsent_lowat, 0);
     assert_eq!(settings.config.target, TargetPolicy::default());
     assert_eq!(settings.config.mux.max_links, 8);
@@ -59,6 +62,8 @@ origin_host = "origin.example"
 origin_port = 9443
 replay_ttl_ms = 14400000
 max_connections = 2048
+max_user_sessions = 8
+max_user_lanes = 100
 tcp_notsent_lowat = 131072
 
 [target]
@@ -74,6 +79,9 @@ record_sizes = [35, 4000, 300]
 [udp]
 idle_ms = 2500
 
+[tcp]
+idle_ms = 60000
+
 [mux]
 max_links = 3
 "#,
@@ -86,6 +94,9 @@ max_links = 3
     assert_eq!(settings.config.replay_ttl, Duration::from_secs(4 * 3600));
     assert_eq!(settings.config.udp_idle, Duration::from_millis(2500));
     assert_eq!(settings.config.max_connections, 2048);
+    assert_eq!(settings.config.max_user_sessions, 8);
+    assert_eq!(settings.config.max_user_lanes, 100);
+    assert_eq!(settings.config.tcp_idle, Duration::from_secs(60));
     assert_eq!(settings.config.tcp_notsent_lowat, 131072);
     assert_eq!(
         settings.config.target,

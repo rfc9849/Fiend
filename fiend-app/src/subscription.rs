@@ -1,13 +1,83 @@
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+
+use fiend_core::target::TargetPolicy;
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 use crate::{AppError, RuleKind, RuleStats, inspect_rule_file};
 
 pub const MAX_DOWNLOAD_BYTES: usize = 32 << 20;
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_URL: usize = 2048;
+const MAX_REDIRECTS: u32 = 5;
+const METADATA: [IpAddr; 2] = [
+    IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hosts {
+    Public,
+    Any,
+}
+
+pub fn check_address(address: SocketAddr) -> io::Result<()> {
+    let policy = TargetPolicy {
+        allow_private: true,
+        allow_cgnat: true,
+        ..TargetPolicy::default()
+    };
+    policy.check(address)?;
+    let ip = address.ip().to_canonical();
+    if METADATA.contains(&ip) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("target {address} is not allowed"),
+        ));
+    }
+    Ok(())
+}
+
+type Check = Arc<dyn Fn(SocketAddr) -> io::Result<()> + Send + Sync>;
+
+struct CheckedResolver {
+    inner: DefaultResolver,
+    check: Check,
+}
+
+impl std::fmt::Debug for CheckedResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CheckedResolver")
+    }
+}
+
+impl Resolver for CheckedResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let resolved = self.inner.resolve(uri, config, timeout)?;
+        let mut allowed = self.empty();
+        let mut denied = None;
+        for address in &resolved {
+            match (self.check)(*address) {
+                Ok(()) => allowed.push(*address),
+                Err(error) => denied = Some(error),
+            }
+        }
+        if allowed.is_empty() {
+            return Err(denied.map_or(ureq::Error::HostNotFound, ureq::Error::Io));
+        }
+        Ok(allowed)
+    }
+}
 
 pub fn validate_url(url: &str) -> Result<String, AppError> {
     let trimmed = url.trim();
@@ -26,14 +96,35 @@ pub fn validate_url(url: &str) -> Result<String, AppError> {
     Ok(trimmed.to_owned())
 }
 
-pub fn download(url: &str) -> Result<Vec<u8>, AppError> {
-    let url = validate_url(url)?;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+fn agent(check: Option<Check>) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_global(Some(Duration::from_secs(60)))
-        .http_status_as_error(false)
-        .build()
-        .into();
+        .max_redirects(MAX_REDIRECTS)
+        .http_status_as_error(false);
+    match check {
+        None => config.build().into(),
+        Some(check) => ureq::Agent::with_parts(
+            config.proxy(None).build(),
+            DefaultConnector::default(),
+            CheckedResolver {
+                inner: DefaultResolver::default(),
+                check,
+            },
+        ),
+    }
+}
+
+pub fn download(url: &str, hosts: Hosts) -> Result<Vec<u8>, AppError> {
+    let check: Option<Check> = match hosts {
+        Hosts::Any => None,
+        Hosts::Public => Some(Arc::new(check_address)),
+    };
+    fetch(url, &agent(check))
+}
+
+fn fetch(url: &str, agent: &ureq::Agent) -> Result<Vec<u8>, AppError> {
+    let url = validate_url(url)?;
     let response = agent
         .get(&url)
         .header("User-Agent", "fiend")
@@ -85,8 +176,9 @@ pub fn refresh_rule_file(
     url: &str,
     kind: RuleKind,
     destination: &Path,
+    hosts: Hosts,
 ) -> Result<RuleStats, AppError> {
-    store_rule_file(&download(url)?, kind, destination)
+    store_rule_file(&download(url, hosts)?, kind, destination)
 }
 
 #[cfg(test)]
@@ -143,7 +235,7 @@ mod tests {
         let dir = directory("ok");
         let destination = dir.join("one.bin");
         let url = serve("200 OK", b"domain:a.ru\nfull:b.ru\n".to_vec());
-        let stats = refresh_rule_file(&url, RuleKind::Direct, &destination).unwrap();
+        let stats = refresh_rule_file(&url, RuleKind::Direct, &destination, Hosts::Any).unwrap();
         assert_eq!((stats.domains, stats.exact), (1, 1));
         assert!(destination.is_file());
         assert!(!destination.with_extension("tmp").exists());
@@ -156,7 +248,7 @@ mod tests {
         let destination = dir.join("one.bin");
         fs::write(&destination, b"domain:old.ru\n").unwrap();
         let url = serve("200 OK", b"regexp:x\n".to_vec());
-        assert!(refresh_rule_file(&url, RuleKind::Direct, &destination).is_err());
+        assert!(refresh_rule_file(&url, RuleKind::Direct, &destination, Hosts::Any).is_err());
         assert_eq!(fs::read(&destination).unwrap(), b"domain:old.ru\n");
         assert!(!destination.with_extension("tmp").exists());
         fs::remove_dir_all(dir).unwrap();
@@ -164,9 +256,82 @@ mod tests {
 
     #[test]
     fn http_errors_and_empty_bodies_fail() {
-        let error = download(&serve("404 Not Found", b"x".to_vec())).unwrap_err();
+        let error = download(&serve("404 Not Found", b"x".to_vec()), Hosts::Any).unwrap_err();
         assert!(error.to_string().contains("404"));
-        let error = download(&serve("200 OK", Vec::new())).unwrap_err();
+        let error = download(&serve("200 OK", Vec::new()), Hosts::Any).unwrap_err();
         assert!(error.to_string().contains("empty"));
+    }
+
+    fn redirect(location: String) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let head = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(head.as_bytes());
+        });
+        format!("http://{address}/list")
+    }
+
+    #[test]
+    fn local_and_metadata_addresses_are_refused_after_resolution() {
+        for address in [
+            "127.0.0.1:80",
+            "[::1]:80",
+            "[::ffff:127.0.0.1]:80",
+            "169.254.169.254:80",
+            "[fe80::1]:80",
+            "0.0.0.0:80",
+            "100.100.100.200:80",
+            "[fd00:ec2::254]:80",
+            "240.0.0.1:80",
+        ] {
+            assert!(
+                check_address(address.parse().unwrap()).is_err(),
+                "{address}"
+            );
+        }
+        for address in [
+            "93.184.215.14:443",
+            "192.168.1.5:80",
+            "10.0.0.2:80",
+            "100.64.0.1:80",
+            "[fd12::1]:80",
+        ] {
+            assert!(check_address(address.parse().unwrap()).is_ok(), "{address}");
+        }
+        let error =
+            download(&serve("200 OK", b"domain:a.ru\n".to_vec()), Hosts::Public).unwrap_err();
+        assert!(error.to_string().contains("not allowed"), "{error}");
+        let error = download("http://localhost:9/list", Hosts::Public).unwrap_err();
+        assert!(error.to_string().contains("not allowed"), "{error}");
+    }
+
+    #[test]
+    fn redirects_are_checked_again() {
+        let target = serve("200 OK", b"domain:a.ru\n".to_vec());
+        let bytes = download(&redirect(target), Hosts::Any).unwrap();
+        assert_eq!(bytes, b"domain:a.ru\n");
+        let first = redirect("http://127.0.0.1:9/list".into());
+        let port: u16 = first
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .trim_end_matches("/list")
+            .parse()
+            .unwrap();
+        let check: Check = Arc::new(move |address: SocketAddr| {
+            if address.port() == port {
+                Ok(())
+            } else {
+                check_address(address)
+            }
+        });
+        let error = fetch(&first, &agent(Some(check))).unwrap_err();
+        assert!(error.to_string().contains("not allowed"), "{error}");
     }
 }

@@ -6,7 +6,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -2023,23 +2023,7 @@ async fn change_password(
     admin: Admin,
     Json(input): Json<PasswordInput>,
 ) -> ApiResult<StatusCode> {
-    let hash: String = sqlx::query_scalar("SELECT password_hash FROM admins WHERE id = ?")
-        .bind(admin.id)
-        .fetch_one(&app.db)
-        .await?;
-    app.limiter.check(&format!("password:{}", admin.id))?;
-    if !auth::verify_password(&input.current, &hash) {
-        app.limiter.fail(&format!("password:{}", admin.id));
-        return Err(ApiError::field(
-            "current",
-            "The current password is not correct.",
-        ));
-    }
-    if let Some(secret) = &admin.totp_secret
-        && !app.check_totp(admin.id, secret, input.totp_code.as_deref().unwrap_or(""))
-    {
-        return Err(ApiError::field("totp_code", "The code is not correct."));
-    }
+    auth::confirm_identity(&app, &admin, &input.current, input.totp_code.as_deref()).await?;
     auth::check_password_rules(&input.password)?;
     sqlx::query("UPDATE admins SET password_hash = ? WHERE id = ?")
         .bind(auth::hash_password(&input.password)?)
@@ -2115,7 +2099,7 @@ async fn backup(
     Json(input): Json<CodeInput>,
 ) -> ApiResult<Response> {
     if let Some(secret) = &admin.totp_secret
-        && !app.check_totp(admin.id, secret, &input.code)
+        && !app.verify_code(admin.id, secret, &input.code)?
     {
         return Err(ApiError::field("code", "The code is not correct."));
     }
@@ -2149,7 +2133,22 @@ async fn backup(
     Ok(response)
 }
 
-async fn restore(State(app): State<App>, admin: Admin, body: Bytes) -> ApiResult<StatusCode> {
+async fn restore(
+    State(app): State<App>,
+    admin: Admin,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<StatusCode> {
+    let password = headers
+        .get("x-current-password")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| STANDARD.decode(value.trim()).ok())
+        .and_then(|value| String::from_utf8(value).ok())
+        .unwrap_or_default();
+    let code = headers
+        .get("x-current-code")
+        .and_then(|value| value.to_str().ok());
+    auth::confirm_identity(&app, &admin, &password, code).await?;
     if !body.starts_with(b"SQLite format 3\0") {
         return Err(ApiError::bad("The file is not a panel database backup."));
     }

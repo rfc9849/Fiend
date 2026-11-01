@@ -386,6 +386,11 @@ async fn security(request: Request, next: Next) -> Response {
             .is_some_and(|(origin, host)| valid_origin(origin, host))
     });
     let event_stream = request.uri().path() == "/api/events";
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+    let https = auth::client(request.headers(), peer).https;
     let mut response = if !host_ok {
         StatusCode::BAD_REQUEST.into_response()
     } else if !origin_ok {
@@ -407,6 +412,12 @@ async fn security(request: Request, next: Next) -> Response {
         response
             .headers_mut()
             .insert(name, HeaderValue::from_static(value));
+    }
+    if https {
+        response.headers_mut().insert(
+            "strict-transport-security",
+            HeaderValue::from_static("max-age=31536000"),
+        );
     }
     if !event_stream {
         response

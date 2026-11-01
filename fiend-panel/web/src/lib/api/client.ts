@@ -19,8 +19,8 @@ export function setCsrf(token: string) {
 
 type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
-async function request<T>(method: Method, path: string, body?: unknown, raw?: Blob | ArrayBuffer): Promise<T> {
-  const headers: Record<string, string> = {};
+async function request<T>(method: Method, path: string, body?: unknown, raw?: Blob | ArrayBuffer, extra: Record<string, string> = {}): Promise<T> {
+  const headers: Record<string, string> = { ...extra };
   if (method !== 'GET') headers['x-csrf-token'] = csrf;
   let payload: BodyInit | undefined;
   if (raw !== undefined) {
@@ -61,8 +61,14 @@ export const api = {
   post: <T>(path: string, body: unknown = {}) => request<T>('POST', path, body),
   put: <T>(path: string, body: unknown) => request<T>('PUT', path, body),
   del: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body),
-  upload: <T>(path: string, data: Blob | ArrayBuffer) => request<T>('POST', path, undefined, data)
+  upload: <T>(path: string, data: Blob | ArrayBuffer, headers: Record<string, string> = {}) => request<T>('POST', path, undefined, data, headers)
 };
+
+export function base64Text(text: string): string {
+  let binary = '';
+  for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
 
 export async function loadSession(): Promise<SessionInfo | null> {
   try {

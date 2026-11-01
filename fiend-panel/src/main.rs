@@ -59,9 +59,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             app.start();
             let listener = tokio::net::TcpListener::bind(listen).await?;
             eprintln!("panel listening on {}", listener.local_addr()?);
-            axum::serve(listener, router(app))
-                .with_graceful_shutdown(shutdown())
-                .await?;
+            axum::serve(
+                listener,
+                router(app).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown())
+            .await?;
         }
         _ => {
             return Err(

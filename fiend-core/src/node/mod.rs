@@ -168,6 +168,37 @@ struct Counters {
     total: AtomicU64,
     new_sessions: AtomicU64,
     open_sessions: AtomicU64,
+    open_lanes: AtomicU64,
+}
+
+pub struct LaneGuard {
+    entry: Arc<UserEntry>,
+}
+
+impl Drop for LaneGuard {
+    fn drop(&mut self) {
+        self.entry
+            .counters
+            .open_lanes
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn take_slot(counter: &AtomicU64, limit: usize) -> bool {
+    let limit = u64::try_from(limit).unwrap_or(u64::MAX);
+    counter
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |open| {
+            (open < limit).then_some(open + 1)
+        })
+        .is_ok()
+}
+
+impl UserEntry {
+    pub fn begin_lane(self: &Arc<Self>, limit: usize) -> Option<LaneGuard> {
+        take_slot(&self.counters.open_lanes, limit).then(|| LaneGuard {
+            entry: self.clone(),
+        })
+    }
 }
 
 struct Snapshot {
@@ -664,10 +695,22 @@ impl Node {
     }
 
     pub fn begin_session(&self, entry: Arc<UserEntry>) -> Option<SessionGuard> {
+        self.begin_session_within(entry, usize::MAX)
+    }
+
+    pub fn begin_session_within(
+        &self,
+        entry: Arc<UserEntry>,
+        limit: usize,
+    ) -> Option<SessionGuard> {
         let snapshot = self.snapshot();
         if !entry.active(unix_time())
             || !snapshot.users.iter().any(|user| Arc::ptr_eq(user, &entry))
         {
+            return None;
+        }
+        if !take_slot(&entry.counters.open_sessions, limit) {
+            tracing::debug!(user = %entry.user.id, "user session limit reached");
             return None;
         }
         let id = self.inner.next_session.fetch_add(1, Ordering::Relaxed);
@@ -688,7 +731,6 @@ impl Node {
                 ),
             );
         entry.counters.new_sessions.fetch_add(1, Ordering::Relaxed);
-        entry.counters.open_sessions.fetch_add(1, Ordering::Relaxed);
         Some(SessionGuard {
             id,
             node: self.clone(),

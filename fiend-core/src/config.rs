@@ -81,6 +81,12 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
         "server udp idle_ms",
     )?;
 
+    let tcp_idle = option_duration(
+        file.tcp.idle_ms,
+        Duration::from_secs(300),
+        "server tcp idle_ms",
+    )?;
+
     let mut mux = mux::Config::default();
     file.mux.apply(&mut mux);
 
@@ -92,6 +98,13 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     config.mux = mux;
     config.udp_idle = udp_idle;
     config.max_connections = max_connections;
+    if let Some(limit) = file.max_user_sessions {
+        config.max_user_sessions = limit;
+    }
+    if let Some(limit) = file.max_user_lanes {
+        config.max_user_lanes = limit;
+    }
+    config.tcp_idle = tcp_idle;
     config.target = file.target.into_policy();
     config.tcp_notsent_lowat = socket_size(file.tcp_notsent_lowat, "server", "tcp_notsent_lowat")?;
 
@@ -159,6 +172,12 @@ pub fn build_server(mut config: ServerConfig) -> Result<ServerConfig, ConfigErro
     if config.max_connections == 0 {
         return Err(invalid("server max_connections must be greater than zero"));
     }
+    if config.max_user_sessions == 0 || config.max_user_lanes == 0 {
+        return Err(invalid(
+            "server max_user_sessions and max_user_lanes must be greater than zero",
+        ));
+    }
+    validate_duration(config.tcp_idle, "server tcp idle_ms")?;
     if config.origin.record_sizes.contains(&0) {
         return Err(invalid(
             "server origin record_sizes must be greater than zero",
@@ -199,20 +218,24 @@ struct ServerFile {
     origin_port: Option<u16>,
     replay_ttl_ms: Option<u64>,
     max_connections: Option<usize>,
+    max_user_sessions: Option<usize>,
+    max_user_lanes: Option<usize>,
     tcp_notsent_lowat: Option<u32>,
     #[serde(default)]
     origin: OriginFile,
     #[serde(default)]
     target: TargetFile,
     #[serde(default)]
-    udp: ServerUdpFile,
+    tcp: IdleFile,
+    #[serde(default)]
+    udp: IdleFile,
     #[serde(default)]
     mux: MuxFile,
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct ServerUdpFile {
+struct IdleFile {
     idle_ms: Option<u64>,
 }
 

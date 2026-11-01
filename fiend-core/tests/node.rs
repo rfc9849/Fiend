@@ -262,6 +262,62 @@ async fn invalid_and_failed_state_do_not_change_live_state_or_usage() {
 }
 
 #[tokio::test]
+async fn idle_tcp_lanes_are_closed() {
+    let dir = Temp::new();
+    let (mut config, state) = initial();
+    config.tcp_idle = Duration::from_millis(300);
+    let node = Node::load(dir.0.join("state.json"), CONTROL.to_vec(), state).unwrap();
+    let listener = fiend_core::net::bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = Server::managed(config, node.clone());
+    let task = tokio::spawn(async move { server.serve(listener).await });
+    let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let destination = Address::Ip(silent.local_addr().unwrap());
+    let silent_task = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (stream, _) = silent.accept().await.unwrap();
+            held.push(stream);
+        }
+    });
+    let alice = Client::new(client_config(address, &ALICE));
+    let mut lane = alice.open_tcp(&destination).await.unwrap();
+    let mut buffer = [0u8; 8];
+    let read = timeout(Duration::from_secs(5), lane.read(&mut buffer))
+        .await
+        .expect("the idle lane closes");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    task.abort();
+    silent_task.abort();
+}
+
+#[tokio::test]
+async fn user_sessions_and_lanes_are_capped() {
+    let dir = Temp::new();
+    let node = Node::load(dir.0.join("state.json"), CONTROL.to_vec(), initial().1).unwrap();
+    let hello = Template::from_json(TEMPLATE)
+        .unwrap()
+        .build(&ALICE)
+        .unwrap()
+        .record;
+    let (_, principal) = node.authenticate(&hello[5..], unix_time() as i64).unwrap();
+    let fiend_core::node::Principal::User(entry) = principal else {
+        panic!()
+    };
+    let first = node.begin_session_within(entry.clone(), 2).unwrap();
+    let second = node.begin_session_within(entry.clone(), 2).unwrap();
+    assert!(node.begin_session_within(entry.clone(), 2).is_none());
+    assert_eq!(node.stats().users[0].open_sessions, 2);
+    drop(first);
+    assert!(node.begin_session_within(entry.clone(), 2).is_some());
+    drop(second);
+    let lane = entry.begin_lane(1).unwrap();
+    assert!(entry.begin_lane(1).is_none());
+    drop(lane);
+    assert!(entry.begin_lane(1).is_some());
+}
+
+#[tokio::test]
 async fn traffic_limit_revokes_sessions_and_reset_epoch_restores_access() {
     let dir = Temp::new();
     let mut state = initial().1;

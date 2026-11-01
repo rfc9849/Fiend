@@ -782,3 +782,278 @@ async fn unreachable_nodes_report_errors() {
     let (status, body) = panel.get("/api/users/999").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+async fn raw(
+    router: &Router,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    peer: Option<&str>,
+    body: Body,
+) -> axum::response::Response {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "127.0.0.1:8080")
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let mut request = builder.body(body).unwrap();
+    if let Some(peer) = peer {
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    }
+    router.clone().oneshot(request).await.unwrap()
+}
+
+async fn login_from(
+    panel: &Panel,
+    peer: &str,
+    real_ip: Option<&str>,
+    password: &str,
+) -> StatusCode {
+    let mut headers = Vec::new();
+    if let Some(ip) = real_ip {
+        headers.push(("x-real-ip", ip));
+    }
+    let body = json!({"name": "owner", "password": password, "totp_code": null}).to_string();
+    raw(
+        &panel.router,
+        "POST",
+        "/api/login",
+        &headers,
+        Some(peer),
+        Body::from(body),
+    )
+    .await
+    .status()
+}
+
+#[tokio::test]
+async fn login_limits_use_the_source_address() {
+    let dir = Temp::new();
+    let mut panel = Panel::new(&dir.0).await;
+    panel.setup().await;
+    const GOOD: &str = "a long test password";
+    const BAD: &str = "wrong password value";
+    for _ in 0..5 {
+        assert_eq!(
+            login_from(&panel, "203.0.113.1:1000", None, BAD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        login_from(&panel, "203.0.113.1:1001", None, GOOD).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        login_from(&panel, "203.0.113.2:1000", None, GOOD).await,
+        StatusCode::NO_CONTENT,
+        "failures from one address do not block other addresses"
+    );
+    for _ in 0..5 {
+        assert_eq!(
+            login_from(&panel, "[2001:db8:1:2::1]:1", None, BAD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        login_from(&panel, "[2001:db8:1:2::9]:1", None, GOOD).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "an IPv6 /64 is one source"
+    );
+    for index in 0..5 {
+        let ip = format!("198.51.100.{index}");
+        assert_eq!(
+            login_from(&panel, "203.0.113.3:1", Some(&ip), BAD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        login_from(&panel, "203.0.113.3:1", Some("198.51.100.99"), GOOD).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a remote peer cannot set X-Real-IP"
+    );
+    for _ in 0..5 {
+        assert_eq!(
+            login_from(&panel, "127.0.0.1:1", Some("198.51.100.1"), BAD).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        login_from(&panel, "127.0.0.1:2", Some("198.51.100.1"), GOOD).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        login_from(&panel, "127.0.0.1:2", Some("198.51.100.2"), GOOD).await,
+        StatusCode::NO_CONTENT,
+        "a local proxy sets the source with X-Real-IP"
+    );
+}
+
+#[tokio::test]
+async fn https_requests_get_a_secure_cookie_and_hsts() {
+    let dir = Temp::new();
+    let panel = Panel::new(&dir.0).await;
+    let body = json!({"token": TOKEN, "name": "owner", "password": "a long test password", "totp_secret": null, "totp_code": null}).to_string();
+    let response = raw(
+        &panel.router,
+        "POST",
+        "/api/setup",
+        &[("origin", "https://127.0.0.1:8080")],
+        None,
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("; Secure")
+    );
+    assert!(response.headers().contains_key("strict-transport-security"));
+    let login =
+        json!({"name": "owner", "password": "a long test password", "totp_code": null}).to_string();
+    let response = raw(
+        &panel.router,
+        "POST",
+        "/api/login",
+        &[],
+        Some("203.0.113.1:1"),
+        Body::from(login.clone()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Secure")
+    );
+    assert!(!response.headers().contains_key("strict-transport-security"));
+    let response = raw(
+        &panel.router,
+        "POST",
+        "/api/login",
+        &[("x-forwarded-proto", "https")],
+        Some("203.0.113.1:1"),
+        Body::from(login.clone()),
+    )
+    .await;
+    assert!(
+        !response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Secure"),
+        "a remote peer cannot set the scheme"
+    );
+    let response = raw(
+        &panel.router,
+        "POST",
+        "/api/login",
+        &[("x-forwarded-proto", "https")],
+        Some("127.0.0.1:1"),
+        Body::from(login),
+    )
+    .await;
+    assert!(
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("; Secure")
+    );
+    assert!(response.headers().contains_key("strict-transport-security"));
+}
+
+#[tokio::test]
+async fn restore_needs_the_password_and_codes_are_rate_limited() {
+    use base64::Engine;
+    let dir = Temp::new();
+    let mut panel = Panel::new(&dir.0).await;
+    let (_, totp) = panel.get(&format!("/api/setup/{TOKEN}/totp")).await;
+    let secret = totp["secret"].as_str().unwrap().to_owned();
+    let (status, _) = panel
+        .post("/api/setup", json!({"token": TOKEN, "name": "owner", "password": "a long test password", "totp_secret": secret, "totp_code": totp_code(&secret)}))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    panel.refresh().await;
+    let cookie = format!("fiend_session={}", panel.cookie.clone().unwrap());
+    let csrf = panel.csrf.clone().unwrap();
+    let good = base64::engine::general_purpose::STANDARD.encode("a long test password");
+    let bad = base64::engine::general_purpose::STANDARD.encode("wrong password value");
+    let router = panel.router.clone();
+    let restore = async |password: Option<&str>, code: Option<&str>| {
+        let mut headers = vec![("cookie", cookie.as_str()), ("x-csrf-token", csrf.as_str())];
+        if let Some(password) = password {
+            headers.push(("x-current-password", password));
+        }
+        if let Some(code) = code {
+            headers.push(("x-current-code", code));
+        }
+        let response = raw(
+            &router,
+            "POST",
+            "/api/restore",
+            &headers,
+            None,
+            Body::from(&b"SQLite format 3\0x"[..]),
+        )
+        .await;
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 100_000).await.unwrap();
+        (
+            status,
+            serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+        )
+    };
+    let (status, body) = restore(None, None).await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("current")),
+        "{body}"
+    );
+    let (status, body) = restore(Some(&bad), Some("123456")).await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("current")),
+        "{body}"
+    );
+    let (status, body) = restore(Some(&good), None).await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("totp_code")),
+        "{body}"
+    );
+    for _ in 0..4 {
+        let (status, body) = panel.post("/api/backup", json!({"code": "x"})).await;
+        assert_eq!(
+            (status, body["field"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("code")),
+            "{body}"
+        );
+    }
+    let (status, _) = panel
+        .post("/api/backup", json!({"code": totp_code(&secret)}))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "five wrong codes block the next check"
+    );
+    let (status, _) = panel.del("/api/account/totp").await;
+    assert_ne!(status, StatusCode::NO_CONTENT);
+    let (status, _) = restore(Some(&good), Some(&totp_code(&secret))).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    panel.cookie = None;
+    let (status, _) = panel
+        .post("/api/login", json!({"name": "owner", "password": "a long test password", "totp_code": totp_code(&secret)}))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "sign-in uses the same code limit"
+    );
+}
