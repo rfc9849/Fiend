@@ -44,6 +44,16 @@ pub trait PacketIo: Send + Sync + 'static {
     fn send(&self, packet: &[u8]) -> impl Future<Output = io::Result<usize>> + Send;
 }
 
+impl<T: PacketIo> PacketIo for Arc<T> {
+    async fn recv(&self, packet: &mut [u8]) -> io::Result<usize> {
+        (**self).recv(packet).await
+    }
+
+    async fn send(&self, packet: &[u8]) -> io::Result<usize> {
+        (**self).send(packet).await
+    }
+}
+
 impl PacketIo for tun_rs::AsyncDevice {
     async fn recv(&self, packet: &mut [u8]) -> io::Result<usize> {
         self.recv(packet).await

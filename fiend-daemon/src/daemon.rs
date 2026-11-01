@@ -334,7 +334,8 @@ impl<P: Platform> Inner<P> {
         tracing::info!("tunnel connected");
         let stats_task = tokio::spawn(self.clone().stats_loop(tun.clone(), client.clone()));
 
-        let run = tun.run(device);
+        let device = Arc::new(device);
+        let run = tun.run(device.clone());
         tokio::pin!(run);
         let result = tokio::select! {
             result = &mut run => result,
@@ -346,6 +347,7 @@ impl<P: Platform> Inner<P> {
         tun.stop();
         stats_task.abort();
         drop(guard);
+        drop(device);
         result.map_err(|error| error.to_string())
     }
 

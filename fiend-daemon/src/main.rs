@@ -219,11 +219,11 @@ where
     }
     let listener = bind_socket(&socket, policy.group.as_deref(), &SystemDirectory)
         .map_err(|error| format!("cannot use {}: {error}", socket.display()))?;
-    tracing::info!(socket = %socket.display(), "daemon started");
     let daemon = Daemon::new(platform, store, logs);
-    let server = tokio::spawn(serve(daemon.clone(), listener, policy, shutdown.clone()));
-    ready();
     daemon.start().await;
+    let server = tokio::spawn(serve(daemon.clone(), listener, policy, shutdown.clone()));
+    tracing::info!(socket = %socket.display(), "daemon started");
+    ready();
     shutdown.cancelled().await;
     tracing::info!("daemon stopping");
     daemon.shutdown().await;
@@ -231,6 +231,95 @@ where
     #[cfg(unix)]
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    struct BlockingRecovery {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Platform for BlockingRecovery {
+        type Device = fiend_daemon::platform::NullDevice;
+        type Guard = ();
+
+        fn protect_socket(&self) -> fiend_core::net::ProtectSocket {
+            Arc::new(|_| Ok(()))
+        }
+
+        fn open(
+            &self,
+            _: &fiend_daemon::platform::NetworkRequest,
+            _: &dyn Fn(fiend_ipc::ConnectStep),
+            _: Arc<dyn Fn() + Send + Sync>,
+        ) -> std::io::Result<(Self::Device, Self::Guard)> {
+            unreachable!()
+        }
+
+        fn recover(&self) -> std::io::Result<()> {
+            self.entered.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clients_wait_until_network_recovery_finishes() {
+        let dir = std::env::temp_dir().join(format!("fiend-startup-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let uid = std::process::Command::new("id").arg("-u").output().unwrap();
+        assert!(uid.status.success());
+        let uid = std::str::from_utf8(&uid.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let args = RunArgs {
+            foreground: false,
+            socket: Some(socket.clone()),
+            store: Some(dir.clone()),
+            allow_uid: vec![uid],
+            no_network: false,
+            service: false,
+        };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let platform = BlockingRecovery {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        };
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(run(platform, args, shutdown.clone(), || {}));
+        tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                fiend_ipc::Client::connect(&socket, "startup-test"),
+            )
+            .await
+            .is_err()
+        );
+        release_tx.send(()).unwrap();
+        let client = tokio::time::timeout(
+            Duration::from_secs(5),
+            fiend_ipc::Client::connect(&socket, "startup-test"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(client.status().await.is_ok());
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[cfg(unix)]

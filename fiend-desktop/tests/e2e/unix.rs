@@ -107,8 +107,13 @@ fn managed_server(
 
 #[cfg(unix)]
 fn current_uid() -> u32 {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(std::env::temp_dir()).unwrap().uid()
+    let output = std::process::Command::new("id").arg("-u").output().unwrap();
+    assert!(output.status.success());
+    std::str::from_utf8(&output.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 struct Harness {
