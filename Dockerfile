@@ -7,6 +7,7 @@ FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS web
 WORKDIR /src/fiend-panel/web
 COPY fiend-panel/web/package.json fiend-panel/web/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+COPY fiend-desktop/assets/icons/ /src/fiend-desktop/assets/icons/
 COPY fiend-panel/web/ ./
 RUN npm run build
 
