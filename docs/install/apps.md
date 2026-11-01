@@ -1,6 +1,6 @@
 # Apps
 
-Files are in the [latest release](https://github.com/rfc9849/fiend/releases/latest). Replace `0.1.0` below with its version.
+Files are in the [latest release](https://github.com/rfc9849/Fiend/releases/latest). Replace `0.1.0` below with its version.
 
 ## Android
 

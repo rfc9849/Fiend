@@ -4,7 +4,7 @@ Needs Docker with Compose and free TCP ports 443 and 38029.
 
 ```sh
 mkdir fiend && cd fiend
-curl -fsSLO https://raw.githubusercontent.com/rfc9849/fiend/master/compose.yaml
+curl -fsSLO https://raw.githubusercontent.com/rfc9849/Fiend/master/compose.yaml
 docker compose up -d
 docker compose logs panel
 ```
