@@ -65,7 +65,7 @@ COPY --from=rust /out/ /usr/local/bin/
 COPY --from=wireproxy /out/wireproxy /usr/local/bin/wireproxy
 COPY docker/entrypoint.sh /usr/local/bin/fiend-entrypoint
 RUN apk add --no-cache --virtual .caps libcap-utils \
-    && setcap cap_net_bind_service=+ep /usr/local/bin/fiend-core \
+    && setcap cap_net_bind_service,cap_net_raw=+ep /usr/local/bin/fiend-core \
     && apk del .caps \
     && install -d -o fiend -g fiend -m 0700 /etc/fiend /var/lib/fiend /run/fiend
 USER fiend

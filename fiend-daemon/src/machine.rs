@@ -26,6 +26,7 @@ pub struct Machine {
     stats: Option<Stats>,
     applied: Option<Applied>,
     session: u64,
+    recovering: Option<u64>,
 }
 
 impl Default for Machine {
@@ -42,6 +43,7 @@ impl Machine {
             stats: None,
             applied: None,
             session: 0,
+            recovering: None,
         }
     }
 
@@ -81,6 +83,7 @@ impl Machine {
         self.profile_id = Some(applied.profile.id.clone());
         self.applied = Some(applied);
         self.stats = None;
+        self.recovering = None;
         self.session += 1;
         self.state = TunnelState::Connecting {
             step: ConnectStep::Server,
@@ -110,6 +113,28 @@ impl Machine {
         true
     }
 
+    pub fn reconnecting(&mut self) -> bool {
+        let TunnelState::Connected { since_ms } = self.state else {
+            return false;
+        };
+        self.recovering = Some(since_ms);
+        self.state = TunnelState::Connecting {
+            step: ConnectStep::Server,
+        };
+        true
+    }
+
+    pub fn reconnected(&mut self) -> bool {
+        match (self.recovering, &self.state) {
+            (Some(since_ms), TunnelState::Connecting { .. }) => {
+                self.recovering = None;
+                self.state = TunnelState::Connected { since_ms };
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn set_stats(&mut self, stats: Stats) -> bool {
         if matches!(self.state, TunnelState::Connected { .. }) {
             self.stats = Some(stats);
@@ -125,6 +150,7 @@ impl Machine {
             TunnelState::Connecting { .. } | TunnelState::Connected { .. }
         ) {
             self.state = TunnelState::Disconnecting;
+            self.recovering = None;
             true
         } else {
             false
@@ -155,6 +181,7 @@ impl Machine {
             self.applied = None;
         }
         self.stats = None;
+        self.recovering = None;
         self.state = next;
         true
     }
@@ -263,6 +290,31 @@ mod tests {
         machine.connected(1, None);
         machine.begin_disconnect();
         assert!(machine.finish(Some("closed".into())));
+        assert_eq!(machine.state(), &TunnelState::Disconnected);
+    }
+
+    #[test]
+    fn a_lost_server_shows_as_connecting_and_keeps_the_start_time() {
+        let mut machine = Machine::new();
+        machine.begin_connect(applied());
+        assert!(!machine.reconnecting());
+        assert!(!machine.reconnected());
+        machine.connected(7, None);
+        assert!(machine.reconnecting());
+        assert!(!machine.reconnecting());
+        assert_eq!(
+            machine.state(),
+            &TunnelState::Connecting {
+                step: ConnectStep::Server
+            }
+        );
+        assert!(machine.reconnected());
+        assert!(!machine.reconnected());
+        assert_eq!(machine.state(), &TunnelState::Connected { since_ms: 7 });
+        assert!(machine.reconnecting());
+        assert!(machine.begin_disconnect());
+        assert!(!machine.reconnected());
+        assert!(machine.finish(None));
         assert_eq!(machine.state(), &TunnelState::Disconnected);
     }
 

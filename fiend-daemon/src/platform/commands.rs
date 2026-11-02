@@ -10,6 +10,7 @@ use crate::journal::{Journal, JournalFile};
 
 pub const WRITE_RESOLV: &str = "@write-resolv";
 pub const RESTORE_FILE: &str = "@restore-file";
+const BLOCK_METRIC: u32 = u32::MAX;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
@@ -30,9 +31,17 @@ fn pair(apply: &str, undo: &str) -> Step {
 
 /// Policy routing as in wg-quick. Sockets with the mark use the main table.
 /// All other traffic uses a table with a default route to the tunnel.
-pub fn route_steps(iface: &str, table: u32) -> Vec<Step> {
+pub fn route_steps(iface: &str, table: u32, servers: &[std::net::IpAddr]) -> Vec<Step> {
     let mut steps = Vec::new();
     for family in ["-4", "-6"] {
+        steps.push(pair(
+            &format!(
+                "ip {family} route add unreachable default table {table} metric {BLOCK_METRIC}"
+            ),
+            &format!(
+                "ip {family} route del unreachable default table {table} metric {BLOCK_METRIC}"
+            ),
+        ));
         steps.push(pair(
             &format!("ip {family} route add default dev {iface} table {table}"),
             &format!("ip {family} route del default dev {iface} table {table}"),
@@ -45,6 +54,19 @@ pub fn route_steps(iface: &str, table: u32) -> Vec<Step> {
             &format!("ip {family} rule add table main suppress_prefixlength 0"),
             &format!("ip {family} rule del table main suppress_prefixlength 0"),
         ));
+        let mut seen = Vec::new();
+        for server in servers {
+            let server = server.to_canonical();
+            if server.is_ipv4() != (family == "-4") || seen.contains(&server) {
+                continue;
+            }
+            seen.push(server);
+            let prefix = if server.is_ipv4() { 32 } else { 128 };
+            steps.push(pair(
+                &format!("ip {family} rule add to {server}/{prefix} table main"),
+                &format!("ip {family} rule del to {server}/{prefix} table main"),
+            ));
+        }
     }
     steps
 }
@@ -118,11 +140,27 @@ pub fn undo_all(journal: &Journal, runner: &mut dyn Runner) -> usize {
     let mut failed = 0;
     for argv in journal.undo.iter().rev() {
         if let Err(error) = runner.run(argv) {
+            if already_undone(&error) {
+                tracing::debug!(command = %argv.join(" "), %error, "nothing to undo");
+                continue;
+            }
             failed += 1;
             tracing::warn!(command = %argv.join(" "), %error, "undo command failed");
         }
     }
     failed
+}
+
+fn already_undone(error: &io::Error) -> bool {
+    let text = error.to_string();
+    [
+        "No such process",
+        "Cannot find device",
+        "No such file or directory",
+        "does not exist",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 pub struct SystemRunner;
@@ -217,19 +255,59 @@ mod tests {
 
     #[test]
     fn route_steps_follow_wg_quick_for_both_families() {
-        let steps = route_steps("fiend0", 51820);
+        let steps = route_steps("fiend0", 51820, &[]);
         let text: Vec<String> = steps.iter().map(|s| s.apply.join(" ")).collect();
         assert!(text.contains(&"ip -4 route add default dev fiend0 table 51820".to_owned()));
         assert!(text.contains(&"ip -4 rule add not fwmark 51820 table 51820".to_owned()));
         assert!(text.contains(&"ip -4 rule add table main suppress_prefixlength 0".to_owned()));
         assert!(text.contains(&"ip -6 rule add not fwmark 51820 table 51820".to_owned()));
-        assert_eq!(steps.len(), 6);
+        assert_eq!(steps.len(), 8);
+        for family in ["-4", "-6"] {
+            let block = text
+                .iter()
+                .position(|line| {
+                    line == &format!(
+                        "ip {family} route add unreachable default table 51820 metric 4294967295"
+                    )
+                })
+                .expect("a blocking route stays when the device is gone");
+            let rule = text
+                .iter()
+                .position(|line| {
+                    line == &format!("ip {family} rule add not fwmark 51820 table 51820")
+                })
+                .unwrap();
+            assert!(block < rule);
+        }
         assert!(
             steps
                 .iter()
                 .all(|s| s.undo.as_ref().unwrap()[3] == "del"
                     || s.undo.as_ref().unwrap()[4] == "del")
         );
+    }
+
+    #[test]
+    fn server_addresses_keep_a_path_while_the_tunnel_is_down() {
+        let servers = [
+            "203.0.113.5".parse().unwrap(),
+            "::ffff:203.0.113.5".parse().unwrap(),
+            "2001:db8::7".parse().unwrap(),
+        ];
+        let steps = route_steps("fiend0", 51820, &servers);
+        let text: Vec<String> = steps.iter().map(|s| s.apply.join(" ")).collect();
+        let v4 = text
+            .iter()
+            .position(|line| line == "ip -4 rule add to 203.0.113.5/32 table main")
+            .unwrap();
+        let fwmark = text
+            .iter()
+            .position(|line| line == "ip -4 rule add not fwmark 51820 table 51820")
+            .unwrap();
+        assert!(v4 > fwmark, "added last, so the kernel checks it first");
+        assert!(text.contains(&"ip -6 rule add to 2001:db8::7/128 table main".to_owned()));
+        assert_eq!(text.iter().filter(|line| line.contains("203.0.113.5")).count(), 1);
+        assert_eq!(steps.len(), 10);
     }
 
     #[test]
@@ -263,9 +341,9 @@ mod tests {
         let file = file("order");
         let mut journal = Journal::default();
         let mut runner = Recorder::default();
-        let steps = route_steps("fiend0", 7);
+        let steps = route_steps("fiend0", 7, &[]);
         apply_steps(&steps, &mut journal, &file, &mut runner).unwrap();
-        assert_eq!(journal.undo.len(), 6);
+        assert_eq!(journal.undo.len(), 8);
         assert_eq!(file.load().unwrap(), journal);
         runner.seen.clear();
         assert_eq!(undo_all(&journal, &mut runner), 0);
@@ -275,7 +353,7 @@ mod tests {
         );
         assert_eq!(
             runner.seen.last().unwrap(),
-            "ip -4 route del default dev fiend0 table 7"
+            "ip -4 route del unreachable default table 7 metric 4294967295"
         );
     }
 
@@ -287,9 +365,29 @@ mod tests {
             fail_on: Some("-6 route add".into()),
             ..Recorder::default()
         };
-        assert!(apply_steps(&route_steps("fiend0", 7), &mut journal, &file, &mut runner).is_err());
-        assert_eq!(journal.undo.len(), 4);
-        assert_eq!(file.load().unwrap().undo.len(), 4);
+        assert!(
+            apply_steps(&route_steps("fiend0", 7, &[]), &mut journal, &file, &mut runner).is_err()
+        );
+        assert_eq!(journal.undo.len(), 5);
+        assert_eq!(file.load().unwrap().undo.len(), 5);
+    }
+
+    #[test]
+    fn changes_that_are_already_gone_are_not_failures() {
+        struct Gone;
+        impl Runner for Gone {
+            fn run(&mut self, argv: &[String]) -> io::Result<()> {
+                Err(io::Error::other(format!(
+                    "{}: RTNETLINK answers: No such process",
+                    argv.join(" ")
+                )))
+            }
+        }
+        let journal = Journal {
+            undo: vec![vec!["ip".into(), "route".into(), "del".into()]],
+            ..Journal::default()
+        };
+        assert_eq!(undo_all(&journal, &mut Gone), 0);
     }
 
     #[test]

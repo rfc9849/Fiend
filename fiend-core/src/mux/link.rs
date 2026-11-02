@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use h2::client::SendRequest;
 use h2::{Ping, PingPong, Reason};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, oneshot};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep, timeout, timeout_at};
@@ -20,6 +20,7 @@ use crate::transport::Session;
 
 pub(crate) const LOAD_INTERVAL: Duration = Duration::from_millis(250);
 const LOAD_COOLDOWN: Duration = Duration::from_secs(1);
+pub(crate) const STALE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Work {
@@ -57,6 +58,8 @@ pub(crate) struct LinkShared {
     last_inbound_ms: AtomicU64,
     rtt_us: AtomicU64,
     rtt_at_ms: AtomicU64,
+    check_requested: AtomicBool,
+    check: Notify,
     epoch: Instant,
     wake: Arc<Notify>,
 }
@@ -83,6 +86,8 @@ impl LinkShared {
             last_inbound_ms: AtomicU64::new(0),
             rtt_us: AtomicU64::new(u64::MAX),
             rtt_at_ms: AtomicU64::new(0),
+            check_requested: AtomicBool::new(false),
+            check: Notify::new(),
             epoch: now,
             wake,
         }
@@ -212,6 +217,82 @@ impl LinkShared {
         let last = self.last_inbound_ms.load(Ordering::Acquire);
         Duration::from_millis(self.elapsed_ms().saturating_sub(last))
     }
+
+    fn heard(&self) {
+        self.last_inbound_ms
+            .store(self.elapsed_ms(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_stale(&self) -> bool {
+        self.idle_for() >= STALE
+    }
+
+    pub(crate) fn request_check(&self) {
+        if !self.check_requested.swap(true, Ordering::AcqRel) {
+            self.check.notify_one();
+        }
+    }
+
+    fn take_check(&self) -> bool {
+        self.check_requested.swap(false, Ordering::AcqRel)
+    }
+}
+
+struct Heard<S> {
+    inner: S,
+    shared: Arc<LinkShared>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Heard<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            this.shared.heard();
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Heard<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
 }
 
 pub(crate) struct ClientLink {
@@ -245,11 +326,15 @@ impl ClientLink {
             .initial_max_send_streams(0)
             .enable_push(false);
 
+        let shared = Arc::new(LinkShared::new(wake));
+        let session = Heard {
+            inner: session,
+            shared: shared.clone(),
+        };
         let (sender, mut connection) = timeout_at(deadline, builder.handshake::<_, Bytes>(session))
             .await
             .map_err(|_| Error::Timeout)??;
         let ping_pong = connection.ping_pong();
-        let shared = Arc::new(LinkShared::new(wake));
 
         let driver_shared = shared.clone();
         let driver_sender = sender.clone();
@@ -294,6 +379,7 @@ impl ClientLink {
         if link.is_closed() {
             return Err(Error::Unavailable);
         }
+        link.shared.note_io(0, true);
         Ok(link)
     }
 
@@ -359,6 +445,24 @@ impl ClientLink {
             .await
             .map_err(|_| Error::Timeout)??;
         let (response, mut send) = sender.send_request(request, false)?;
+        let options = LaneOptions::client(
+            self.id,
+            self.shared.clone(),
+            config.lane_share,
+            config.bulk_lane_bytes,
+        );
+        if self.shared.is_stale() {
+            self.shared.request_check();
+        } else if kind == LaneKind::Tcp {
+            reservation.disarm();
+            return Ok(H2Lane::pending(
+                kind,
+                authority.to_owned(),
+                send,
+                response,
+                options,
+            ));
+        }
         let response = timeout(config.open_timeout, response)
             .await
             .map_err(|_| Error::Timeout)??;
@@ -374,12 +478,7 @@ impl ClientLink {
             authority.to_owned(),
             send,
             response.into_body(),
-            LaneOptions::client(
-                self.id,
-                self.shared.clone(),
-                config.lane_share,
-                config.bulk_lane_bytes,
-            ),
+            options,
         ))
     }
 
@@ -434,6 +533,16 @@ impl Timing {
             measure: config.rtt_interval.is_some(),
         }
     }
+
+    fn next_idle(&self) -> Duration {
+        let low = self.interval / 2;
+        let span = u64::try_from(self.interval.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let mut bytes = [0u8; 8];
+        rand::fill(&mut bytes);
+        low + Duration::from_millis(u64::from_be_bytes(bytes) % span)
+    }
 }
 
 async fn keepalive_loop(
@@ -443,17 +552,32 @@ async fn keepalive_loop(
     driver: AbortHandle,
 ) {
     let mut first = timing.measure;
+    let mut idle_wait = timing.next_idle();
     loop {
         if !first {
-            sleep(timing.tick).await;
+            let wait = if timing.measure {
+                timing.tick
+            } else {
+                idle_wait.saturating_sub(shared.idle_for())
+            };
+            let check = shared.check.notified();
+            tokio::pin!(check);
+            check.as_mut().enable();
+            if !shared.check_requested.load(Ordering::Acquire) {
+                tokio::select! {
+                    _ = sleep(wait) => {}
+                    _ = check => {}
+                }
+            }
         }
         first = false;
         if shared.is_closed() {
             return;
         }
-        let busy = shared.last_inbound_ms.load(Ordering::Acquire) != 0
-            && shared.idle_for() < timing.interval;
-        if busy && !timing.measure {
+        let checked = shared.take_check();
+        let quiet = shared.idle_for();
+        let due = timing.measure || quiet >= idle_wait || checked && quiet >= STALE;
+        if !due {
             continue;
         }
         let started = Instant::now();
@@ -473,6 +597,8 @@ async fn keepalive_loop(
         }
         shared.record_rtt(started.elapsed());
         shared.note_io(0, true);
+        shared.take_check();
+        idle_wait = timing.next_idle();
     }
 }
 
@@ -532,13 +658,73 @@ mod tests {
             .await
             .expect("client handshake");
         assert!(!link.is_closed());
-        tokio::time::advance(config.ping_interval + Duration::from_millis(1)).await;
+        tokio::time::advance(config.ping_interval / 2 - Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
         assert!(!link.is_closed());
+        tokio::time::advance(config.ping_interval).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
         tokio::time::advance(config.probe_timeout + Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
         assert!(link.is_closed());
         held.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_link_stays_quiet_and_a_stale_link_is_checked_on_use() {
+        use crate::crypto::RecordCipher;
+        use crate::mux::ServerConnection;
+
+        let (client, server) = tokio::io::duplex(64 << 10);
+        let session = |io| {
+            Session::new(
+                io,
+                RecordCipher::new(&[1; 32], [2; 12]),
+                RecordCipher::new(&[1; 32], [2; 12]),
+                16384,
+            )
+        };
+        let config = Config::default();
+        let server_config = config.clone();
+        let served = tokio::spawn(async move {
+            let mut connection = ServerConnection::handshake(session(server), &server_config)
+                .await
+                .expect("server handshake");
+            while let Ok(Some(_)) = connection.accept().await {}
+        });
+        let link = ClientLink::connect(session(client), &config, 1, Arc::new(Notify::new()))
+            .await
+            .expect("client handshake");
+        tokio::time::advance(config.ping_interval / 2 - Duration::from_millis(1)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            link.shared().rtt().is_none(),
+            "no ping before the idle wait"
+        );
+        assert!(link.shared().is_stale());
+        link.shared().request_check();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let (_, age) = link.shared().rtt().expect("the check sends a ping");
+        assert!(age < Duration::from_secs(1));
+        assert!(!link.shared().is_stale());
+        assert!(!link.is_closed());
+        served.abort();
+    }
+
+    #[test]
+    fn idle_waits_have_jitter_inside_the_range() {
+        let timing = Timing::new(&Config::default());
+        let waits: Vec<Duration> = (0..200).map(|_| timing.next_idle()).collect();
+        assert!(waits.iter().all(|wait| *wait >= timing.interval / 2));
+        assert!(waits.iter().all(|wait| *wait < timing.interval * 3 / 2));
+        assert!(waits.iter().any(|wait| *wait != waits[0]));
     }
 
     #[tokio::test(start_paused = true)]

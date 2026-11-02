@@ -179,7 +179,13 @@ async fn two_users_control_state_and_counters() {
     );
     assert!(control.call(Call::ApplyState(next)).await.is_err());
     let proxy_with_control = Client::new(client_config(address, &CONTROL));
-    assert!(proxy_with_control.open_tcp(&destination).await.is_err());
+    let refused = match proxy_with_control.open_tcp(&destination).await {
+        Err(_) => true,
+        Ok(mut lane) => timeout(Duration::from_secs(5), lane.read_u8())
+            .await
+            .map_or(true, |read| read.is_err()),
+    };
+    assert!(refused, "a control session must not carry proxy traffic");
     let mut rpc_with_user = ControlClient::connect(&client_config(address, &BOB))
         .await
         .unwrap();

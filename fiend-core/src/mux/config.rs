@@ -31,7 +31,7 @@ impl Default for Config {
             open_timeout: Duration::from_secs(45),
             settings_timeout: Duration::from_secs(15),
             target_timeout: Duration::from_secs(15),
-            ping_interval: Duration::from_secs(10),
+            ping_interval: Duration::from_secs(30),
             probe_timeout: Duration::from_secs(5),
             rtt_interval: None,
             surplus_idle: Duration::from_secs(30),
@@ -54,6 +54,9 @@ impl Config {
     }
 
     pub(crate) fn rtt_max_age(&self) -> Duration {
-        self.ping_tick() * 2 + self.probe_timeout
+        match self.rtt_interval {
+            Some(_) => self.ping_tick() * 2 + self.probe_timeout,
+            None => Duration::MAX,
+        }
     }
 }

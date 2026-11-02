@@ -262,8 +262,9 @@ mod tests {
         }
 
         fn recover(&self) -> std::io::Result<()> {
-            self.entered.send(()).unwrap();
-            self.release.lock().unwrap().recv().unwrap();
+            if self.entered.send(()).is_ok() {
+                self.release.lock().unwrap().recv().unwrap();
+            }
             Ok(())
         }
     }

@@ -51,6 +51,7 @@ struct State {
     backoff: Backoff,
     next_id: u64,
     dialing: bool,
+    offline: bool,
     dial_attempts: u64,
     dial_failures: u64,
     idle_closures: u64,
@@ -99,6 +100,7 @@ pub struct PoolStats {
     pub blocked_writers: usize,
     pub waiting_opens: usize,
     pub dialing: bool,
+    pub offline: bool,
     pub dial_attempts: u64,
     pub dial_failures: u64,
     pub idle_closures: u64,
@@ -127,6 +129,7 @@ where
                     backoff: Backoff::new(),
                     next_id: 1,
                     dialing: false,
+                    offline: false,
                     dial_attempts: 0,
                     dial_failures: 0,
                     idle_closures: 0,
@@ -218,6 +221,10 @@ where
 
     pub fn rtt(&self) -> Option<Duration> {
         self.inner.rtt()
+    }
+
+    pub fn is_offline(&self) -> bool {
+        self.inner.stats().offline
     }
 
     pub fn close(&self) {
@@ -325,6 +332,7 @@ impl<S> PoolInner<S> {
                 .sum(),
             waiting_opens: self.waiters.load(Ordering::Acquire),
             dialing: state.dialing,
+            offline: state.offline && links.is_empty(),
             dial_attempts: state.dial_attempts,
             dial_failures: state.dial_failures,
             idle_closures: state.idle_closures,
@@ -530,6 +538,7 @@ where
                     state.pressure_watermark =
                         state.links.iter().filter(|link| link.is_bulk()).count();
                 }
+                state.offline = false;
                 tracing::debug!(link_id = link.id(), "mux link ready");
                 state.links.push(Arc::new(link));
             }
@@ -537,6 +546,7 @@ where
             Err(error) => {
                 state.backoff.fail(&self.config);
                 state.dial_failures += 1;
+                state.offline = true;
                 tracing::debug!(%error, "mux link dial failed");
             }
         }

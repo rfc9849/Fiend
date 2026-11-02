@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::desync;
 use crate::dns::FakeDns;
+use crate::icmp::{self, Echo};
 use crate::packet::{FlowKey, Packet, Reassembly, Transport, udp_packets};
 use crate::resolve::{Resolver, parse_server};
 use crate::rules::{Route, RuleFile, Rules, is_blocked_udp_port, is_null_network};
@@ -296,8 +297,11 @@ enum Plan {
 enum Completed {
     Tcp(FlowKey),
     Udp(FlowKey, u64),
+    Icmp(FlowKey, u64),
     Infrastructure,
 }
+
+const MAX_ICMP_FLOWS: usize = 64;
 
 async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> io::Result<()> {
     let (stack, runner, _, listener) = netstack_smoltcp::StackBuilder::default()
@@ -354,6 +358,7 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
     });
     let mut tcp = HashSet::new();
     let mut udp: HashMap<FlowKey, (u64, mpsc::Sender<Vec<u8>>)> = HashMap::new();
+    let mut echoes: HashMap<FlowKey, (u64, mpsc::Sender<Echo>)> = HashMap::new();
     let mut next_id = 0u64;
     let mut reassembly = Reassembly::default();
     let mut buffer = vec![0; 65575];
@@ -368,6 +373,29 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                     Ok(None) => continue,
                     Err(_) => { context.drop_packet(); continue; }
                 };
+                if let Some(echo) = icmp::parse_echo_request(&raw) {
+                    if echo.destination.is_ipv6() && !context.options.ipv6 || is_null_network(echo.destination) {
+                        context.drop_packet();
+                        continue;
+                    }
+                    let key = FlowKey { source: SocketAddr::new(echo.source, echo.ident), destination: SocketAddr::new(echo.destination, 0) };
+                    if let Some((_, sender)) = echoes.get(&key) && !sender.is_closed() {
+                        if sender.try_send(echo).is_err() { context.drop_packet(); }
+                        continue;
+                    }
+                    echoes.remove(&key);
+                    if echoes.len() >= MAX_ICMP_FLOWS { context.drop_packet(); continue; }
+                    let Ok(destination) = context.destination(key.destination) else { context.drop_packet(); continue; };
+                    let (sender, receiver) = mpsc::channel(16);
+                    let _ = sender.try_send(echo);
+                    next_id = next_id.wrapping_add(1);
+                    let id = next_id;
+                    echoes.insert(key, (id, sender));
+                    let flow_context = context.clone();
+                    let output = output.clone();
+                    tasks.spawn(async move { let result = echo_flow(flow_context, destination, receiver, output).await; (Completed::Icmp(key, id), result) });
+                    continue;
+                }
                 let packet = match Packet::parse(&raw) { Ok(packet) => packet, Err(_) => { context.drop_packet(); continue; } };
                 if packet.key.destination.is_ipv6() && !context.options.ipv6 {
                     context.drop_packet();
@@ -432,6 +460,7 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                     Completed::Infrastructure => return result.and(Err(io::Error::other("TUN task stopped"))),
                     Completed::Tcp(key) => { tcp.remove(&key); }
                     Completed::Udp(key, id) => { if udp.get(&key).is_some_and(|(current, _)| *current == id) { udp.remove(&key); } }
+                    Completed::Icmp(key, id) => { if echoes.get(&key).is_some_and(|(current, _)| *current == id) { echoes.remove(&key); } }
                 }
                 if let Err(error) = result { tracing::debug!(%error, "TUN flow closed"); }
             }
@@ -602,6 +631,51 @@ async fn tcp_flow(
             copy_bidirectional(&mut stream, &mut lane).await?;
         }
     }
+    Ok(())
+}
+
+async fn echo_flow(
+    context: Arc<Context>,
+    destination: Address,
+    mut requests: mpsc::Receiver<Echo>,
+    output: mpsc::Sender<Vec<u8>>,
+) -> io::Result<()> {
+    let idle = context.options.udp_idle;
+    let Some(first) = requests.recv().await else {
+        return Ok(());
+    };
+    let flow = match context.plan(&destination).await {
+        Plan::Proxy => context.client.open_icmp(&destination).await.ok(),
+        Plan::Block | Plan::Direct { .. } => None,
+    };
+    let Some(flow) = flow else {
+        context.drop_packet();
+        while let Ok(Some(_)) = timeout(idle, requests.recv()).await {
+            context.drop_packet();
+        }
+        return Ok(());
+    };
+    let (mut sender, mut receiver) = flow.into_split();
+    sender
+        .send(&icmp::encode_payload(first.sequence, &first.data))
+        .await?;
+    let template = first;
+    loop {
+        tokio::select! {
+            request = timeout(idle, requests.recv()) => {
+                let Ok(Some(echo)) = request else { break };
+                sender.send(&icmp::encode_payload(echo.sequence, &echo.data)).await?;
+            }
+            response = receiver.recv() => {
+                let Some(response) = response? else { break };
+                let Some((sequence, data)) = icmp::decode_payload(&response.payload) else { continue };
+                if let Some(reply) = icmp::build_echo_reply(&template, sequence, data) {
+                    output.send(reply).await.map_err(io::Error::other)?;
+                }
+            }
+        }
+    }
+    let _ = sender.shutdown().await;
     Ok(())
 }
 

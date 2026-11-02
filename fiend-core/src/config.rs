@@ -83,7 +83,7 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
 
     let tcp_idle = option_duration(
         file.tcp.idle_ms,
-        Duration::from_secs(300),
+        crate::server::DEFAULT_TCP_IDLE,
         "server tcp idle_ms",
     )?;
 

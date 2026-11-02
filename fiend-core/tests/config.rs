@@ -44,7 +44,10 @@ origin_host = "origin.example"
     assert_eq!(settings.config.max_connections, 1024);
     assert_eq!(settings.config.max_user_sessions, 64);
     assert_eq!(settings.config.max_user_lanes, 1024);
-    assert_eq!(settings.config.tcp_idle, Duration::from_secs(300));
+    assert_eq!(
+        settings.config.tcp_idle,
+        Duration::from_secs(2 * 3600 + 4 * 60)
+    );
     assert_eq!(settings.config.tcp_notsent_lowat, 0);
     assert_eq!(settings.config.target, TargetPolicy::default());
     assert_eq!(settings.config.mux.max_links, 8);

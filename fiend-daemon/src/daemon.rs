@@ -332,7 +332,11 @@ impl<P: Platform> Inner<P> {
             self.emit_state();
         }
         tracing::info!("tunnel connected");
-        let stats_task = tokio::spawn(self.clone().stats_loop(tun.clone(), client.clone()));
+        let stats_task = tokio::spawn(self.clone().stats_loop(
+            session,
+            tun.clone(),
+            client.clone(),
+        ));
 
         let device = Arc::new(device);
         let run = tun.run(device.clone());
@@ -351,12 +355,31 @@ impl<P: Platform> Inner<P> {
         result.map_err(|error| error.to_string())
     }
 
-    async fn stats_loop(self: Arc<Self>, tun: Arc<TunEngine>, client: Client) {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+    async fn stats_loop(self: Arc<Self>, session: u64, tun: Arc<TunEngine>, client: Client) {
+        let period = Duration::from_secs(1);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last = (Instant::now(), 0u64, 0u64);
         loop {
             interval.tick().await;
+            let offline = client.is_offline();
+            let changed = {
+                let mut machine = lock(&self.machine);
+                machine.session() == session
+                    && if offline {
+                        machine.reconnecting()
+                    } else {
+                        machine.reconnected()
+                    }
+            };
+            if changed {
+                if offline {
+                    tracing::warn!("the server does not answer, connecting again");
+                } else {
+                    tracing::info!("the server answers again");
+                }
+                self.emit_state();
+            }
             let raw = tun.stats();
             let elapsed = last.0.elapsed().as_secs_f64().max(0.001);
             let rate = |now: u64, before: u64| (now.saturating_sub(before) as f64 / elapsed) as u64;
@@ -422,19 +445,49 @@ impl<P: Platform> Daemon<P> {
         self.inner.status()
     }
 
-    pub async fn start(&self) {
+    async fn recover_network(&self) {
         let platform = self.inner.platform.clone();
         match tokio::task::spawn_blocking(move || platform.recover()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::error!(%error, "cannot restore the network settings"),
             Err(error) => tracing::error!(%error, "network recovery failed"),
         }
-        let (auto, id) = {
+    }
+
+    pub async fn start(&self) {
+        let (auto, id, resume) = {
             let store = lock(&self.inner.store);
             let settings = store.settings();
-            (settings.connect_at_startup, settings.active_profile.clone())
+            let resume = store
+                .resume_profile()
+                .and_then(|id| store.profile(&id).cloned());
+            if resume.is_none() {
+                let _ = store.set_resume(None);
+            }
+            (
+                settings.connect_at_startup,
+                settings.active_profile.clone(),
+                resume,
+            )
         };
-        if auto && id.is_some() {
+        let keep_block = resume.as_ref().is_some_and(|profile| {
+            self.inner.platform.blocks_after_crash()
+                && profile
+                    .servers
+                    .iter()
+                    .all(|server| server.parse::<std::net::SocketAddr>().is_ok())
+        });
+        if !keep_block {
+            self.recover_network().await;
+        }
+        if let Some(profile) = resume {
+            tracing::warn!(profile = %profile.name, "the daemon stopped while connected, connecting again");
+            if let Err(error) = self.connect(Some(profile.id)).await {
+                tracing::warn!(%error, "connect after restart failed");
+                let _ = lock(&self.inner.store).set_resume(None);
+                self.recover_network().await;
+            }
+        } else if auto && id.is_some() {
             tracing::info!("connect at startup");
             if let Err(error) = self.connect(id).await {
                 tracing::warn!(%error, "connect at startup failed");
@@ -555,6 +608,7 @@ impl<P: Platform> Daemon<P> {
         };
         self.inner.emit_state();
         let cancel = CancellationToken::new();
+        let profile_id = profile.id.clone();
         let task = tokio::spawn(self.inner.clone().run_session(
             session,
             profile,
@@ -564,6 +618,9 @@ impl<P: Platform> Daemon<P> {
         ));
         *control = Some(Running { cancel, task });
         drop(control);
+        if let Err(error) = lock(&self.inner.store).set_resume(Some(&profile_id)) {
+            tracing::warn!(%error, "cannot save the connection state");
+        }
         self.spawn_refresh_stale();
         Ok(Reply::Ok)
     }
@@ -573,6 +630,10 @@ impl<P: Platform> Daemon<P> {
         if let Some(running) = control.take() {
             self.stop_running(running).await;
         }
+        if let Err(error) = lock(&self.inner.store).set_resume(None) {
+            tracing::warn!(%error, "cannot save the connection state");
+        }
+        self.recover_network().await;
         if lock(&self.inner.machine).dismiss() {
             self.inner.emit_state();
         }

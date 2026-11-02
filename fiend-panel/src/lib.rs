@@ -34,6 +34,15 @@ struct Assets;
 
 pub const PANEL_PORT: u16 = 38029;
 
+fn initial_listen(value: Option<&str>) -> Result<SocketAddr, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, PANEL_PORT))),
+        Some(value) => value
+            .parse()
+            .map_err(|_| format!("FIEND_PANEL_LISTEN is not an address and port: {value}")),
+    }
+}
+
 fn default_database() -> PathBuf {
     PathBuf::from("/var/lib/fiend/panel.db")
 }
@@ -78,7 +87,7 @@ impl Config {
             return Self::load(path);
         }
         let config = Self {
-            listen: SocketAddr::from((Ipv4Addr::UNSPECIFIED, PANEL_PORT)),
+            listen: initial_listen(std::env::var("FIEND_PANEL_LISTEN").ok().as_deref())?,
             setup_token: hex::encode(rand::random::<[u8; 32]>()),
             setup_expires_at: now() as u64 + 3600,
             database: default_database(),
@@ -444,4 +453,22 @@ pub async fn shutdown() {
 
 pub fn io_error(message: String) -> io::Error {
     io::Error::other(message)
+}
+
+#[cfg(test)]
+mod listen_tests {
+    use super::*;
+
+    #[test]
+    fn the_panel_listens_on_loopback_unless_told_otherwise() {
+        let local = initial_listen(None).unwrap();
+        assert!(local.ip().is_loopback());
+        assert_eq!(local.port(), PANEL_PORT);
+        assert_eq!(initial_listen(Some(" ")).unwrap(), local);
+        assert_eq!(
+            initial_listen(Some("0.0.0.0:8080")).unwrap(),
+            "0.0.0.0:8080".parse().unwrap()
+        );
+        assert!(initial_listen(Some("anywhere")).is_err());
+    }
 }

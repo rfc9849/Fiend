@@ -93,7 +93,7 @@ fn init_is_private_and_keeps_existing_config() {
     assert_eq!(first.setup_token, second.setup_token);
     assert_eq!(raw, fs::read(&path).unwrap());
     first.validate().unwrap();
-    assert!(first.listen.ip().is_unspecified());
+    assert!(first.listen.ip().is_loopback());
     assert_eq!(first.listen.port(), fiend_panel::PANEL_PORT);
     #[cfg(unix)]
     {

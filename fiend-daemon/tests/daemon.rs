@@ -716,3 +716,52 @@ async fn connect_without_a_profile_uses_the_first_one() {
     let status = wait_for(&mut events, |s| matches!(s, TunnelState::Connected { .. })).await;
     assert_eq!(status.profile_id.as_deref(), Some(profile.id.as_str()));
 }
+
+#[tokio::test]
+async fn a_daemon_that_stopped_while_connected_connects_again() {
+    let dir = std::env::temp_dir().join(format!("fiend-it-resume-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let server = fiend_server().await;
+    let mut store = Store::open(&dir).unwrap();
+    let profile = store
+        .upsert_profile(input("Resume", &server.to_string()))
+        .unwrap()
+        .unwrap();
+    let first = Daemon::new(NullPlatform, store, Arc::new(LogBuffer::new()));
+    first.start().await;
+    let mut events = first.events();
+    first
+        .handle(Request::Connect {
+            profile_id: Some(profile.id.clone()),
+        })
+        .await
+        .unwrap();
+    wait_for(&mut events, |state| {
+        matches!(state, TunnelState::Connected { .. })
+    })
+    .await;
+    drop(first);
+
+    let second = Daemon::new(
+        NullPlatform,
+        Store::open(&dir).unwrap(),
+        Arc::new(LogBuffer::new()),
+    );
+    let mut events = second.events();
+    second.start().await;
+    let status = wait_for(&mut events, |state| {
+        matches!(state, TunnelState::Connected { .. })
+    })
+    .await;
+    assert_eq!(status.profile_id.as_deref(), Some(profile.id.as_str()));
+    second.handle(Request::Disconnect).await.unwrap();
+
+    let third = Daemon::new(
+        NullPlatform,
+        Store::open(&dir).unwrap(),
+        Arc::new(LogBuffer::new()),
+    );
+    third.start().await;
+    assert_eq!(third.status().state, TunnelState::Disconnected);
+    let _ = std::fs::remove_dir_all(&dir);
+}

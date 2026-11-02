@@ -48,6 +48,10 @@ pub trait Platform: Send + Sync + 'static {
     fn recover(&self) -> io::Result<()> {
         Ok(())
     }
+
+    fn blocks_after_crash(&self) -> bool {
+        false
+    }
 }
 
 /// Engine only: no TUN device, no routes, no DNS change. For tests and for

@@ -43,7 +43,7 @@ impl ServerConfig {
             max_connections: 1024,
             max_user_sessions: 64,
             max_user_lanes: 1024,
-            tcp_idle: Duration::from_secs(300),
+            tcp_idle: DEFAULT_TCP_IDLE,
             target: TargetPolicy::default(),
             tcp_notsent_lowat: 0,
         }
@@ -124,10 +124,16 @@ impl Server {
         let node = self.inner.node.clone();
         let mut config = self.inner.config.clone();
         (config.origin_host, config.origin_port, config.origin) = node.origin();
+        let early = transport::EarlyOrigin::spawn(
+            config.origin_host.clone(),
+            config.origin_port,
+            EARLY_ORIGIN_DELAY,
+        );
         let mut principal = None;
         let outcome =
             transport::accept_with(stream, &self.inner.replay, &config.origin, |body, time| {
                 let (secret, identity) = node.authenticate(body, time)?;
+                early.cancel();
                 principal = Some(identity);
                 Some(secret)
             })
@@ -142,15 +148,11 @@ impl Server {
                     read_more(&stream, &mut buffered).await;
                 }
                 node.sent_to_origin(crate::node::probes::Probe::new(peer, reason, &buffered));
-                transport::bridge_passthrough(
-                    stream,
-                    buffered,
-                    &config.origin_host,
-                    config.origin_port,
-                )
-                .await?;
+                let origin = early.connect().await?;
+                transport::bridge_passthrough_to(stream, buffered, origin).await?;
             }
             AcceptOutcome::Session(session) => {
+                drop(early);
                 node.accepted();
                 match principal {
                     Some(Principal::Control) => crate::node::control::serve(*session, node).await?,
@@ -172,6 +174,9 @@ impl Server {
         Ok(())
     }
 }
+
+const EARLY_ORIGIN_DELAY: Duration = Duration::from_millis(100);
+pub const DEFAULT_TCP_IDLE: Duration = Duration::from_secs(7440);
 
 async fn read_more(stream: &TcpStream, buffered: &mut Vec<u8>) {
     let wait = tokio::time::Instant::now() + Duration::from_millis(250);
@@ -281,6 +286,34 @@ async fn handle_routed(
             }
             Ok(())
         }
+        LaneKind::Icmp => {
+            let runtime = router.route(&target);
+            if !matches!(
+                runtime.config.kind,
+                crate::node::outbound::OutboundKind::Direct
+            ) {
+                incoming.reject(http::StatusCode::FORBIDDEN);
+                return Ok(());
+            }
+            let address = match crate::target::resolve(&target, &context.policy).await {
+                Ok(address) => address,
+                Err(error) => {
+                    reject_for(incoming, &error);
+                    return Ok(());
+                }
+            };
+            let socket = match crate::icmp::EchoSocket::open(address.ip()) {
+                Ok(socket) => socket,
+                Err(error) => {
+                    tracing::debug!(%error, "ICMP echo is not available on this node");
+                    incoming.reject(http::StatusCode::FORBIDDEN);
+                    return Ok(());
+                }
+            };
+            let lane = incoming.accept().await?;
+            bridge_icmp(lane, socket, config.udp_idle).await;
+            Ok(())
+        }
         LaneKind::Udp => {
             let Some(runtime) = router.udp_route(&target) else {
                 incoming.reject(http::StatusCode::FORBIDDEN);
@@ -369,6 +402,49 @@ fn elapsed_ms(epoch: Instant) -> u64 {
 
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+async fn bridge_icmp(
+    lane: crate::mux::H2Lane,
+    socket: crate::icmp::EchoSocket,
+    idle_timeout: Duration,
+) {
+    let source = crate::addr::Address::Ip(std::net::SocketAddr::new(socket.target(), 0));
+    let (mut read, mut write) = split(lane);
+    let activity = AtomicU64::new(0);
+    let epoch = Instant::now();
+    let requests = async {
+        while let Ok(frame) = udp::read_frame(&mut read).await {
+            touch(&activity, epoch);
+            let Some(payload) = frame else { continue };
+            let Some(sequence) = payload.get(..2) else {
+                continue;
+            };
+            let sequence = u16::from_be_bytes([sequence[0], sequence[1]]);
+            if socket.send(sequence, &payload[2..]).await.is_err() {
+                break;
+            }
+        }
+    };
+    let replies = async {
+        while let Ok((sequence, data)) = socket.recv().await {
+            touch(&activity, epoch);
+            let mut payload = Vec::with_capacity(2 + data.len());
+            payload.extend_from_slice(&sequence.to_be_bytes());
+            payload.extend_from_slice(&data);
+            if udp::write_response(&mut write, &source, &payload)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        _ = requests => {}
+        _ = replies => {}
+        _ = idle(&activity, epoch, idle_timeout) => {}
+    }
 }
 
 fn touch(activity: &AtomicU64, epoch: Instant) {

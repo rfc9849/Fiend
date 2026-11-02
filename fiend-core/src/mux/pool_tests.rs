@@ -600,3 +600,22 @@ async fn a_loaded_single_link_spreads_a_new_lane() {
     assert_eq!(pool.stats().links, 2);
     assert_eq!(pool.stats().dial_attempts, 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_dial_without_links_is_offline_until_a_dial_succeeds() {
+    let pool = pool(Config::default());
+    assert!(!pool.is_offline());
+    pool.inner.dial_finished(Err(Error::Timeout));
+    assert!(pool.is_offline());
+    let link = add_link(&pool).await;
+    assert!(!pool.is_offline(), "a live link is not offline");
+    link.close();
+    pool.inner.state().links.clear();
+    assert!(pool.is_offline());
+    let session = session_pair(pool.config().clone());
+    let link = ClientLink::connect(session, pool.config(), 99, pool.inner.wake.clone())
+        .await
+        .unwrap();
+    pool.inner.dial_finished(Ok(link));
+    assert!(!pool.is_offline());
+}

@@ -429,11 +429,9 @@ pub async fn check_remote(address: &Address, policy: &TargetPolicy) -> io::Resul
             if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                 return policy.check(SocketAddr::new(ip, *port));
             }
-            let lookup = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::net::lookup_host((host.as_str(), *port)),
-            )
-            .await;
+            let lookup =
+                tokio::time::timeout(Duration::from_secs(5), crate::resolve::lookup(host, *port))
+                    .await;
             if let Ok(Ok(resolved)) = lookup {
                 for address in resolved {
                     policy.check(address)?;

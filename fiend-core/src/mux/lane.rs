@@ -4,11 +4,28 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use h2::client::ResponseFuture;
 use h2::{Reason, RecvStream, SendStream};
+use std::future::Future;
+
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::Instant;
 
 use super::link::{LOAD_INTERVAL, LinkShared};
+
+enum Recv {
+    Pending(ResponseFuture),
+    Open(RecvStream),
+}
+
+fn rejected(status: http::StatusCode) -> io::Error {
+    let kind = match status {
+        http::StatusCode::FORBIDDEN => io::ErrorKind::PermissionDenied,
+        http::StatusCode::GATEWAY_TIMEOUT => io::ErrorKind::TimedOut,
+        _ => io::ErrorKind::ConnectionRefused,
+    };
+    io::Error::new(kind, format!("the server refused the lane: {status}"))
+}
 
 pub const LANE_HEADER: &str = "x-lane";
 pub(crate) type IoMeter = Arc<dyn Fn(usize, bool) + Send + Sync>;
@@ -17,6 +34,7 @@ pub(crate) type IoMeter = Arc<dyn Fn(usize, bool) + Send + Sync>;
 pub enum LaneKind {
     Tcp,
     Udp,
+    Icmp,
 }
 
 impl LaneKind {
@@ -24,6 +42,7 @@ impl LaneKind {
         match self {
             Self::Tcp => "tcp",
             Self::Udp => "udp",
+            Self::Icmp => "icmp",
         }
     }
 
@@ -31,6 +50,7 @@ impl LaneKind {
         match value {
             "tcp" => Some(Self::Tcp),
             "udp" => Some(Self::Udp),
+            "icmp" => Some(Self::Icmp),
             _ => None,
         }
     }
@@ -72,7 +92,7 @@ pub struct H2Lane {
     kind: LaneKind,
     authority: String,
     send: SendStream<Bytes>,
-    recv: RecvStream,
+    recv: Recv,
     read_buf: Option<Bytes>,
     recv_eof: bool,
     send_eof: bool,
@@ -94,6 +114,26 @@ impl H2Lane {
         authority: String,
         send: SendStream<Bytes>,
         recv: RecvStream,
+        options: LaneOptions,
+    ) -> Self {
+        Self::build(kind, authority, send, Recv::Open(recv), options)
+    }
+
+    pub(crate) fn pending(
+        kind: LaneKind,
+        authority: String,
+        send: SendStream<Bytes>,
+        response: ResponseFuture,
+        options: LaneOptions,
+    ) -> Self {
+        Self::build(kind, authority, send, Recv::Pending(response), options)
+    }
+
+    fn build(
+        kind: LaneKind,
+        authority: String,
+        send: SendStream<Bytes>,
+        recv: Recv,
         options: LaneOptions,
     ) -> Self {
         let LaneOptions {
@@ -195,6 +235,27 @@ impl AsyncRead for H2Lane {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if let Recv::Pending(response) = &mut this.recv {
+            match Pin::new(response).poll(cx) {
+                Poll::Ready(Ok(response)) if response.status() == http::StatusCode::OK => {
+                    this.recv = Recv::Open(response.into_body());
+                }
+                Poll::Ready(Ok(response)) => {
+                    this.recv_eof = true;
+                    this.reset();
+                    return Poll::Ready(Err(rejected(response.status())));
+                }
+                Poll::Ready(Err(error)) => {
+                    this.recv_eof = true;
+                    this.reset();
+                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, error)));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        let Recv::Open(recv) = &mut this.recv else {
+            return Poll::Pending;
+        };
         loop {
             if buf.remaining() == 0 || this.recv_eof {
                 return Poll::Ready(Ok(()));
@@ -206,8 +267,7 @@ impl AsyncRead for H2Lane {
                 }
                 let count = chunk.len().min(buf.remaining());
                 buf.put_slice(&chunk[..count]);
-                this.recv
-                    .flow_control()
+                recv.flow_control()
                     .release_capacity(count)
                     .map_err(io::Error::other)?;
                 this.track(count, true);
@@ -217,7 +277,7 @@ impl AsyncRead for H2Lane {
                 return Poll::Ready(Ok(()));
             }
 
-            match this.recv.poll_data(cx) {
+            match recv.poll_data(cx) {
                 Poll::Ready(Some(Ok(chunk))) => this.read_buf = Some(chunk),
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(io::Error::other(error))),
                 Poll::Ready(None) => {
@@ -242,6 +302,11 @@ impl AsyncWrite for H2Lane {
         }
         if this.send_eof || this.reset {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        if let Some(shared) = &this.shared
+            && shared.is_stale()
+        {
+            shared.request_check();
         }
 
         this.set_blocked(false);

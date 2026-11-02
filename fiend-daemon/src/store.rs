@@ -95,6 +95,27 @@ impl Store {
         self.dir.join("rules").join(format!("{id}.bin"))
     }
 
+    fn resume_path(&self) -> PathBuf {
+        self.dir.join("resume")
+    }
+
+    pub fn resume_profile(&self) -> Option<String> {
+        let text = fs::read_to_string(self.resume_path()).ok()?;
+        let id = text.trim();
+        (!id.is_empty() && id.len() <= 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| id.to_owned())
+    }
+
+    pub fn set_resume(&self, profile_id: Option<&str>) -> io::Result<()> {
+        match profile_id {
+            Some(id) => write_private(&self.resume_path(), id.as_bytes()),
+            None => match fs::remove_file(self.resume_path()) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            },
+        }
+    }
+
     fn save_profiles(&self) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(&ProfileFile {
             profiles: self.profiles.clone(),
@@ -284,6 +305,22 @@ mod tests {
         fs::write(dir.join("profiles.json"), b"{broken").unwrap();
         assert!(Store::open(&dir).is_err());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_resume_mark_survives_a_restart_until_it_is_cleared() {
+        let dir = directory("resume");
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.resume_profile(), None);
+        store.set_resume(Some("a0b52cd8")).unwrap();
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.resume_profile().as_deref(), Some("a0b52cd8"));
+        store.set_resume(None).unwrap();
+        store.set_resume(None).unwrap();
+        assert_eq!(Store::open(&dir).unwrap().resume_profile(), None);
+        std::fs::write(dir.join("resume"), "../x").unwrap();
+        assert_eq!(store.resume_profile(), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -304,7 +304,10 @@ impl Tunnel {
                     return Ok(());
                 }
                 let _ = platform.on_state(TunnelState::Connected);
-                engine.run(device).await.map_err(engine_error)
+                let watch = watch_server(client.clone(), platform.clone(), stopped.clone());
+                let result = engine.run(device).await.map_err(engine_error);
+                watch.abort();
+                result
             }
             .await;
             engine.stop();
@@ -340,7 +343,11 @@ impl Tunnel {
             received_bytes: stats.downloaded,
             active_flows: stats.flows,
             dropped_packets: stats.dropped_packets,
-            latency_ms: u32::try_from(self.latency_ms.load(Ordering::Acquire)).ok(),
+            latency_ms: self
+                .client
+                .rtt()
+                .map(|rtt| u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX))
+                .or_else(|| u32::try_from(self.latency_ms.load(Ordering::Acquire)).ok()),
         }
     }
 
@@ -378,6 +385,35 @@ impl Tunnel {
         });
         Ok(())
     }
+}
+
+fn watch_server(
+    client: Client,
+    platform: Arc<dyn Platform>,
+    stopped: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut offline = false;
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            if stopped.load(Ordering::Acquire) {
+                return;
+            }
+            let now = client.is_offline();
+            if now == offline {
+                continue;
+            }
+            offline = now;
+            if offline {
+                tracing::warn!("the server does not answer, connecting again");
+                let _ = platform.on_state(TunnelState::Connecting);
+            } else {
+                tracing::info!("the server answers again");
+                let _ = platform.on_state(TunnelState::Connected);
+            }
+        }
+    })
 }
 
 impl Drop for Tunnel {

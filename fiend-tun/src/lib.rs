@@ -3,6 +3,7 @@
 mod desync;
 pub mod dns;
 mod engine;
+pub mod icmp;
 pub mod packet;
 mod resolve;
 pub use engine::{PacketIo, TunEngine, TunOptions, TunnelStats, shared_fake_dns};

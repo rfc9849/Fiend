@@ -1229,6 +1229,56 @@ fn disguise_checks(row: &DisguiseRow) -> (String, Vec<Check>) {
     (domain, checks)
 }
 
+async fn addresses_of(host: &str) -> Vec<std::net::IpAddr> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return vec![ip];
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::lookup_host((host, 443)),
+    )
+    .await
+    {
+        Ok(Ok(found)) => found.map(|address| address.ip().to_canonical()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+async fn same_server_check(domain: &str, nodes: &[String]) -> Check {
+    let name = "Same server".to_owned();
+    if nodes.is_empty() || domain.is_empty() {
+        return Check {
+            name,
+            ok: true,
+            detail: "No node uses this disguise".into(),
+        };
+    }
+    let domain_ips = addresses_of(domain).await;
+    let mut outside = Vec::new();
+    for node in nodes {
+        let node_ips = addresses_of(node).await;
+        if !node_ips.iter().any(|ip| domain_ips.contains(ip)) {
+            outside.push(node.clone());
+        }
+    }
+    if outside.is_empty() {
+        Check {
+            name,
+            ok: true,
+            detail: format!("{domain} points to the node"),
+        }
+    } else {
+        Check {
+            name,
+            ok: false,
+            detail: format!(
+                "{domain} does not point to {}. Scanners record its certificate on this address, and a database search finds the node. Use a site that runs on the node.",
+                outside.join(", ")
+            ),
+        }
+    }
+}
+
 async fn list_disguises(
     State(app): State<App>,
     _admin: Admin,
@@ -1242,7 +1292,13 @@ async fn list_disguises(
             .bind(row.id)
             .fetch_one(&app.db)
             .await?;
-        let (domain, checks) = disguise_checks(&row);
+        let (domain, mut checks) = disguise_checks(&row);
+        let addresses: Vec<String> =
+            sqlx::query_scalar("SELECT address FROM nodes WHERE disguise_id = ?")
+                .bind(row.id)
+                .fetch_all(&app.db)
+                .await?;
+        checks.push(same_server_check(&domain, &addresses).await);
         let profile = row.profile();
         views.push(DisguiseView {
             id: row.id,
@@ -2310,4 +2366,20 @@ async fn audit(
             })
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod disguise_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_disguise_on_another_server_is_a_warning() {
+        let same = same_server_check("localhost", &["127.0.0.1".into()]).await;
+        assert!(same.ok, "{}", same.detail);
+        let other = same_server_check("localhost", &["192.0.2.10".into()]).await;
+        assert!(!other.ok);
+        assert!(other.detail.contains("192.0.2.10"));
+        let unused = same_server_check("localhost", &[]).await;
+        assert!(unused.ok);
+    }
 }

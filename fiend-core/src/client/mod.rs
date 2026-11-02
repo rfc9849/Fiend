@@ -76,7 +76,18 @@ impl Client {
     }
 
     pub fn rtt(&self) -> Option<Duration> {
-        self.inner.pool.rtt()
+        self.inner.pool.rtt().or_else(|| {
+            self.inner
+                .selector
+                .status()
+                .into_iter()
+                .find(|server| server.preferred)
+                .and_then(|server| server.rtt)
+        })
+    }
+
+    pub fn is_offline(&self) -> bool {
+        self.inner.pool.is_offline()
     }
 
     pub fn close(&self) {
@@ -104,6 +115,15 @@ impl Client {
             .inner
             .pool
             .open_lane(&address.to_string(), LaneKind::Udp)
+            .await?;
+        Ok(UdpFlow::new(lane, address.clone()))
+    }
+
+    pub async fn open_icmp(&self, address: &Address) -> mux::Result<UdpFlow> {
+        let lane = self
+            .inner
+            .pool
+            .open_lane(&address.to_string(), LaneKind::Icmp)
             .await?;
         Ok(UdpFlow::new(lane, address.clone()))
     }

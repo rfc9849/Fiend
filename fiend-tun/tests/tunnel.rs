@@ -1004,3 +1004,49 @@ async fn fake_ip_outlives_its_ttl_and_engine_restarts() {
     engine.stop();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn ping_goes_through_the_node_and_comes_back_as_a_reply() {
+    if fiend_core::icmp::EchoSocket::open("127.0.0.1".parse().unwrap()).is_err() {
+        eprintln!("ICMP sockets are not available here");
+        return;
+    }
+    let (_engine, _client, mut peer, task) = stack(TunOptions::default()).await;
+    let request = fiend_tun::icmp::Echo {
+        source: "10.0.0.2".parse().unwrap(),
+        destination: "127.0.0.1".parse().unwrap(),
+        ident: 0x4242,
+        sequence: 0,
+        data: Vec::new(),
+    };
+    for sequence in 1..=3u16 {
+        let swapped = fiend_tun::icmp::Echo {
+            source: request.destination,
+            destination: request.source,
+            ..request.clone()
+        };
+        let mut packet =
+            fiend_tun::icmp::build_echo_reply(&swapped, sequence, b"fiend ping").unwrap();
+        packet[20] = 8;
+        packet[22] = 0;
+        packet[23] = 0;
+        let mut sum = 0u32;
+        for pair in packet[20..].chunks(2) {
+            sum += u32::from(u16::from_be_bytes([pair[0], *pair.get(1).unwrap_or(&0)]));
+        }
+        while sum > 0xffff {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        packet[22..24].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+        assert!(fiend_tun::icmp::parse_echo_request(&packet).is_some());
+        peer.send(packet).await;
+        let reply = peer.recv().await;
+        assert_eq!(&reply[12..16], &[127, 0, 0, 1]);
+        assert_eq!(&reply[16..20], &[10, 0, 0, 2]);
+        assert_eq!(reply[20], 0, "echo reply");
+        assert_eq!(u16::from_be_bytes([reply[24], reply[25]]), 0x4242);
+        assert_eq!(u16::from_be_bytes([reply[26], reply[27]]), sequence);
+        assert_eq!(&reply[28..], b"fiend ping");
+    }
+    task.abort();
+}

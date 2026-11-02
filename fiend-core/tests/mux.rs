@@ -194,7 +194,7 @@ async fn pending_connect_cancellation_and_timeout_release_work() {
     ));
     let open = {
         let pool = pool.clone();
-        tokio::spawn(async move { pool.open_lane("pending.test:80", LaneKind::Tcp).await })
+        tokio::spawn(async move { pool.open_lane("pending.test:80", LaneKind::Udp).await })
     };
     let incoming = receiver.recv().await.unwrap();
     assert_eq!(pool.stats().pending_lanes, 1);
@@ -204,7 +204,7 @@ async fn pending_connect_cancellation_and_timeout_release_work() {
     drop(incoming);
     let open = {
         let pool = pool.clone();
-        tokio::spawn(async move { pool.open_lane("timeout.test:80", LaneKind::Tcp).await })
+        tokio::spawn(async move { pool.open_lane("timeout.test:80", LaneKind::Udp).await })
     };
     let incoming = receiver.recv().await.unwrap();
     assert_eq!(pool.stats().pending_lanes, 1);
@@ -291,11 +291,21 @@ async fn rejection_and_reset_leave_other_lanes_usable() {
         .await
         .unwrap();
     let id = healthy.link_id();
-    let rejected = pool.open_lane("reject.test:80", LaneKind::Tcp).await;
+    let rejected = pool.open_lane("reject.test:80", LaneKind::Udp).await;
     assert!(matches!(
         rejected,
         Err(fiend_core::mux::Error::Rejected(502))
     ));
+    let mut optimistic = pool
+        .open_lane("reject-tcp.test:80", LaneKind::Tcp)
+        .await
+        .expect("a TCP lane opens without waiting for the server");
+    let error = optimistic
+        .read(&mut [0; 1])
+        .await
+        .expect_err("the rejection arrives on read");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+    drop(optimistic);
     let mut reset = pool
         .open_lane("reset.test:80", LaneKind::Tcp)
         .await

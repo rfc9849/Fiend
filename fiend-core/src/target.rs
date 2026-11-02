@@ -1,8 +1,6 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use tokio::net::lookup_host;
-
 use crate::addr::Address;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -117,7 +115,7 @@ pub async fn resolve_all(address: &Address, policy: &TargetPolicy) -> io::Result
         Address::Domain { host, port } => {
             let mut denied = None;
             let mut allowed = Vec::new();
-            for address in lookup_host((host.as_str(), *port)).await? {
+            for address in crate::resolve::lookup(host, *port).await? {
                 match policy.check(address) {
                     Ok(()) => allowed.push(address),
                     Err(error) => denied = Some(error),

@@ -9,7 +9,6 @@ use fiend_tun::rules::RuleFile;
 use crate::machine::EngineSettings;
 
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
-const RTT_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) fn app_profile(profile: &Profile) -> fiend_app::ProfileConfig {
     fiend_app::ProfileConfig {
@@ -64,7 +63,6 @@ pub(crate) fn build_client(
     config.servers = servers.iter().map(ToString::to_string).collect();
     config.handshake_timeout = Duration::from_millis(profile.tuning.handshake_timeout_ms.into());
     config.protect_socket = protect;
-    config.mux.rtt_interval = Some(RTT_INTERVAL);
     let config = fiend_core::config::build_client(config).map_err(|e| e.to_string())?;
     Ok(Client::new(config))
 }

@@ -213,13 +213,14 @@ impl Selector {
             let stream = crate::net::dial(server, &self.protect)
                 .await
                 .map_err(transport::Error::from)?;
-            let rtt = started.elapsed();
+            let connected = started.elapsed();
             stream.set_nodelay(true).map_err(transport::Error::from)?;
             if let Err(error) = crate::net::set_tcp_notsent_lowat(&stream, self.notsent_lowat) {
                 tracing::warn!(%error, "cannot set TCP_NOTSENT_LOWAT");
             }
+            let handshake = Instant::now();
             let session = transport::connect(stream, &self.secret, &self.template).await?;
-            Ok((session, rtt))
+            Ok((session, connected.min(handshake.elapsed())))
         };
         timeout(self.attempt_timeout, operation)
             .await

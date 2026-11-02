@@ -20,6 +20,8 @@ services:
   panel:
     <<: *fiend
     command: panel
+    environment:
+      FIEND_PANEL_LISTEN: ${FIEND_PANEL_LISTEN:-}
     depends_on:
       - node
 

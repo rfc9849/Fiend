@@ -96,6 +96,10 @@ impl Platform for LinuxPlatform {
         Arc::new(|socket| socket.set_mark(MARK))
     }
 
+    fn blocks_after_crash(&self) -> bool {
+        true
+    }
+
     fn recover(&self) -> io::Result<()> {
         let journal = match self.journal.load() {
             Ok(journal) => journal,
@@ -139,7 +143,15 @@ impl Platform for LinuxPlatform {
         {
             let mut journal = state.lock().unwrap_or_else(|error| error.into_inner());
             apply_steps(
-                &route_steps(IFACE, TABLE),
+                &route_steps(
+                    IFACE,
+                    TABLE,
+                    &request
+                        .servers
+                        .iter()
+                        .map(std::net::SocketAddr::ip)
+                        .collect::<Vec<_>>(),
+                ),
                 &mut journal,
                 &self.journal,
                 &mut runner,
