@@ -1439,44 +1439,74 @@ impl AppView {
 
     fn settings_about(&mut self, ui: &Ui) -> gpui_kit::Div {
         let p = ui.p;
-        div().child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(14.))
-                .mt(px(28.))
-                .mb(px(20.))
-                .child(
-                    div()
-                        .relative()
-                        .size(px(28.))
-                        .child(ui.icon("brand", 28., p.text).absolute().top_0().left_0())
-                        .child(
-                            ui.icon("brand-face", 28., p.surface)
-                                .absolute()
-                                .top_0()
-                                .left_0(),
+        div()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(14.))
+                    .mt(px(28.))
+                    .mb(px(20.))
+                    .child(
+                        div()
+                            .relative()
+                            .size(px(28.))
+                            .child(ui.icon("brand", 28., p.text).absolute().top_0().left_0())
+                            .child(
+                                ui.icon("brand-face", 28., p.surface)
+                                    .absolute()
+                                    .top_0()
+                                    .left_0(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .child(
+                                div()
+                                    .text_size(px(23.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("fiend"),
+                            )
+                            .child(div().text_size(px(11.)).text_color(p.muted).child(format!(
+                                "Version {} · Service {}",
+                                env!("CARGO_PKG_VERSION"),
+                                if self.model.status.daemon_version.is_empty() {
+                                    "not connected".to_owned()
+                                } else {
+                                    self.model.status.daemon_version.clone()
+                                }
+                            ))),
+                    ),
+            )
+            .child(
+                ui.group()
+                    .child(
+                        ui.setting_row(
+                            "GitHub",
+                            Some("rfc9849/Fiend"),
+                            ui.compact_button("about-github", "Open", None, ButtonKind::Default)
+                                .accessibility_label("Open Fiend on GitHub")
+                                .on_click(|_, _, cx| {
+                                    cx.open_url("https://github.com/rfc9849/Fiend")
+                                }),
+                            true,
                         ),
-                )
-                .child(
-                    div()
-                        .child(
-                            div()
-                                .text_size(px(23.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("fiend"),
-                        )
-                        .child(div().text_size(px(11.)).text_color(p.muted).child(format!(
-                            "Version {} · Service {}",
-                            env!("CARGO_PKG_VERSION"),
-                            if self.model.status.daemon_version.is_empty() {
-                                "not connected".to_owned()
-                            } else {
-                                self.model.status.daemon_version.clone()
-                            }
-                        ))),
-                ),
-        )
+                    )
+                    .child(
+                        ui.setting_row(
+                            "License",
+                            Some("PolyForm Noncommercial 1.0.0"),
+                            ui.compact_button("about-license", "Open", None, ButtonKind::Default)
+                                .accessibility_label("Open the Fiend license")
+                                .on_click(|_, _, cx| {
+                                    cx.open_url(
+                                        "https://github.com/rfc9849/Fiend/blob/master/LICENSE",
+                                    )
+                                }),
+                            false,
+                        ),
+                    ),
+            )
     }
 }
 

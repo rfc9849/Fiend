@@ -248,6 +248,14 @@
   </div>
 </section>
 
+<section class="card" aria-labelledby="about-title">
+  <h2 id="about-title">About</h2>
+  <div class="stack about-links">
+    <div><a href="https://github.com/rfc9849/Fiend" target="_blank" rel="noopener noreferrer">GitHub · rfc9849/Fiend</a></div>
+    <div><a href="https://github.com/rfc9849/Fiend/blob/master/LICENSE" target="_blank" rel="noopener noreferrer">License · PolyForm Noncommercial 1.0.0</a></div>
+  </div>
+</section>
+
 <Dialog bind:open={totpOpen} title="Turn on two-factor sign-in">
   {#if totp}
     <form id="totp-form" novalidate class="stack" onsubmit={enableTotp}>
@@ -289,6 +297,7 @@
 </Dialog>
 
 <style>
+  .about-links { margin-top: 14px; }
   .admins-note { margin-bottom: 12px; }
   .you { margin-left: 8px; }
   .columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; align-items: start; }

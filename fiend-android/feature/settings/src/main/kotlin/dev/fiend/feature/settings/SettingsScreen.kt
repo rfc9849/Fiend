@@ -27,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -55,6 +56,7 @@ internal fun SettingsScreen(
     onOpenRouting: () -> Unit,
 ) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     var themeDialog by rememberSaveable { mutableStateOf(false) }
 
     Column(
@@ -165,6 +167,24 @@ internal fun SettingsScreen(
                             headline = stringResource(R.string.settings_version),
                             value = versionName,
                             icon = FiendIcons.Info,
+                        )
+                    }
+                    item {
+                        ActionItem(
+                            headline = stringResource(R.string.settings_github),
+                            supporting = "rfc9849/Fiend",
+                            icon = FiendIcons.Link,
+                            trailing = { Icon(FiendIcons.OpenInNew, contentDescription = null, tint = FiendColors.muted) },
+                            onClick = { uriHandler.openUri("https://github.com/rfc9849/Fiend") },
+                        )
+                    }
+                    item {
+                        ActionItem(
+                            headline = stringResource(R.string.settings_license),
+                            supporting = stringResource(R.string.settings_license_name),
+                            icon = FiendIcons.Article,
+                            trailing = { Icon(FiendIcons.OpenInNew, contentDescription = null, tint = FiendColors.muted) },
+                            onClick = { uriHandler.openUri("https://github.com/rfc9849/Fiend/blob/master/LICENSE") },
                         )
                     }
                 }
