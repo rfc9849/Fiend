@@ -104,7 +104,7 @@ pub fn connected_updates() -> Vec<Update> {
                 latency_ms: Some(24),
             }),
             restart_required: false,
-            daemon_version: "0.1.0".into(),
+            daemon_version: "0.1.1".into(),
         }),
         Update::Logs(logs()),
     ];
@@ -201,7 +201,7 @@ fn disconnected() -> Vec<Update> {
         profile_id: None,
         stats: None,
         restart_required: false,
-        daemon_version: "0.1.0".into(),
+        daemon_version: "0.1.1".into(),
     }));
     updates
 }
@@ -398,7 +398,7 @@ fn main() {
                     profile_id: None,
                     stats: None,
                     restart_required: false,
-                    daemon_version: "0.1.0".into(),
+                    daemon_version: "0.1.1".into(),
                 }));
                 u
             },
@@ -416,7 +416,7 @@ fn main() {
                     profile_id: None,
                     stats: None,
                     restart_required: false,
-                    daemon_version: "0.1.0".into(),
+                    daemon_version: "0.1.1".into(),
                 }));
                 u
             },
