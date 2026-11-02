@@ -38,6 +38,7 @@ Native apps for Android, macOS, Windows and Linux, plus a CLI.
 
 - [Server](docs/install/server.md)
 - [Apps](docs/install/apps.md)
+- [ClientHello capture](docs/capture.md)
 
 ## How it works
 

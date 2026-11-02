@@ -47,6 +47,8 @@ docker compose restart panel
 
 Use a TLS service that really runs on the same server, if you can. If the disguise site has a different IP address, scanners record its certificate on your IP address, and a database search finds your server. The panel shows a warning for this.
 
+To make a `.bin` file from a client of the site, see [ClientHello capture](../capture.md).
+
 ## Behind a TLS proxy
 
 nginx, HAProxy or a different TCP proxy can keep port 443 and send only the disguise site name to Fiend. Fiend does not need a port on the internet then.
