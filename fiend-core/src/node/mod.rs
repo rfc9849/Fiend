@@ -237,6 +237,7 @@ struct Inner {
     warp: warp::Manager,
     resolver: Mutex<Option<outbound::Resolver>>,
     listen_port: AtomicU64,
+    public_port: AtomicU64,
     fallbacks: RwLock<Arc<[Fallback]>>,
 }
 
@@ -278,6 +279,8 @@ pub struct Health {
     pub started_at: u64,
     pub state_version: u64,
     pub listen_port: u16,
+    #[serde(default)]
+    pub public_port: u16,
 }
 
 impl Node {
@@ -345,6 +348,7 @@ impl Node {
                 ),
                 resolver: Mutex::new(None),
                 listen_port: AtomicU64::new(0),
+                public_port: AtomicU64::new(0),
                 fallbacks: RwLock::new(Arc::from([])),
             }),
         };
@@ -397,13 +401,22 @@ impl Node {
     }
 
     pub fn origin_target(&self, host: &str, port: u16) -> OriginTarget {
-        let fallbacks = self
-            .inner
+        OriginTarget::for_host(&self.fallbacks(), host, port)
+    }
+
+    pub fn fallback_for(&self, host: &str) -> Option<OriginTarget> {
+        self.fallbacks()
+            .iter()
+            .find(|fallback| fallback.host.eq_ignore_ascii_case(host))
+            .map(|fallback| fallback.origin.clone())
+    }
+
+    fn fallbacks(&self) -> Arc<[Fallback]> {
+        self.inner
             .fallbacks
             .read()
             .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        OriginTarget::for_host(&fallbacks, host, port)
+            .clone()
     }
 
     pub async fn refresh_origin(&self) {
@@ -620,12 +633,19 @@ impl Node {
             started_at: self.inner.started_at,
             state_version: self.snapshot().state.version,
             listen_port: self.inner.listen_port.load(Ordering::Relaxed) as u16,
+            public_port: self.inner.public_port.load(Ordering::Relaxed) as u16,
         }
     }
 
     pub fn set_listen_port(&self, port: u16) {
         self.inner
             .listen_port
+            .store(u64::from(port), Ordering::Relaxed);
+    }
+
+    pub fn set_public_port(&self, port: u16) {
+        self.inner
+            .public_port
             .store(u64::from(port), Ordering::Relaxed);
     }
 

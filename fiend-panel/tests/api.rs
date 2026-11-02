@@ -1059,3 +1059,30 @@ async fn restore_needs_the_password_and_codes_are_rate_limited() {
         "sign-in uses the same code limit"
     );
 }
+
+#[tokio::test]
+async fn the_local_node_link_port_follows_the_node_public_port() {
+    let dir = Temp::new();
+    let (node_address, node) = start_node(&dir.0).await;
+    let mut panel = Panel::new(&dir.0).await;
+    panel.setup().await;
+    let (status, created) = panel
+        .post(
+            "/api/wizard/local",
+            json!({"name": "main", "address": "127.0.0.1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let node_id = created["id"].as_i64().unwrap();
+    let (_, view) = panel.get(&format!("/api/nodes/{node_id}")).await;
+    assert_eq!(view["port"], node_address.port(), "{view}");
+    node.set_public_port(443);
+    assert!(
+        wait_for(async || {
+            let (_, view) = panel.get(&format!("/api/nodes/{node_id}")).await;
+            view["port"] == 443
+        })
+        .await,
+        "the panel takes the public port of the local node"
+    );
+}

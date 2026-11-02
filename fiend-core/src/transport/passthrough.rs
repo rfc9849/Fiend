@@ -120,6 +120,10 @@ impl EarlyOrigin {
         self.started.load(Ordering::Acquire)
     }
 
+    pub fn target(&self) -> &OriginTarget {
+        &self.target
+    }
+
     pub async fn connect(self) -> Result<TcpStream> {
         match self.take() {
             Some(task) if self.is_started() || task.is_finished() => match task.await {

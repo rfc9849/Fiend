@@ -111,6 +111,7 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     let listener =
         net::bind_listener(settings.listen).map_err(|error| format!("listen: {error}"))?;
     node.set_listen_port(settings.listen.port());
+    node.set_public_port(settings.public_port);
     node.set_fallbacks(settings.fallbacks.clone());
     let proxy_protocol = settings.config.proxy_protocol;
     if proxy_protocol && !settings.listen.ip().is_loopback() {

@@ -292,6 +292,20 @@ async fn session(
             .execute(&app.db)
             .await
             .map_err(io::Error::other)?;
+        if node.local && health.public_port != 0 && i64::from(health.public_port) != node.port {
+            sqlx::query("UPDATE nodes SET port = ? WHERE id = ?")
+                .bind(i64::from(health.public_port))
+                .bind(node_id)
+                .execute(&app.db)
+                .await
+                .map_err(io::Error::other)?;
+            tracing::info!(
+                node = node_id,
+                port = health.public_port,
+                "local node public port changed"
+            );
+            app.emit("nodes", Some(node_id.to_string()));
+        }
         let mut status = "online";
         let mut last_error = None;
         match state::desired(app, &node).await {

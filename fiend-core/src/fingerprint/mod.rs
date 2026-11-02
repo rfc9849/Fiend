@@ -1,6 +1,7 @@
 mod error;
 mod keyshare;
 mod parse;
+mod sni;
 mod template;
 
 pub use error::{Error, Result};
@@ -9,6 +10,7 @@ pub use keyshare::{
     X25519_MLKEM768, X25519_MLKEM768_SIZE, X25519_SIZE,
 };
 pub use parse::parse_client_hello;
+pub use sni::{server_name, server_name_str};
 pub use template::{
     BuiltClientHello, DEFAULT_RECORD_MAX, EchGrease, FieldOffset, GreaseField, GreaseKind, Template,
 };

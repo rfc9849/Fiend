@@ -188,7 +188,18 @@ impl Server {
                     reason,
                     &buffered,
                 ));
-                let origin = early.connect().await?;
+                let named = (buffered.first() == Some(&0x16))
+                    .then(|| crate::fingerprint::server_name_str(&buffered))
+                    .flatten()
+                    .and_then(|name| node.fallback_for(&name))
+                    .filter(|target| target != early.target());
+                let origin = match named {
+                    Some(target) => {
+                        early.cancel();
+                        target.connect(Some(&client)).await?
+                    }
+                    None => early.connect().await?,
+                };
                 transport::bridge_passthrough_to(stream, buffered, origin).await?;
             }
             AcceptOutcome::Session(session) => {

@@ -71,7 +71,7 @@ The disguise host points to this server, so Fiend cannot send probes to it by DN
 
 ```toml
 [[fallback]]
-host = "site.example"   # the origin host of the disguise
+host = "site.example"        # the origin host of the disguise
 address = "127.0.0.1:8444"   # the TLS server of the site
 proxy_protocol = true        # send the visitor address to the site
 ```
@@ -82,7 +82,7 @@ The nginx config:
 stream {
     map $ssl_preread_server_name $backend {
         site.example  127.0.0.1:8443;   # Fiend
-        default            127.0.0.1:8444;   # the sites
+        default       127.0.0.1:8444;   # the sites
     }
 
     server {
@@ -109,6 +109,8 @@ http {
 ```
 
 Visitors of `site.example` go through Fiend to `127.0.0.1:8444`. The site gets their real addresses from the PROXY protocol header. nginx accepts version 1 from the `stream` block and version 2 from Fiend on the same listen address.
+
+Fiend selects the fallback from the site name in the ClientHello. Thus the proxy can send `site.example` to Fiend also when the disguise of the node is a different site.
 
 The panel shows the fallback address in the disguise checks. If the check is red, the node has no fallback for the disguise host.
 
@@ -161,7 +163,9 @@ docker compose exec node fiend-core check /etc/fiend/node.toml
 docker compose restart node
 ```
 
-The node uses the host network, so a proxy on the host can connect to `127.0.0.1:8443`. If the proxy runs in a container, give it the host network too.
+The panel reads `public_port` from the local node and changes the port in the links. Send the new links to the users if the port changes.
+
+The node uses the host network, so a proxy on the host can connect to `127.0.0.1:8443`. If the proxy runs in a Docker bridge network, set `listen` to the gateway address of this network, for example `172.18.0.1:8443`. Then let the network through the firewall, for example `ufw allow from 172.18.0.0/16 to any port 8443 proto tcp`. To let the node connect to a site in the proxy container, publish its port on the loopback address, for example `127.0.0.1:8444:8444`.
 
 ## Update
 

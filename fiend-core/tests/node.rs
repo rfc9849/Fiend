@@ -618,3 +618,54 @@ async fn a_node_behind_a_proxy_reads_and_forwards_client_addresses() {
     echo_task.abort();
     relay_task.abort();
 }
+
+#[tokio::test]
+async fn a_probe_for_a_site_with_a_fallback_goes_to_that_site() {
+    let dir = Temp::new();
+    let (mut config, mut state) = initial();
+    let disguise = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    config.origin_port = disguise.local_addr().unwrap().port();
+    state.origin_port = config.origin_port;
+    let node = Node::load(dir.0.join("state.json"), CONTROL.to_vec(), state).unwrap();
+    node.set_fallbacks(vec![fiend_core::transport::Fallback {
+        host: "site.example".into(),
+        origin: fiend_core::transport::OriginTarget {
+            host: "127.0.0.1".into(),
+            port: site.local_addr().unwrap().port(),
+            proxy_protocol: true,
+        },
+    }]);
+    let listener = fiend_core::net::bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = Server::managed(config, node.clone());
+    let task = tokio::spawn(async move { server.serve(listener).await });
+
+    let hello = fiend_core::transport::build_probe_hello("Site.Example");
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(&hello).await.unwrap();
+    let (mut forwarded, _) = timeout(Duration::from_secs(2), site.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let client = fiend_core::proxy::read_header(&mut forwarded)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(client.source, stream.local_addr().unwrap());
+    let mut received = vec![0u8; hello.len()];
+    forwarded.read_exact(&mut received).await.unwrap();
+    assert_eq!(received, hello);
+
+    let other = fiend_core::transport::build_probe_hello("other.example");
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream.write_all(&other).await.unwrap();
+    let (mut forwarded, _) = timeout(Duration::from_secs(2), disguise.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut received = vec![0u8; other.len()];
+    forwarded.read_exact(&mut received).await.unwrap();
+    assert_eq!(received, other);
+    task.abort();
+}
