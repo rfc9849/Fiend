@@ -3,7 +3,7 @@ members = ["fiend-core", "fiend-tun", "fiend-rules", "fiend-app", "fiend-ipc", "
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 license = "PolyForm-Noncommercial-1.0.0"
 
 [profile.release]
