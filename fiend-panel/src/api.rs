@@ -139,7 +139,7 @@ async fn local_defaults(
     };
     match settings {
         Ok(settings) => {
-            defaults.port = settings.listen.port();
+            defaults.port = settings.public_port;
             defaults.origin_host = settings.config.origin_host.clone();
             defaults.origin_port = settings.config.origin_port;
             match local_state(&app).await {
@@ -213,7 +213,7 @@ async fn create_local(
     let id: i64 = sqlx::query_scalar("INSERT INTO nodes (name, address, port, local, control_secret, service_secret, status, created_at) VALUES (?, ?, ?, 1, ?, ?, 'unknown', ?) RETURNING id")
         .bind(&input.name)
         .bind(&input.address)
-        .bind(i64::from(settings.listen.port()))
+        .bind(i64::from(settings.public_port))
         .bind(control.trim())
         .bind(state::new_secret())
         .bind(now())
@@ -1279,6 +1279,57 @@ async fn same_server_check(domain: &str, nodes: &[String]) -> Check {
     }
 }
 
+async fn fallback_check(
+    host: &str,
+    port: u16,
+    nodes: &[String],
+    fallbacks: &[fiend_core::transport::Fallback],
+) -> Check {
+    let name = "Fallback".to_owned();
+    let target = fiend_core::transport::OriginTarget::for_host(fallbacks, host, port);
+    if target != fiend_core::transport::OriginTarget::direct(host, port) {
+        return Check {
+            name,
+            ok: true,
+            detail: format!(
+                "Probes go to {target}{}",
+                if target.proxy_protocol {
+                    " with a PROXY protocol header"
+                } else {
+                    ""
+                }
+            ),
+        };
+    }
+    let host_ips = addresses_of(host).await;
+    let mut looped = Vec::new();
+    for node in nodes {
+        if addresses_of(node)
+            .await
+            .iter()
+            .any(|ip| host_ips.contains(ip))
+        {
+            looped.push(node.clone());
+        }
+    }
+    if looped.is_empty() {
+        Check {
+            name,
+            ok: true,
+            detail: format!("Probes go to {target}"),
+        }
+    } else {
+        Check {
+            name,
+            ok: false,
+            detail: format!(
+                "{host} points to {}, so probes come back to the node. Add a [[fallback]] for {host} with the local address of the site to node.toml.",
+                looped.join(", ")
+            ),
+        }
+    }
+}
+
 async fn list_disguises(
     State(app): State<App>,
     _admin: Admin,
@@ -1299,6 +1350,18 @@ async fn list_disguises(
                 .fetch_all(&app.db)
                 .await?;
         checks.push(same_server_check(&domain, &addresses).await);
+        let fallbacks = fiend_core::config::load_server(&app.config.local_node)
+            .map(|settings| settings.fallbacks)
+            .unwrap_or_default();
+        checks.push(
+            fallback_check(
+                &row.origin_host,
+                row.origin_port as u16,
+                &addresses,
+                &fallbacks,
+            )
+            .await,
+        );
         let profile = row.profile();
         views.push(DisguiseView {
             id: row.id,
@@ -2381,5 +2444,29 @@ mod disguise_tests {
         assert!(other.detail.contains("192.0.2.10"));
         let unused = same_server_check("localhost", &[]).await;
         assert!(unused.ok);
+    }
+
+    #[tokio::test]
+    async fn a_disguise_on_the_node_needs_a_fallback() {
+        let looped = fallback_check("localhost", 443, &["127.0.0.1".into()], &[]).await;
+        assert!(!looped.ok);
+        assert!(looped.detail.contains("[[fallback]]"), "{}", looped.detail);
+        let fallbacks = [fiend_core::transport::Fallback {
+            host: "localhost".into(),
+            origin: fiend_core::transport::OriginTarget {
+                host: "127.0.0.1".into(),
+                port: 8444,
+                proxy_protocol: true,
+            },
+        }];
+        let routed = fallback_check("localhost", 443, &["127.0.0.1".into()], &fallbacks).await;
+        assert!(routed.ok);
+        assert!(
+            routed.detail.contains("127.0.0.1:8444"),
+            "{}",
+            routed.detail
+        );
+        let remote = fallback_check("localhost", 443, &["192.0.2.10".into()], &[]).await;
+        assert!(remote.ok, "{}", remote.detail);
     }
 }

@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto::AuthKey;
 use crate::server::ServerConfig;
-use crate::transport::OriginProfile;
+use crate::transport::{Fallback, OriginProfile, OriginTarget};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_STATE_BYTES: usize = 1024 * 1024;
@@ -237,6 +237,7 @@ struct Inner {
     warp: warp::Manager,
     resolver: Mutex<Option<outbound::Resolver>>,
     listen_port: AtomicU64,
+    fallbacks: RwLock<Arc<[Fallback]>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -344,6 +345,7 @@ impl Node {
                 ),
                 resolver: Mutex::new(None),
                 listen_port: AtomicU64::new(0),
+                fallbacks: RwLock::new(Arc::from([])),
             }),
         };
         node.restore_usage()?;
@@ -386,6 +388,24 @@ impl Node {
         )
     }
 
+    pub fn set_fallbacks(&self, fallbacks: Vec<Fallback>) {
+        *self
+            .inner
+            .fallbacks
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Arc::from(fallbacks);
+    }
+
+    pub fn origin_target(&self, host: &str, port: u16) -> OriginTarget {
+        let fallbacks = self
+            .inner
+            .fallbacks
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        OriginTarget::for_host(&fallbacks, host, port)
+    }
+
     pub async fn refresh_origin(&self) {
         let snapshot = self.snapshot();
         let state = &snapshot.state;
@@ -393,8 +413,8 @@ impl Node {
             return;
         }
         let hello = crate::transport::build_probe_hello(&state.origin_host);
-        match crate::transport::probe_origin_at(&state.origin_host, state.origin_port, &hello).await
-        {
+        let target = self.origin_target(&state.origin_host, state.origin_port);
+        match crate::transport::probe_origin(&target, &hello).await {
             Ok(measured) => {
                 let mut profile = state.origin_profile.clone();
                 if profile.cipher_suite == 0 {

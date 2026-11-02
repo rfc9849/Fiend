@@ -17,6 +17,10 @@ services:
     command: node
     environment:
       FIEND_NODE_PORT: ${FIEND_NODE_PORT:-443}
+      FIEND_NODE_LISTEN: ${FIEND_NODE_LISTEN:-}
+      FIEND_NODE_PROXY_PROTOCOL: ${FIEND_NODE_PROXY_PROTOCOL:-false}
+      FIEND_NODE_FALLBACK: ${FIEND_NODE_FALLBACK:-}
+      FIEND_NODE_FALLBACK_PROXY_PROTOCOL: ${FIEND_NODE_FALLBACK_PROXY_PROTOCOL:-false}
   panel:
     <<: *fiend
     command: panel

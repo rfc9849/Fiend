@@ -499,3 +499,122 @@ async fn unix_control_uses_private_socket_and_rejects_live_or_non_socket_paths()
     assert_eq!(fs::read(regular).unwrap(), b"keep");
     task.abort();
 }
+
+async fn proxy_relay(
+    server: std::net::SocketAddr,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = relay.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut inbound, _) = relay.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut outbound = TcpStream::connect(server).await.unwrap();
+                outbound
+                    .write_all(b"PROXY TCP4 203.0.113.9 198.51.100.1 52000 443\r\n")
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+            });
+        }
+    });
+    (address, task)
+}
+
+#[tokio::test]
+async fn a_node_behind_a_proxy_reads_and_forwards_client_addresses() {
+    let dir = Temp::new();
+    let (mut config, mut state) = initial();
+    config.proxy_protocol = true;
+    state.origin_host = "site.example".into();
+    state.origin_port = 443;
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node = Node::load(dir.0.join("state.json"), CONTROL.to_vec(), state).unwrap();
+    node.set_fallbacks(vec![fiend_core::transport::Fallback {
+        host: "site.example".into(),
+        origin: fiend_core::transport::OriginTarget {
+            host: "127.0.0.1".into(),
+            port: origin.local_addr().unwrap().port(),
+            proxy_protocol: true,
+        },
+    }]);
+    let listener = fiend_core::net::bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = Server::managed(config, node.clone());
+    let task = tokio::spawn(async move { server.serve(listener).await });
+    let template = Template::from_json(TEMPLATE).unwrap();
+
+    let hello = template.build(&[0x95; 32]).unwrap().record;
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"PROXY TCP4 203.0.113.7 198.51.100.1 51000 443\r\n")
+        .await
+        .unwrap();
+    stream.write_all(&hello).await.unwrap();
+    let (mut forwarded, _) = timeout(Duration::from_secs(2), origin.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let client = fiend_core::proxy::read_header(&mut forwarded)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(client.source, "203.0.113.7:51000".parse().unwrap());
+    assert_eq!(client.destination, "198.51.100.1:443".parse().unwrap());
+    let mut received = vec![0u8; hello.len()];
+    forwarded.read_exact(&mut received).await.unwrap();
+    assert_eq!(received, hello);
+    let stats = node.stats();
+    assert_eq!(stats.handshakes_origin, 1);
+    assert_eq!(stats.probes[0].peer, "203.0.113.7");
+
+    let mut bare = TcpStream::connect(address).await.unwrap();
+    bare.write_all(&hello).await.unwrap();
+    let mut byte = [0u8; 1];
+    assert!(matches!(
+        timeout(Duration::from_secs(2), bare.read(&mut byte))
+            .await
+            .unwrap(),
+        Ok(0) | Err(_)
+    ));
+
+    let mut looped = TcpStream::connect(address).await.unwrap();
+    looped
+        .write_all(b"PROXY TCP4 198.51.100.1 198.51.100.1 40000 443\r\n")
+        .await
+        .unwrap();
+    looped.write_all(&hello).await.unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), looped.read(&mut byte))
+            .await
+            .unwrap(),
+        Ok(0) | Err(_)
+    ));
+    assert!(
+        timeout(Duration::from_millis(500), origin.accept())
+            .await
+            .is_err(),
+        "no connection without a header or from a loop may reach the origin"
+    );
+    assert_eq!(node.stats().handshakes_origin, 0);
+
+    let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let destination = Address::Ip(echo.local_addr().unwrap());
+    let echo_task = tokio::spawn(async move {
+        let (mut stream, _) = echo.accept().await.unwrap();
+        let mut buffer = [0u8; 5];
+        stream.read_exact(&mut buffer).await.unwrap();
+        stream.write_all(&buffer).await.unwrap();
+    });
+    let (relay, relay_task) = proxy_relay(address).await;
+    let alice = Client::new(client_config(relay, &ALICE));
+    let mut lane = alice.open_tcp(&destination).await.unwrap();
+    lane.write_all(b"hello").await.unwrap();
+    let mut reply = [0u8; 5];
+    lane.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"hello");
+    alice.close();
+    task.abort();
+    echo_task.abort();
+    relay_task.abort();
+}

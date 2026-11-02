@@ -6,6 +6,7 @@ use tokio::net::TcpStream;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 use super::error::{Error, Result};
+use super::passthrough::OriginTarget;
 use super::serverhello::{
     REC_APPDATA, REC_HANDSHAKE, parse_server_hello, server_hello_extension_order,
 };
@@ -113,10 +114,13 @@ pub async fn probe_origin_at(
     port: u16,
     client_hello: &[u8],
 ) -> Result<OriginProfile> {
-    let mut origin =
-        tokio::time::timeout(PROBE_CONNECT_TIMEOUT, TcpStream::connect((domain, port)))
-            .await
-            .map_err(|_| Error::Timeout)??;
+    probe_origin(&OriginTarget::direct(domain, port), client_hello).await
+}
+
+pub async fn probe_origin(target: &OriginTarget, client_hello: &[u8]) -> Result<OriginProfile> {
+    let mut origin = tokio::time::timeout(PROBE_CONNECT_TIMEOUT, target.connect(None))
+        .await
+        .map_err(|_| Error::Timeout)??;
 
     tokio::time::timeout(PROBE_READ_TIMEOUT, origin.write_all(client_hello))
         .await

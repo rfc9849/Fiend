@@ -54,7 +54,12 @@ fn usage() {
     println!("  node <config.toml>");
     println!("  check <config.toml> [state.json]");
     println!("  generate-secret");
-    println!("  prepare <directory> [--port <port>]");
+    println!(
+        "  prepare <directory> [--port <port>] [--listen <address>] [--proxy-protocol <true|false>]"
+    );
+    println!(
+        "          [--fallback <host>=<address>[,...]] [--fallback-proxy-protocol <true|false>]"
+    );
 }
 
 fn run_template(args: &[String]) -> Result<(), String> {
@@ -106,6 +111,14 @@ async fn run_node(args: &[String]) -> Result<(), String> {
     let listener =
         net::bind_listener(settings.listen).map_err(|error| format!("listen: {error}"))?;
     node.set_listen_port(settings.listen.port());
+    node.set_fallbacks(settings.fallbacks.clone());
+    let proxy_protocol = settings.config.proxy_protocol;
+    if proxy_protocol && !settings.listen.ip().is_loopback() {
+        tracing::warn!(listen = %settings.listen, "PROXY protocol is on: make sure that only your proxy can reach the listen address");
+    }
+    for fallback in &settings.fallbacks {
+        tracing::info!(host = %fallback.host, address = %fallback.origin, proxy_protocol = fallback.origin.proxy_protocol, "fallback");
+    }
     {
         let node = node.clone();
         tokio::task::spawn_blocking(move || node.health());
@@ -116,7 +129,7 @@ async fn run_node(args: &[String]) -> Result<(), String> {
         tokio::spawn(async move { node.start_warp().await });
     }
     let warp = node.warp().clone();
-    tracing::info!(listen = %listener.local_addr().map_err(|error| error.to_string())?, "node started");
+    tracing::info!(listen = %listener.local_addr().map_err(|error| error.to_string())?, public_port = settings.public_port, proxy_protocol, "node started");
     tokio::select! {
         result = server.serve(listener) => result.map_err(|error| format!("node: {error}"))?,
         result = control::serve_unix(&settings.node.control_socket, node.clone()) => result.map_err(|error| format!("control socket: {error}"))?,

@@ -29,6 +29,7 @@ pub struct ServerConfig {
     pub tcp_idle: Duration,
     pub target: TargetPolicy,
     pub tcp_notsent_lowat: u32,
+    pub proxy_protocol: bool,
 }
 
 impl ServerConfig {
@@ -46,6 +47,7 @@ impl ServerConfig {
             tcp_idle: DEFAULT_TCP_IDLE,
             target: TargetPolicy::default(),
             tcp_notsent_lowat: 0,
+            proxy_protocol: false,
         }
     }
 }
@@ -118,22 +120,48 @@ impl Server {
         });
     }
 
-    async fn handle(&self, stream: TcpStream, peer: std::net::SocketAddr) -> mux::Result<()> {
+    async fn handle(&self, mut stream: TcpStream, peer: std::net::SocketAddr) -> mux::Result<()> {
         use crate::node::Principal;
+        use crate::proxy::Endpoints;
         use crate::transport::AcceptOutcome;
         let node = self.inner.node.clone();
         let mut config = self.inner.config.clone();
+        let mut client = Endpoints {
+            source: peer,
+            destination: stream.local_addr()?,
+        };
+        if config.proxy_protocol {
+            match tokio::time::timeout(PROXY_HEADER_TIMEOUT, crate::proxy::read_header(&mut stream))
+                .await
+            {
+                Ok(Ok(Some(endpoints))) => client = endpoints,
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(%peer, %error, "connection without a valid PROXY protocol header");
+                    return Ok(());
+                }
+                Err(_) => {
+                    tracing::debug!(%peer, "PROXY protocol header timed out");
+                    return Ok(());
+                }
+            }
+        }
         (config.origin_host, config.origin_port, config.origin) = node.origin();
-        let early = transport::EarlyOrigin::spawn(
-            config.origin_host.clone(),
-            config.origin_port,
-            EARLY_ORIGIN_DELAY,
-        );
+        let looped = client.is_loop();
+        let early = (!looped).then(|| {
+            transport::EarlyOrigin::spawn(
+                node.origin_target(&config.origin_host, config.origin_port),
+                Some(client),
+                EARLY_ORIGIN_DELAY,
+            )
+        });
         let mut principal = None;
         let outcome =
             transport::accept_with(stream, &self.inner.replay, &config.origin, |body, time| {
                 let (secret, identity) = node.authenticate(body, time)?;
-                early.cancel();
+                if let Some(early) = &early {
+                    early.cancel();
+                }
                 principal = Some(identity);
                 Some(secret)
             })
@@ -144,10 +172,22 @@ impl Server {
                 mut buffered,
                 reason,
             } => {
+                let Some(early) = early else {
+                    tracing::warn!(
+                        origin = %node.origin_target(&config.origin_host, config.origin_port),
+                        "the origin connection came back to this node; add a [[fallback]] for {} to the node config",
+                        config.origin_host
+                    );
+                    return Ok(());
+                };
                 if reason == transport::PassthroughReason::NotTls && !buffered.is_empty() {
                     read_more(&stream, &mut buffered).await;
                 }
-                node.sent_to_origin(crate::node::probes::Probe::new(peer, reason, &buffered));
+                node.sent_to_origin(crate::node::probes::Probe::new(
+                    client.source,
+                    reason,
+                    &buffered,
+                ));
                 let origin = early.connect().await?;
                 transport::bridge_passthrough_to(stream, buffered, origin).await?;
             }
@@ -176,6 +216,7 @@ impl Server {
 }
 
 const EARLY_ORIGIN_DELAY: Duration = Duration::from_millis(100);
+const PROXY_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_TCP_IDLE: Duration = Duration::from_secs(7440);
 
 async fn read_more(stream: &TcpStream, buffered: &mut Vec<u8>) {

@@ -9,6 +9,7 @@ pub mod icmp;
 pub mod mux;
 pub mod net;
 pub mod node;
+pub mod proxy;
 pub mod resolve;
 pub mod server;
 pub mod share;

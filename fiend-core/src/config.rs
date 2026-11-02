@@ -12,7 +12,7 @@ use crate::client::ClientConfig;
 use crate::mux;
 use crate::server::ServerConfig;
 use crate::target::TargetPolicy;
-use crate::transport::{AUTH_WINDOW, OriginProfile};
+use crate::transport::{AUTH_WINDOW, Fallback, OriginProfile, OriginTarget};
 
 const DEFAULT_SERVER_LISTEN: &str = "0.0.0.0:443";
 const DEFAULT_ORIGIN_PORT: u16 = 443;
@@ -33,6 +33,8 @@ pub enum ConfigError {
 
 pub struct ServerSettings {
     pub listen: SocketAddr,
+    pub public_port: u16,
+    pub fallbacks: Vec<Fallback>,
     pub config: ServerConfig,
     pub node: NodeSettings,
 }
@@ -69,6 +71,11 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     let origin_host = required(file.origin_host, "server origin_host")?;
     let origin_host = origin_host.trim().to_owned();
     let origin_port = file.origin_port.unwrap_or(DEFAULT_ORIGIN_PORT);
+    let public_port = file.public_port.unwrap_or(listen.port());
+    if public_port == 0 {
+        return Err(invalid("server public_port must be greater than zero"));
+    }
+    let fallbacks = parse_fallbacks(file.fallback, listen)?;
 
     let replay_ttl = option_duration(
         file.replay_ttl_ms,
@@ -107,6 +114,7 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     config.tcp_idle = tcp_idle;
     config.target = file.target.into_policy();
     config.tcp_notsent_lowat = socket_size(file.tcp_notsent_lowat, "server", "tcp_notsent_lowat")?;
+    config.proxy_protocol = file.proxy_protocol.unwrap_or(false);
 
     let mut node = file.node;
     let node_base = std::fs::canonicalize(if base.as_os_str().is_empty() {
@@ -127,9 +135,75 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     }
     Ok(ServerSettings {
         listen,
+        public_port,
+        fallbacks,
         config: build_server(config)?,
         node,
     })
+}
+
+fn parse_fallbacks(
+    files: Vec<FallbackFile>,
+    listen: SocketAddr,
+) -> Result<Vec<Fallback>, ConfigError> {
+    let mut fallbacks: Vec<Fallback> = Vec::with_capacity(files.len());
+    for file in files {
+        let host = file.host.trim().to_ascii_lowercase();
+        if host.is_empty()
+            || host.len() > 253
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-_:".contains(&byte))
+        {
+            return Err(invalid(format!(
+                "server fallback host {:?} is not a host name",
+                file.host
+            )));
+        }
+        if fallbacks.iter().any(|fallback| fallback.host == host) {
+            return Err(invalid(format!(
+                "server fallback host {host} is given more than once"
+            )));
+        }
+        let origin = parse_fallback_address(file.address.trim())?;
+        if origin
+            .host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| SocketAddr::new(ip, origin.port) == listen)
+        {
+            return Err(invalid(format!(
+                "server fallback address {origin} is the listen address of this node"
+            )));
+        }
+        fallbacks.push(Fallback {
+            host,
+            origin: OriginTarget {
+                proxy_protocol: file.proxy_protocol,
+                ..origin
+            },
+        });
+    }
+    Ok(fallbacks)
+}
+
+pub fn parse_fallback_address(value: &str) -> Result<OriginTarget, ConfigError> {
+    let message = || {
+        invalid(format!(
+            "server fallback address {value:?} must be host:port with a nonzero port"
+        ))
+    };
+    match crate::addr::Address::from_authority(value).map_err(|_| message())? {
+        crate::addr::Address::Ip(address) if address.port() != 0 => Ok(OriginTarget::direct(
+            address.ip().to_string(),
+            address.port(),
+        )),
+        crate::addr::Address::Domain { host, port }
+            if port != 0 && !host.is_empty() && !host.contains(char::is_whitespace) =>
+        {
+            Ok(OriginTarget::direct(host, port))
+        }
+        _ => Err(message()),
+    }
 }
 
 pub fn build_client(mut config: ClientConfig) -> Result<ClientConfig, ConfigError> {
@@ -214,6 +288,8 @@ struct ServerFile {
     #[serde(default)]
     node: NodeSettings,
     listen: Option<String>,
+    public_port: Option<u16>,
+    proxy_protocol: Option<bool>,
     origin_host: Option<String>,
     origin_port: Option<u16>,
     replay_ttl_ms: Option<u64>,
@@ -231,6 +307,17 @@ struct ServerFile {
     udp: IdleFile,
     #[serde(default)]
     mux: MuxFile,
+    #[serde(default)]
+    fallback: Vec<FallbackFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FallbackFile {
+    host: String,
+    address: String,
+    #[serde(default)]
+    proxy_protocol: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]

@@ -19,6 +19,7 @@ One Docker image for amd64 and arm64 with the node and a web panel.
 - Disguises from ClientHello captures of any TLS client
 - Node routing: direct, block, SOCKS5, HTTP, another Fiend server, Cloudflare WARP
 - Log of failed probes
+- Works behind nginx or a different TLS proxy on port 443, with the PROXY protocol
 - Several admins, two-factor sign-in, audit log, backups
 
 ### Apps

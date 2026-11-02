@@ -210,3 +210,67 @@ fn no_command_prints_usage() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Usage: fiend-core"), "stdout: {stdout}");
 }
+
+#[test]
+fn prepare_a_node_behind_a_proxy() {
+    let dir = temp_dir("prepare-proxy");
+    let destination = dir.join("installed");
+    let output = Command::new(bin())
+        .arg("prepare")
+        .arg(&destination)
+        .args(["--port", "443", "--listen", "127.0.0.1:8443"])
+        .args(["--proxy-protocol", "true"])
+        .args(["--fallback", "site.example=127.0.0.1:8444"])
+        .args(["--fallback-proxy-protocol", "yes"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settings = fiend_core::config::load_server(destination.join("node.toml")).unwrap();
+    assert_eq!(settings.listen.to_string(), "127.0.0.1:8443");
+    assert_eq!(settings.public_port, 443);
+    assert!(settings.config.proxy_protocol);
+    assert_eq!(settings.fallbacks.len(), 1);
+    assert_eq!(settings.fallbacks[0].host, "site.example");
+    assert_eq!(settings.fallbacks[0].origin.to_string(), "127.0.0.1:8444");
+    assert!(settings.fallbacks[0].origin.proxy_protocol);
+
+    let plain = dir.join("plain");
+    let output = Command::new(bin())
+        .arg("prepare")
+        .arg(&plain)
+        .args(["--port", "443", "--listen", "", "--proxy-protocol", "false"])
+        .args(["--fallback", "", "--fallback-proxy-protocol", "false"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let settings = fiend_core::config::load_server(plain.join("node.toml")).unwrap();
+    assert_eq!(settings.listen.to_string(), "0.0.0.0:443");
+    assert_eq!(settings.public_port, 443);
+    assert!(!settings.config.proxy_protocol);
+    assert!(settings.fallbacks.is_empty());
+
+    for (name, args) in [
+        ("switch", vec!["--proxy-protocol", "maybe"]),
+        ("fallback", vec!["--fallback", "site.example"]),
+        ("address", vec!["--fallback", "site.example=127.0.0.1"]),
+        ("lonely", vec!["--fallback-proxy-protocol", "true"]),
+        ("listen", vec!["--listen", "localhost:8443"]),
+    ] {
+        let output = Command::new(bin())
+            .arg("prepare")
+            .arg(dir.join(name))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{name}");
+        assert!(!dir.join(name).join("node.toml").exists(), "{name}");
+    }
+}

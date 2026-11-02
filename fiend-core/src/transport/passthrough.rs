@@ -7,43 +7,99 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
 use super::error::{Error, Result};
+use crate::proxy::Endpoints;
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(3600);
 const COPY_BUFFER: usize = 32 * 1024;
 
-async fn dial_origin(host: &str, port: u16) -> Result<TcpStream> {
-    Ok(
-        tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect((host, port)))
-            .await
-            .map_err(|_| Error::Timeout)??,
-    )
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OriginTarget {
+    pub host: String,
+    pub port: u16,
+    pub proxy_protocol: bool,
+}
+
+impl OriginTarget {
+    pub fn direct(host: impl Into<String>, port: u16) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            proxy_protocol: false,
+        }
+    }
+
+    pub fn for_host(fallbacks: &[Fallback], host: &str, port: u16) -> Self {
+        fallbacks
+            .iter()
+            .find(|fallback| fallback.host.eq_ignore_ascii_case(host))
+            .map(|fallback| fallback.origin.clone())
+            .unwrap_or_else(|| Self::direct(host, port))
+    }
+
+    pub(crate) async fn connect(&self, client: Option<&Endpoints>) -> Result<TcpStream> {
+        let mut stream = tokio::time::timeout(
+            DIAL_TIMEOUT,
+            TcpStream::connect((self.host.as_str(), self.port)),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
+        if self.proxy_protocol {
+            let header = client
+                .map(Endpoints::header)
+                .unwrap_or_else(crate::proxy::local_header);
+            tokio::time::timeout(DIAL_TIMEOUT, stream.write_all(&header))
+                .await
+                .map_err(|_| Error::Timeout)??;
+        }
+        Ok(stream)
+    }
+}
+
+impl std::fmt::Display for OriginTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.host.contains(':') {
+            write!(formatter, "[{}]:{}", self.host, self.port)
+        } else {
+            write!(formatter, "{}:{}", self.host, self.port)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fallback {
+    pub host: String,
+    pub origin: OriginTarget,
+}
+
+async fn dial_origin(target: &OriginTarget, client: Option<&Endpoints>) -> Result<TcpStream> {
+    target.connect(client).await
 }
 
 pub struct EarlyOrigin {
     task: Mutex<Option<JoinHandle<Result<TcpStream>>>>,
     started: Arc<AtomicBool>,
-    host: String,
-    port: u16,
+    target: OriginTarget,
+    client: Option<Endpoints>,
 }
 
 impl EarlyOrigin {
-    pub fn spawn(host: String, port: u16, delay: Duration) -> Self {
+    pub fn spawn(target: OriginTarget, client: Option<Endpoints>, delay: Duration) -> Self {
         let started = Arc::new(AtomicBool::new(false));
         let task = {
             let started = started.clone();
-            let host = host.clone();
+            let target = target.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
                 started.store(true, Ordering::Release);
-                dial_origin(&host, port).await
+                dial_origin(&target, client.as_ref()).await
             })
         };
         Self {
             task: Mutex::new(Some(task)),
             started,
-            host,
-            port,
+            target,
+            client,
         }
     }
 
@@ -68,13 +124,13 @@ impl EarlyOrigin {
         match self.take() {
             Some(task) if self.is_started() || task.is_finished() => match task.await {
                 Ok(result) => result,
-                Err(_) => dial_origin(&self.host, self.port).await,
+                Err(_) => dial_origin(&self.target, self.client.as_ref()).await,
             },
             Some(task) => {
                 task.abort();
-                dial_origin(&self.host, self.port).await
+                dial_origin(&self.target, self.client.as_ref()).await
             }
-            None => dial_origin(&self.host, self.port).await,
+            None => dial_origin(&self.target, self.client.as_ref()).await,
         }
     }
 }
@@ -94,7 +150,7 @@ pub async fn bridge_passthrough<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let origin = dial_origin(host, port).await?;
+    let origin = dial_origin(&OriginTarget::direct(host, port), None).await?;
     bridge_passthrough_to(stream, buffered, origin).await
 }
 
@@ -200,7 +256,11 @@ mod tests {
     #[tokio::test]
     async fn a_silent_client_gets_an_origin_connection_after_the_delay() {
         let (listener, port) = listener().await;
-        let early = EarlyOrigin::spawn("127.0.0.1".into(), port, Duration::from_millis(50));
+        let early = EarlyOrigin::spawn(
+            OriginTarget::direct("127.0.0.1", port),
+            None,
+            Duration::from_millis(50),
+        );
         assert!(!accepted_within(&listener, Duration::from_millis(20)).await);
         assert!(accepted_within(&listener, Duration::from_secs(2)).await);
         assert!(early.is_started());
@@ -210,7 +270,11 @@ mod tests {
     #[tokio::test]
     async fn an_authenticated_client_never_reaches_the_origin() {
         let (listener, port) = listener().await;
-        let early = EarlyOrigin::spawn("127.0.0.1".into(), port, Duration::from_millis(50));
+        let early = EarlyOrigin::spawn(
+            OriginTarget::direct("127.0.0.1", port),
+            None,
+            Duration::from_millis(50),
+        );
         early.cancel();
         assert!(!accepted_within(&listener, Duration::from_millis(200)).await);
     }
@@ -218,11 +282,47 @@ mod tests {
     #[tokio::test]
     async fn an_early_passthrough_dials_at_once() {
         let (listener, port) = listener().await;
-        let early = EarlyOrigin::spawn("127.0.0.1".into(), port, Duration::from_secs(30));
+        let early = EarlyOrigin::spawn(
+            OriginTarget::direct("127.0.0.1", port),
+            None,
+            Duration::from_secs(30),
+        );
         let started = Instant::now();
         let origin = early.connect().await.unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(accepted_within(&listener, Duration::from_secs(2)).await);
         drop(origin);
+    }
+
+    #[tokio::test]
+    async fn a_fallback_gets_the_client_address_in_a_proxy_header() {
+        let (listener, port) = listener().await;
+        let fallbacks = [Fallback {
+            host: "site.example".into(),
+            origin: OriginTarget {
+                host: "127.0.0.1".into(),
+                port,
+                proxy_protocol: true,
+            },
+        }];
+        let target = OriginTarget::for_host(&fallbacks, "SITE.example", 443);
+        assert_eq!(target, fallbacks[0].origin);
+        assert_eq!(
+            OriginTarget::for_host(&fallbacks, "other.example", 443),
+            OriginTarget::direct("other.example", 443)
+        );
+        let client = Endpoints {
+            source: "203.0.113.7:51000".parse().unwrap(),
+            destination: "198.51.100.1:443".parse().unwrap(),
+        };
+        let early = EarlyOrigin::spawn(target, Some(client), Duration::from_secs(30));
+        let mut origin = early.connect().await.unwrap();
+        origin.write_all(b"hello").await.unwrap();
+        let (mut accepted, _) = listener.accept().await.unwrap();
+        let found = crate::proxy::read_header(&mut accepted).await.unwrap();
+        assert_eq!(found, Some(client));
+        let mut tail = [0u8; 5];
+        accepted.read_exact(&mut tail).await.unwrap();
+        assert_eq!(&tail, b"hello");
     }
 }

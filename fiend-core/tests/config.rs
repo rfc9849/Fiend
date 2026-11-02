@@ -254,3 +254,89 @@ fn missing_files_are_reported() {
     let error = config::load_server(&path).err().expect("missing config");
     assert!(error.to_string().contains("read"));
 }
+
+#[test]
+fn proxy_settings_and_fallbacks_load() {
+    let dir = temp_dir("proxy-settings");
+    let path = write(
+        &dir,
+        "server.toml",
+        r#"
+listen = "127.0.0.1:8443"
+public_port = 443
+proxy_protocol = true
+origin_host = "origin.example"
+
+[[fallback]]
+host = "Site.Example"
+address = "127.0.0.1:8444"
+proxy_protocol = true
+
+[[fallback]]
+host = "other.example"
+address = "web.internal:9443"
+"#,
+    );
+    let settings = config::load_server(&path).expect("load server");
+    assert_eq!(settings.listen.to_string(), "127.0.0.1:8443");
+    assert_eq!(settings.public_port, 443);
+    assert!(settings.config.proxy_protocol);
+    assert_eq!(settings.fallbacks.len(), 2);
+    assert_eq!(settings.fallbacks[0].host, "site.example");
+    assert_eq!(settings.fallbacks[0].origin.to_string(), "127.0.0.1:8444");
+    assert!(settings.fallbacks[0].origin.proxy_protocol);
+    assert_eq!(
+        settings.fallbacks[1].origin.to_string(),
+        "web.internal:9443"
+    );
+    assert!(!settings.fallbacks[1].origin.proxy_protocol);
+
+    let path = write(&dir, "plain.toml", "origin_host = \"origin.example\"\n");
+    let settings = config::load_server(&path).expect("load server");
+    assert_eq!(settings.public_port, 443);
+    assert!(!settings.config.proxy_protocol);
+    assert!(settings.fallbacks.is_empty());
+}
+
+#[test]
+fn invalid_fallbacks_are_refused() {
+    let cases = [
+        (
+            "port",
+            "[[fallback]]\nhost = \"a.example\"\naddress = \"127.0.0.1:0\"\n",
+            "nonzero port",
+        ),
+        (
+            "no port",
+            "[[fallback]]\nhost = \"a.example\"\naddress = \"127.0.0.1\"\n",
+            "host:port",
+        ),
+        (
+            "host",
+            "[[fallback]]\nhost = \"bad host\"\naddress = \"127.0.0.1:8444\"\n",
+            "host name",
+        ),
+        (
+            "twice",
+            "[[fallback]]\nhost = \"a.example\"\naddress = \"127.0.0.1:8444\"\n[[fallback]]\nhost = \"A.example\"\naddress = \"127.0.0.1:8445\"\n",
+            "more than once",
+        ),
+        (
+            "self",
+            "[[fallback]]\nhost = \"a.example\"\naddress = \"127.0.0.1:8443\"\n",
+            "listen address",
+        ),
+        ("public port", "public_port = 0\n", "public_port"),
+    ];
+    for (name, extra, needle) in cases {
+        let dir = temp_dir(&format!("fallback-error-{name}"));
+        let body =
+            format!("listen = \"127.0.0.1:8443\"\norigin_host = \"origin.example\"\n{extra}");
+        let path = write(&dir, "server.toml", &body);
+        let error = config::load_server(&path).err().expect(name);
+        assert!(
+            error.to_string().contains(needle),
+            "{name}: {error} does not contain {needle}"
+        );
+    }
+}

@@ -102,7 +102,8 @@ async fn dispatch(node: Node, request: Request) -> Response {
                     ))
                 } else {
                     let hello = crate::transport::build_probe_hello(&host);
-                    match crate::transport::probe_origin_at(&host, port, &hello).await {
+                    let target = node.origin_target(&host, port);
+                    match crate::transport::probe_origin(&target, &hello).await {
                         Ok(profile) => serde_json::to_value(profile).map_err(io::Error::other),
                         Err(error) => {
                             Err(io::Error::other(format!("origin probe failed: {error}")))
