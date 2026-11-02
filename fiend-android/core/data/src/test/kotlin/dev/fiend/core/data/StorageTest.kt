@@ -19,10 +19,16 @@ import dev.fiend.core.model.RuleSubscription
 import dev.fiend.core.model.ThemeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import com.sun.net.httpserver.HttpServer
 import java.io.File
@@ -109,6 +115,42 @@ class StorageTest {
             assertTrue(settings.connectOnStart)
             assertFalse(settings.ipv6)
             assertEquals(setOf("dev.fiend.test"), settings.splitTunnelApps)
+        } finally { scope.cancel() }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun settingsUpdatesAreVisibleBeforeReturning() = runTest(UnconfinedTestDispatcher()) {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        try {
+            val repository = RealSettingsRepository(PreferencesStore(context, scope), RealLogRepository(), scope)
+            repository.awaitReady()
+            repeat(20) { index ->
+                val rules = "domain:rule$index.example"
+                repository.update { it.copy(directRules = rules, mtu = 9999) }
+                assertEquals(rules, repository.settings.value.directRules)
+                assertEquals(9000, repository.settings.value.mtu)
+            }
+        } finally { scope.cancel() }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun settingsUpdatesKeepConcurrentChangesVisible() = runTest(UnconfinedTestDispatcher()) {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        try {
+            val repository = RealSettingsRepository(PreferencesStore(context, scope), RealLogRepository(), scope)
+            repository.awaitReady()
+            (0 until 20).map { index ->
+                async {
+                    val rule = "domain:rule$index.example\n"
+                    repository.update { it.copy(directRules = it.directRules + rule) }
+                    assertTrue(repository.settings.value.directRules.contains(rule))
+                }
+            }.awaitAll()
+            assertEquals(20, repository.settings.value.directRules.lines().count { it.isNotEmpty() })
         } finally { scope.cancel() }
     }
 

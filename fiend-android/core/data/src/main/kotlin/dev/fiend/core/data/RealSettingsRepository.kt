@@ -19,7 +19,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 
 @Singleton
@@ -31,6 +34,7 @@ internal class RealSettingsRepository @Inject constructor(
     private val mutableSettings = MutableStateFlow(AppSettings())
     override val settings = mutableSettings.asStateFlow()
     private val ready = CompletableDeferred<Unit>()
+    private val updateMutex = Mutex()
     init {
         scope.launch {
             try {
@@ -46,21 +50,25 @@ internal class RealSettingsRepository @Inject constructor(
 
     override suspend fun update(transform: (AppSettings) -> AppSettings) {
         awaitReady()
-        store.data.edit { values ->
-            val next = transform(decode(values))
-            values[THEME] = next.themeMode.name
-            values[CONNECT] = next.connectOnStart
-            values[LAN] = next.bypassLan
-            values[IPV6] = next.ipv6
-            values[SPLIT_MODE] = next.splitTunnelMode.name
-            values[SPLIT_APPS] = next.splitTunnelApps
-            values[DIRECT_RULES] = next.directRules
-            values[BLOCK_RULES] = next.blockRules
-            values[PROXY_RULES] = next.proxyRules
-            values[DPI_RULES] = next.dpiRules
-            values[SUBSCRIPTIONS] = encodeSubscriptions(next.subscriptions)
-            values[DIRECT_RESOLVER] = next.directResolver
-            values[MTU] = next.mtu.coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU)
+        updateMutex.withLock {
+            val saved = store.data.edit { values ->
+                val next = transform(decode(values))
+                values[THEME] = next.themeMode.name
+                values[CONNECT] = next.connectOnStart
+                values[LAN] = next.bypassLan
+                values[IPV6] = next.ipv6
+                values[SPLIT_MODE] = next.splitTunnelMode.name
+                values[SPLIT_APPS] = next.splitTunnelApps
+                values[DIRECT_RULES] = next.directRules
+                values[BLOCK_RULES] = next.blockRules
+                values[PROXY_RULES] = next.proxyRules
+                values[DPI_RULES] = next.dpiRules
+                values[SUBSCRIPTIONS] = encodeSubscriptions(next.subscriptions)
+                values[DIRECT_RESOLVER] = next.directResolver
+                values[MTU] = next.mtu.coerceIn(AppSettings.MIN_MTU, AppSettings.MAX_MTU)
+            }
+            val expected = decode(saved)
+            settings.first { it == expected }
         }
     }
 
