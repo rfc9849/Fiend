@@ -27,13 +27,18 @@ pub enum Hosts {
 }
 
 pub fn check_address(address: SocketAddr) -> io::Result<()> {
+    let ip = address.ip().to_canonical();
+    if let IpAddr::V4(ip) = ip
+        && fiend_tun::dns::is_fake_ip(ip)
+    {
+        return Ok(());
+    }
     let policy = TargetPolicy {
         allow_private: true,
         allow_cgnat: true,
         ..TargetPolicy::default()
     };
     policy.check(address)?;
-    let ip = address.ip().to_canonical();
     if METADATA.contains(&ip) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -309,6 +314,30 @@ mod tests {
         assert!(error.to_string().contains("not allowed"), "{error}");
         let error = download("http://localhost:9/list", Hosts::Public).unwrap_err();
         assert!(error.to_string().contains("not allowed"), "{error}");
+    }
+
+    #[test]
+    fn tunnel_fake_addresses_are_allowed_after_resolution() {
+        let resolver = CheckedResolver {
+            inner: DefaultResolver::default(),
+            check: Arc::new(check_address),
+        };
+        let config = ureq::Agent::config_builder().build();
+        for address in [
+            "198.18.0.2:443",
+            "198.18.0.9:443",
+            "198.19.255.254:443",
+            "[::ffff:198.18.0.9]:443",
+        ] {
+            let address: SocketAddr = address.parse().unwrap();
+            assert!(TargetPolicy::allow_all().check(address).is_err());
+            let uri = format!("https://{address}/list").parse().unwrap();
+            let resolved = resolver
+                .resolve(&uri, &config, NextTimeout::default())
+                .unwrap_or_else(|error| panic!("{address}: {error}"));
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0], address);
+        }
     }
 
     #[test]
