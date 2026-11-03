@@ -512,7 +512,10 @@ mod tests {
             .block_on(fiend_core::net::dial("127.0.0.1:443", &hook))
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(platform.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            platform.calls.load(Ordering::SeqCst),
+            fiend_core::net::CONNECT_ATTEMPTS
+        );
     }
 
     fn managed_server(
