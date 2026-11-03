@@ -26,12 +26,17 @@ pub(crate) const STALE: Duration = Duration::from_secs(5);
 pub(crate) struct Work {
     pub(crate) lanes: usize,
     pub(crate) pending: usize,
+    pub(crate) datagrams: usize,
     idle_since: Option<Instant>,
 }
 
 impl Work {
     pub(crate) fn total(self) -> usize {
         self.lanes + self.pending
+    }
+
+    pub(crate) fn streams(self) -> usize {
+        self.total() - self.datagrams
     }
 
     fn became_idle(&mut self) {
@@ -71,6 +76,7 @@ impl LinkShared {
             work: Mutex::new(Work {
                 lanes: 0,
                 pending: 0,
+                datagrams: 0,
                 idle_since: Some(now),
             }),
             load: Mutex::new(Load {
@@ -156,22 +162,31 @@ impl LinkShared {
         work.lanes += 1;
     }
 
-    fn reserve_lane(&self) {
+    fn reserve_lane(&self, kind: LaneKind) {
         let mut work = self.lock_work();
         work.pending += 1;
+        if kind.is_datagram() {
+            work.datagrams += 1;
+        }
         work.idle_since = None;
     }
 
-    fn release_reservation(&self) {
+    fn release_reservation(&self, kind: LaneKind) {
         let mut work = self.lock_work();
         work.pending -= 1;
+        if kind.is_datagram() {
+            work.datagrams -= 1;
+        }
         work.became_idle();
         self.wake.notify_one();
     }
 
-    pub(crate) fn lane_closed(&self) {
+    pub(crate) fn lane_closed(&self, kind: LaneKind) {
         let mut work = self.lock_work();
         work.lanes -= 1;
+        if kind.is_datagram() {
+            work.datagrams -= 1;
+        }
         work.became_idle();
         self.wake.notify_one();
     }
@@ -407,10 +422,11 @@ impl ClientLink {
         self.shared.work().total() < self.sender.current_max_send_streams().min(self.max_lanes)
     }
 
-    pub(crate) fn reserve(self: &Arc<Self>) -> LaneReservation {
-        self.shared.reserve_lane();
+    pub(crate) fn reserve(self: &Arc<Self>, kind: LaneKind) -> LaneReservation {
+        self.shared.reserve_lane(kind);
         LaneReservation {
             link: self.clone(),
+            kind,
             armed: true,
         }
     }
@@ -499,6 +515,7 @@ impl Drop for ClientLink {
 
 pub(crate) struct LaneReservation {
     pub(crate) link: Arc<ClientLink>,
+    kind: LaneKind,
     armed: bool,
 }
 
@@ -511,7 +528,7 @@ impl LaneReservation {
 impl Drop for LaneReservation {
     fn drop(&mut self) {
         if self.armed {
-            self.link.shared.release_reservation();
+            self.link.shared.release_reservation(self.kind);
         }
     }
 }
@@ -609,7 +626,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn pressure_needs_sustained_load_and_expires() {
         let shared = LinkShared::new(Arc::new(Notify::new()));
-        shared.reserve_lane();
+        shared.reserve_lane(LaneKind::Tcp);
         for inbound in [true, false] {
             shared.note_io(256 << 10, inbound);
             tokio::time::advance(LOAD_INTERVAL).await;
@@ -627,7 +644,7 @@ mod tests {
         tokio::time::advance(LOAD_COOLDOWN).await;
         shared.sample_load(256 << 10);
         assert!(!shared.is_bulk());
-        shared.release_reservation();
+        shared.release_reservation(LaneKind::Tcp);
     }
 
     #[tokio::test(start_paused = true)]
@@ -790,7 +807,7 @@ mod tests {
         let shared = LinkShared::new(Arc::new(Notify::new()));
         tokio::time::advance(Duration::from_secs(10)).await;
         assert_eq!(shared.idle_for_work(), Some(Duration::from_secs(10)));
-        shared.reserve_lane();
+        shared.reserve_lane(LaneKind::Tcp);
         assert_eq!(shared.work().pending, 1);
         assert_eq!(shared.idle_for_work(), None);
         shared.lane_opened();
@@ -798,11 +815,30 @@ mod tests {
         assert_eq!(shared.work().pending, 0);
         tokio::time::advance(Duration::from_secs(10)).await;
         assert_eq!(shared.idle_for_work(), None);
-        shared.lane_closed();
+        shared.lane_closed(LaneKind::Tcp);
         assert_eq!(shared.idle_for_work(), Some(Duration::ZERO));
         tokio::time::advance(Duration::from_secs(2)).await;
-        shared.reserve_lane();
-        shared.release_reservation();
+        shared.reserve_lane(LaneKind::Tcp);
+        shared.release_reservation(LaneKind::Tcp);
         assert_eq!(shared.idle_for_work(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn counts_datagram_lanes_apart_from_streams() {
+        let shared = LinkShared::new(Arc::new(Notify::new()));
+        shared.reserve_lane(LaneKind::Udp);
+        shared.reserve_lane(LaneKind::Icmp);
+        shared.reserve_lane(LaneKind::Tcp);
+        assert_eq!(shared.work().datagrams, 2);
+        assert_eq!(shared.work().streams(), 1);
+        shared.lane_opened();
+        shared.lane_opened();
+        assert_eq!(shared.work().datagrams, 2);
+        shared.lane_closed(LaneKind::Udp);
+        shared.release_reservation(LaneKind::Icmp);
+        assert_eq!(shared.work().datagrams, 0);
+        assert_eq!(shared.work().streams(), 1);
+        shared.lane_closed(LaneKind::Tcp);
+        assert_eq!(shared.work().total(), 0);
     }
 }

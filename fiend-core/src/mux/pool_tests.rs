@@ -134,7 +134,7 @@ async fn selection_reserves_before_reaping_and_drop_releases() {
     tokio::time::advance(Duration::from_secs(6)).await;
     let reserved = pool
         .inner
-        .acquire(Instant::now() + Duration::from_secs(1))
+        .acquire(Instant::now() + Duration::from_secs(1), LaneKind::Tcp)
         .await
         .unwrap();
     assert_eq!(reserved.link.id(), first.id());
@@ -154,12 +154,12 @@ async fn continuous_idle_and_unused_spare_expiry_retain_one_link() {
         ..Config::default()
     });
     let first = add_link(&pool).await;
-    let held = first.reserve();
+    let held = first.reserve(LaneKind::Tcp);
     let spare = add_link(&pool).await;
     tokio::time::advance(Duration::from_secs(4)).await;
     let reused = pool
         .inner
-        .acquire(Instant::now() + Duration::from_secs(1))
+        .acquire(Instant::now() + Duration::from_secs(1), LaneKind::Tcp)
         .await
         .unwrap();
     assert_eq!(reused.link.id(), spare.id());
@@ -181,13 +181,91 @@ async fn continuous_idle_and_unused_spare_expiry_retain_one_link() {
     assert_eq!(pool.stats().idle_closures, 2);
 }
 
+async fn reserve_now(pool: &LinkPool<DuplexStream>, kind: LaneKind) -> LaneReservation {
+    pool.inner
+        .acquire(Instant::now() + Duration::from_secs(1), kind)
+        .await
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_lanes_avoid_links_with_datagram_lanes() {
+    let pool = pool(Config::default());
+    let datagrams = add_link(&pool).await;
+    let streams = add_link(&pool).await;
+    let _call = datagrams.reserve(LaneKind::Udp);
+    let download = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(download.link.id(), streams.id());
+    let ping = reserve_now(&pool, LaneKind::Icmp).await;
+    assert_eq!(ping.link.id(), datagrams.id());
+    let page = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(page.link.id(), streams.id());
+    assert!(!pool.inner.state().spread_request);
+}
+
+#[tokio::test(start_paused = true)]
+async fn datagram_lanes_avoid_bulk_links() {
+    let pool = pool(Config::default());
+    let busy = add_link(&pool).await;
+    let quiet = add_link(&pool).await;
+    let _download = busy.reserve(LaneKind::Tcp);
+    pressure(&busy, true).await;
+    let call = reserve_now(&pool, LaneKind::Udp).await;
+    assert_eq!(call.link.id(), quiet.id());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_lane_on_a_datagram_link_asks_for_a_separate_link() {
+    let pool = pool(Config::default());
+    let only = add_link(&pool).await;
+    let _call = only.reserve(LaneKind::Udp);
+    let started = Instant::now();
+    let download = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(download.link.id(), only.id());
+    assert_eq!(
+        started.elapsed(),
+        Duration::ZERO,
+        "the lane does not wait for the dial"
+    );
+    assert!(pool.inner.state().spread_request);
+    let dial = pool.inner.maintain().expect("a separate link dial");
+    let separate = dial.await.unwrap();
+    pool.inner.dial_finished(Ok(separate));
+    assert_eq!(pool.stats().links, 2);
+    let next = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_ne!(next.link.id(), only.id());
+}
+
+#[tokio::test(start_paused = true)]
+async fn plain_stream_lanes_ask_for_no_extra_link() {
+    let pool = pool(Config::default());
+    let only = add_link(&pool).await;
+    let first = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(first.link.id(), only.id());
+    assert!(!pool.inner.state().spread_request);
+    assert!(pool.inner.maintain().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_single_link_at_the_limit_carries_both_kinds() {
+    let pool = pool(Config {
+        max_links: 1,
+        ..Config::default()
+    });
+    let only = add_link(&pool).await;
+    let _call = only.reserve(LaneKind::Udp);
+    let download = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(download.link.id(), only.id());
+    assert!(!pool.inner.state().spread_request);
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancellation_and_timeout_release_reservations() {
     let pool = pool(Config::default());
     add_link(&pool).await;
     let reservation = pool
         .inner
-        .acquire(Instant::now() + Duration::from_secs(1))
+        .acquire(Instant::now() + Duration::from_secs(1), LaneKind::Tcp)
         .await
         .unwrap();
     let future = async move {
@@ -205,7 +283,7 @@ async fn cancellation_and_timeout_release_reservations() {
     assert_eq!(pool.stats().pending_lanes, 0);
     let reservation = pool
         .inner
-        .acquire(Instant::now() + Duration::from_secs(1))
+        .acquire(Instant::now() + Duration::from_secs(1), LaneKind::Tcp)
         .await
         .unwrap();
     assert!(
@@ -223,7 +301,7 @@ async fn cancellation_and_timeout_release_reservations() {
 async fn recent_load_recovers_and_brief_bursts_do_not_expand() {
     let pool = pool(Config::default());
     let link = add_link(&pool).await;
-    let held = link.reserve();
+    let held = link.reserve(LaneKind::Tcp);
     for _ in 0..4 {
         link.shared().note_io(1 << 20, false);
         tokio::time::advance(LOAD_INTERVAL).await;
@@ -245,7 +323,7 @@ async fn recent_load_recovers_and_brief_bursts_do_not_expand() {
     drop(held);
     let reservation = pool
         .inner
-        .acquire(Instant::now() + Duration::from_secs(1))
+        .acquire(Instant::now() + Duration::from_secs(1), LaneKind::Tcp)
         .await
         .unwrap();
     assert_eq!(reservation.link.id(), link.id());
@@ -255,13 +333,13 @@ async fn recent_load_recovers_and_brief_bursts_do_not_expand() {
 async fn optional_dial_never_blocks_existing_capacity_or_moves_work() {
     let pool: LinkPool<DuplexStream> = LinkPool::new(Config::default(), pending);
     let link = add_link(&pool).await;
-    let held = link.reserve();
+    let held = link.reserve(LaneKind::Tcp);
     pressure(&link, false).await;
     let dial = pool.inner.maintain().unwrap();
     let before = Instant::now();
     let reservation = pool
         .inner
-        .acquire(before + Duration::from_secs(1))
+        .acquire(before + Duration::from_secs(1), LaneKind::Tcp)
         .await
         .unwrap();
     assert_eq!(Instant::now(), before);
@@ -273,7 +351,7 @@ async fn optional_dial_never_blocks_existing_capacity_or_moves_work() {
     for _ in 0..20 {
         let reservation = pool
             .inner
-            .acquire(Instant::now() + Duration::from_secs(1))
+            .acquire(Instant::now() + Duration::from_secs(1), LaneKind::Tcp)
             .await
             .unwrap();
         assert_eq!(reservation.link.id(), link.id());
@@ -290,7 +368,7 @@ async fn sustained_pressure_does_not_replace_an_unused_spare() {
         ..Config::default()
     });
     let link = add_link(&pool).await;
-    let _held = link.reserve();
+    let _held = link.reserve(LaneKind::Tcp);
     pressure(&link, false).await;
     let dial = pool.inner.maintain().unwrap();
     pool.inner.dial_finished(dial.await);
@@ -311,11 +389,11 @@ async fn stream_capacity_selection_uses_other_links() {
         ..Config::default()
     });
     let first = add_link(&pool).await;
-    let held = first.reserve();
+    let held = first.reserve(LaneKind::Tcp);
     let second = add_link(&pool).await;
     let reservation = pool
         .inner
-        .acquire(Instant::now() + Duration::from_secs(1))
+        .acquire(Instant::now() + Duration::from_secs(1), LaneKind::Tcp)
         .await
         .unwrap();
     assert_eq!(reservation.link.id(), second.id());
@@ -329,7 +407,7 @@ async fn speculative_failures_obey_backoff_and_attempt_limit() {
         Err(transport::Error::invalid("test dial failure"))
     });
     let link = add_link(&pool).await;
-    let _held = link.reserve();
+    let _held = link.reserve(LaneKind::Tcp);
     link.shared().blocked(true);
     pressure(&link, false).await;
     for attempt in 1..=3 {
@@ -341,7 +419,7 @@ async fn speculative_failures_obey_backoff_and_attempt_limit() {
         for _ in 0..20 {
             let reservation = pool
                 .inner
-                .acquire(Instant::now() + Duration::from_secs(1))
+                .acquire(Instant::now() + Duration::from_secs(1), LaneKind::Tcp)
                 .await
                 .unwrap();
             assert_eq!(reservation.link.id(), link.id());
@@ -567,7 +645,7 @@ use std::task::Poll;
 async fn spread_request_dials_a_second_link() {
     let pool = pool(Config::default());
     let link = add_link(&pool).await;
-    let _held = link.reserve();
+    let _held = link.reserve(LaneKind::Tcp);
     pool.inner.state().spread_request = true;
     let dial = pool
         .inner
@@ -583,12 +661,12 @@ async fn spread_request_dials_a_second_link() {
 async fn a_loaded_single_link_spreads_a_new_lane() {
     let pool = pool(Config::default());
     let link = add_link(&pool).await;
-    let _a = link.reserve();
-    let _b = link.reserve();
+    let _a = link.reserve(LaneKind::Tcp);
+    let _b = link.reserve(LaneKind::Tcp);
     let inner = pool.inner.clone();
     let task = tokio::spawn(async move {
         inner
-            .acquire(Instant::now() + Duration::from_secs(5))
+            .acquire(Instant::now() + Duration::from_secs(5), LaneKind::Tcp)
             .await
             .map(|reservation| reservation.link.id())
     });

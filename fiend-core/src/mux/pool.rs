@@ -24,6 +24,24 @@ const GROWTH_COOLDOWN: Duration = Duration::from_secs(5);
 const SPREAD_WAIT: Duration = Duration::from_secs(1);
 const SPREAD_LANES: usize = 2;
 
+fn placement(link: &ClientLink, kind: LaneKind) -> (bool, bool, usize, usize) {
+    let work = link.shared().work();
+    if kind.is_datagram() {
+        (
+            link.is_bulk(),
+            work.datagrams == 0,
+            work.streams(),
+            work.total(),
+        )
+    } else {
+        (link.is_bulk(), work.datagrams > 0, 0, work.total())
+    }
+}
+
+fn fits(link: &ClientLink, kind: LaneKind) -> bool {
+    !link.is_bulk() && (kind.is_datagram() || link.shared().work().datagrams == 0)
+}
+
 #[cfg(test)]
 #[path = "pool_tests.rs"]
 mod tests;
@@ -181,7 +199,7 @@ where
     ) -> Result<H2Lane> {
         let mut last = Error::Unavailable;
         for _ in 0..self.inner.config.attempts {
-            let reservation = self.inner.acquire(deadline).await?;
+            let reservation = self.inner.acquire(deadline, kind).await?;
             let link = reservation.link.clone();
             match link
                 .open_lane(authority, kind, &self.inner.config, reservation)
@@ -212,7 +230,7 @@ where
     pub async fn ready(&self) -> Result<()> {
         self.inner.start_worker();
         let deadline = Instant::now() + self.inner.config.open_timeout;
-        self.inner.acquire(deadline).await.map(drop)
+        self.inner.acquire(deadline, LaneKind::Tcp).await.map(drop)
     }
 
     pub fn stats(&self) -> PoolStats {
@@ -374,7 +392,7 @@ where
         }
     }
 
-    async fn acquire(&self, deadline: Instant) -> Result<LaneReservation> {
+    async fn acquire(&self, deadline: Instant, kind: LaneKind) -> Result<LaneReservation> {
         self.waiters.fetch_add(1, Ordering::AcqRel);
         let _demand = Demand {
             pool: self,
@@ -412,9 +430,21 @@ where
                     .links
                     .iter()
                     .filter(|link| !link.is_closed() && link.has_capacity())
-                    .min_by_key(|link| (link.is_bulk(), link.shared().work().total()))
+                    .min_by_key(|link| placement(link, kind))
                 {
-                    return Ok(link.reserve());
+                    let separate = state.links.len() < self.config.max_links
+                        && state.backoff.delay.is_zero()
+                        && !state
+                            .links
+                            .iter()
+                            .filter(|link| !link.is_closed() && link.has_capacity())
+                            .any(|link| fits(link, kind));
+                    let reservation = link.reserve(kind);
+                    if separate && !state.spread_request {
+                        state.spread_request = true;
+                        self.wake.notify_one();
+                    }
+                    return Ok(reservation);
                 }
                 if (state.dial_failures + state.failed_closures).saturating_sub(failures)
                     >= self.config.attempts as u64

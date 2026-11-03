@@ -38,6 +38,10 @@ pub enum LaneKind {
 }
 
 impl LaneKind {
+    pub fn is_datagram(self) -> bool {
+        !matches!(self, Self::Tcp)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Tcp => "tcp",
@@ -371,7 +375,7 @@ impl Drop for H2Lane {
     fn drop(&mut self) {
         self.set_blocked(false);
         if let Some(shared) = &self.shared {
-            shared.lane_closed();
+            shared.lane_closed(self.kind);
         }
         if !(self.reset || self.send_eof && self.recv_eof) {
             self.send.send_reset(Reason::CANCEL);
