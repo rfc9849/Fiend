@@ -24,22 +24,30 @@ const GROWTH_COOLDOWN: Duration = Duration::from_secs(5);
 const SPREAD_WAIT: Duration = Duration::from_secs(1);
 const SPREAD_LANES: usize = 2;
 
-fn placement(link: &ClientLink, kind: LaneKind) -> (bool, bool, usize, usize) {
+fn placement(link: &ClientLink, kind: LaneKind) -> (bool, bool, bool, usize, usize) {
     let work = link.shared().work();
+    let suspect = link.shared().is_suspect();
     if kind.is_datagram() {
         (
+            suspect,
             link.is_bulk(),
             work.datagrams == 0,
             work.streams(),
             work.total(),
         )
     } else {
-        (link.is_bulk(), work.datagrams > 0, 0, work.total())
+        (suspect, link.is_bulk(), work.datagrams > 0, 0, work.total())
     }
 }
 
 fn fits(link: &ClientLink, kind: LaneKind) -> bool {
-    !link.is_bulk() && (kind.is_datagram() || link.shared().work().datagrams == 0)
+    !link.shared().is_suspect()
+        && !link.is_bulk()
+        && (kind.is_datagram() || link.shared().work().datagrams == 0)
+}
+
+fn healthy(link: &ClientLink) -> bool {
+    !link.is_closed() && !link.shared().is_suspect() && link.has_capacity()
 }
 
 #[cfg(test)]
@@ -419,7 +427,13 @@ where
                     && state.links.iter().all(|link| {
                         link.is_closed() || link.shared().work().total() >= SPREAD_LANES
                     });
-                let spread = loaded
+                let doubtful = state.links.len() < self.config.max_links
+                    && state
+                        .links
+                        .iter()
+                        .any(|link| !link.is_closed() && link.has_capacity())
+                    && !state.links.iter().any(|link| healthy(link));
+                let spread = (loaded || doubtful)
                     && state.backoff.delay.is_zero()
                     && spread_until.is_none_or(|until| now < until);
                 if spread {
@@ -452,9 +466,13 @@ where
                     return Err(Error::Unavailable);
                 }
             }
-            timeout_at(deadline, ready)
-                .await
-                .map_err(|_| Error::Timeout)?;
+            let now = Instant::now();
+            let wake_at = spread_until
+                .filter(|until| now < *until)
+                .map_or(deadline, |until| until.min(deadline));
+            if timeout_at(wake_at, ready).await.is_err() && Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
         }
     }
 
@@ -508,6 +526,11 @@ where
         let waiters = self.waiters.load(Ordering::Acquire);
         let required = waiters > 0 && !capacity;
         let spread = state.spread_request && state.links.len() < self.config.max_links;
+        let replace = state
+            .links
+            .iter()
+            .any(|link| !link.is_closed() && link.shared().is_suspect())
+            && !state.links.iter().any(|link| healthy(link));
         let speculative = pressure > state.pressure_watermark
             && state
                 .links
@@ -520,14 +543,14 @@ where
         if state.dialing
             || state.links.len() >= self.config.max_links
             || now < state.backoff.next
-            || !(required || speculative || spread)
+            || !(required || speculative || spread || replace)
         {
             return None;
         }
         state.dialing = true;
         state.dial_attempts += 1;
         state.spread_request = false;
-        if !required && !spread {
+        if !required && !spread && !replace {
             state.speculative_attempts += 1;
         }
         let id = state.next_id;

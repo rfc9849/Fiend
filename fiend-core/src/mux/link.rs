@@ -21,6 +21,8 @@ use crate::transport::Session;
 pub(crate) const LOAD_INTERVAL: Duration = Duration::from_millis(250);
 const LOAD_COOLDOWN: Duration = Duration::from_secs(1);
 pub(crate) const STALE: Duration = Duration::from_secs(5);
+const QUIET_PROBE: Duration = Duration::from_secs(2);
+const SUSPECT_FLOOR: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Work {
@@ -60,6 +62,8 @@ pub(crate) struct LinkShared {
     blocked_writers: AtomicUsize,
     bulk: AtomicBool,
     closed: AtomicBool,
+    armed: AtomicBool,
+    suspect: AtomicBool,
     last_inbound_ms: AtomicU64,
     rtt_us: AtomicU64,
     rtt_at_ms: AtomicU64,
@@ -89,6 +93,8 @@ impl LinkShared {
             blocked_writers: AtomicUsize::new(0),
             bulk: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            armed: AtomicBool::new(false),
+            suspect: AtomicBool::new(false),
             last_inbound_ms: AtomicU64::new(0),
             rtt_us: AtomicU64::new(u64::MAX),
             rtt_at_ms: AtomicU64::new(0),
@@ -115,6 +121,31 @@ impl LinkShared {
         } else {
             self.outbound.fetch_add(bytes as u64, Ordering::Relaxed);
         }
+        if bytes > 0 && !self.armed.swap(true, Ordering::AcqRel) {
+            self.check.notify_one();
+        }
+    }
+
+    pub(crate) fn is_suspect(&self) -> bool {
+        self.suspect.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_suspect(&self, suspect: bool) {
+        if self.suspect.swap(suspect, Ordering::AcqRel) != suspect {
+            self.wake.notify_one();
+        }
+    }
+
+    fn quiet_probe_due(&self) -> Option<Duration> {
+        if !self.armed.load(Ordering::Acquire) || self.work().lanes == 0 {
+            return None;
+        }
+        Some(QUIET_PROBE.saturating_sub(self.idle_for()))
+    }
+
+    fn suspect_after(&self, probe: Duration) -> Duration {
+        let rtt = self.rtt().map_or(Duration::ZERO, |(rtt, _)| rtt * 4);
+        rtt.max(SUSPECT_FLOOR).min(probe)
     }
 
     pub(crate) fn blocked(&self, blocked: bool) {
@@ -572,15 +603,18 @@ async fn keepalive_loop(
     let mut idle_wait = timing.next_idle();
     loop {
         if !first {
-            let wait = if timing.measure {
+            let idle = if timing.measure {
                 timing.tick
             } else {
                 idle_wait.saturating_sub(shared.idle_for())
             };
+            let wait = shared
+                .quiet_probe_due()
+                .map_or(idle, |quiet| quiet.min(idle));
             let check = shared.check.notified();
             tokio::pin!(check);
             check.as_mut().enable();
-            if !shared.check_requested.load(Ordering::Acquire) {
+            if !shared.check_requested.load(Ordering::Acquire) && !wait.is_zero() {
                 tokio::select! {
                     _ = sleep(wait) => {}
                     _ = check => {}
@@ -593,17 +627,29 @@ async fn keepalive_loop(
         }
         let checked = shared.take_check();
         let quiet = shared.idle_for();
-        let due = timing.measure || quiet >= idle_wait || checked && quiet >= STALE;
+        let quiet_probe = shared.quiet_probe_due().is_some_and(|left| left.is_zero());
+        let due = timing.measure || quiet >= idle_wait || checked && quiet >= STALE || quiet_probe;
         if !due {
             continue;
         }
+        shared.armed.store(false, Ordering::Release);
         let started = Instant::now();
         let ping = ping_pong.ping(Ping::opaque());
         tokio::pin!(ping);
+        let suspect_after = shared.suspect_after(timing.probe);
+        let mut step = suspect_after;
         let answered = loop {
-            match timeout(timing.probe, &mut ping).await {
+            match timeout(step, &mut ping).await {
                 Ok(result) => break result.is_ok(),
-                Err(_) if shared.idle_for() < timing.probe => {}
+                Err(_) if shared.idle_for() < step => {}
+                Err(_) if !shared.is_suspect() && step == suspect_after => {
+                    tracing::debug!("mux link suspect: no reply to the quiet probe");
+                    shared.set_suspect(true);
+                    step = timing
+                        .probe
+                        .saturating_sub(suspect_after)
+                        .max(SUSPECT_FLOOR);
+                }
                 Err(_) => break false,
             }
         };
@@ -612,8 +658,9 @@ async fn keepalive_loop(
             driver.abort();
             return;
         }
+        shared.set_suspect(false);
         shared.record_rtt(started.elapsed());
-        shared.note_io(0, true);
+        shared.heard();
         shared.take_check();
         idle_wait = timing.next_idle();
     }
@@ -682,12 +729,128 @@ mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
-        tokio::time::advance(config.probe_timeout + Duration::from_millis(1)).await;
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
+        run_for(config.probe_timeout + Duration::from_millis(1)).await;
         assert!(link.is_closed());
         held.abort();
+    }
+
+    async fn run_for(span: Duration) {
+        let step = Duration::from_millis(100);
+        let mut left = span;
+        while !left.is_zero() {
+            let now = step.min(left);
+            tokio::time::advance(now).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            left -= now;
+        }
+    }
+
+    fn test_session<S>(io: S) -> Session<S> {
+        use crate::crypto::RecordCipher;
+        Session::new(
+            io,
+            RecordCipher::new(&[1; 32], [2; 12]),
+            RecordCipher::new(&[1; 32], [2; 12]),
+            16384,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_that_goes_silent_mid_transfer_is_suspected_then_closed() {
+        use crate::mux::ServerConnection;
+        use std::future::pending;
+
+        let (client, server) = tokio::io::duplex(64 << 10);
+        let config = Config::default();
+        let server_config = config.clone();
+        let held = tokio::spawn(async move {
+            let connection = ServerConnection::handshake(test_session(server), &server_config)
+                .await
+                .expect("server handshake");
+            pending::<()>().await;
+            drop(connection);
+        });
+        let wake = Arc::new(Notify::new());
+        let link = ClientLink::connect(test_session(client), &config, 1, wake.clone())
+            .await
+            .expect("client handshake");
+        link.shared().reserve_lane(LaneKind::Tcp);
+        link.shared().lane_opened();
+        link.shared().note_io(64 << 10, true);
+        run_for(QUIET_PROBE - Duration::from_millis(200)).await;
+        assert!(!link.shared().is_suspect(), "data flowed 1.8 s ago");
+        run_for(Duration::from_millis(200) + SUSPECT_FLOOR + Duration::from_millis(200)).await;
+        assert!(link.shared().is_suspect(), "no reply to the quiet probe");
+        assert!(!link.is_closed());
+        run_for(config.probe_timeout).await;
+        assert!(link.is_closed(), "closed within the probe timeout");
+        held.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_live_link_gets_one_quiet_probe_per_silence() {
+        use crate::mux::ServerConnection;
+
+        let (client, server) = tokio::io::duplex(64 << 10);
+        let config = Config::default();
+        let server_config = config.clone();
+        let served = tokio::spawn(async move {
+            let mut connection = ServerConnection::handshake(test_session(server), &server_config)
+                .await
+                .expect("server handshake");
+            while let Ok(Some(_)) = connection.accept().await {}
+        });
+        let link = ClientLink::connect(test_session(client), &config, 1, Arc::new(Notify::new()))
+            .await
+            .expect("client handshake");
+        link.shared().reserve_lane(LaneKind::Tcp);
+        link.shared().lane_opened();
+        link.shared().note_io(512, false);
+        run_for(QUIET_PROBE + Duration::from_millis(300)).await;
+        let (_, age) = link.shared().rtt().expect("one quiet probe");
+        assert!(age < Duration::from_millis(500));
+        assert!(!link.shared().is_suspect());
+        run_for(Duration::from_secs(10)).await;
+        let (_, age) = link.shared().rtt().expect("sample");
+        assert!(
+            age >= Duration::from_secs(10),
+            "no new probe without new data"
+        );
+        link.shared().note_io(512, true);
+        run_for(QUIET_PROBE + Duration::from_millis(300)).await;
+        let (_, age) = link.shared().rtt().expect("sample");
+        assert!(
+            age < Duration::from_millis(500),
+            "new data arms one more probe"
+        );
+        assert!(!link.is_closed());
+        served.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_link_without_lanes_gets_no_quiet_probe() {
+        let shared = LinkShared::new(Arc::new(Notify::new()));
+        shared.note_io(512, true);
+        assert_eq!(shared.quiet_probe_due(), None);
+        shared.reserve_lane(LaneKind::Tcp);
+        shared.lane_opened();
+        assert_eq!(shared.quiet_probe_due(), Some(QUIET_PROBE));
+        tokio::time::advance(QUIET_PROBE * 2).await;
+        assert_eq!(shared.quiet_probe_due(), Some(Duration::ZERO));
+        shared.record_rtt(Duration::from_millis(400));
+        assert_eq!(
+            shared.suspect_after(Duration::from_secs(5)),
+            Duration::from_millis(1600)
+        );
+        shared.record_rtt(Duration::from_millis(50));
+        assert_eq!(shared.suspect_after(Duration::from_secs(5)), SUSPECT_FLOOR);
+        shared.record_rtt(Duration::from_secs(3));
+        assert_eq!(
+            shared.suspect_after(Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
     }
 
     #[tokio::test(start_paused = true)]

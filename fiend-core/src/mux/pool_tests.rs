@@ -260,6 +260,62 @@ async fn a_single_link_at_the_limit_carries_both_kinds() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn new_lanes_avoid_a_suspect_link() {
+    let pool = pool(Config::default());
+    let doubtful = add_link(&pool).await;
+    let fine = add_link(&pool).await;
+    let _a = fine.reserve(LaneKind::Tcp);
+    let _b = fine.reserve(LaneKind::Tcp);
+    doubtful.shared().set_suspect(true);
+    let page = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(page.link.id(), fine.id());
+    let call = reserve_now(&pool, LaneKind::Udp).await;
+    assert_eq!(call.link.id(), fine.id());
+    assert!(pool.inner.maintain().is_none(), "a healthy link is left");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_suspect_only_link_gets_a_replacement() {
+    let pool = pool(Config::default());
+    let doubtful = add_link(&pool).await;
+    doubtful.shared().set_suspect(true);
+    let dial = pool.inner.maintain().expect("a replacement dial");
+    let replacement = dial.await.unwrap();
+    pool.inner.dial_finished(Ok(replacement));
+    assert_eq!(pool.stats().links, 2);
+    let lane = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_ne!(lane.link.id(), doubtful.id());
+    assert!(pool.inner.maintain().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lane_waits_briefly_for_a_replacement_then_uses_the_suspect_link() {
+    let pool = pool(Config::default());
+    let doubtful = add_link(&pool).await;
+    doubtful.shared().set_suspect(true);
+    let started = Instant::now();
+    let lane = pool
+        .inner
+        .acquire(Instant::now() + Duration::from_secs(5), LaneKind::Tcp)
+        .await
+        .unwrap();
+    assert_eq!(lane.link.id(), doubtful.id());
+    assert!(started.elapsed() >= SPREAD_WAIT);
+    assert!(started.elapsed() < SPREAD_WAIT * 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recovered_link_needs_no_replacement() {
+    let pool = pool(Config::default());
+    let link = add_link(&pool).await;
+    link.shared().set_suspect(true);
+    link.shared().set_suspect(false);
+    assert!(pool.inner.maintain().is_none());
+    let lane = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(lane.link.id(), link.id());
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancellation_and_timeout_release_reservations() {
     let pool = pool(Config::default());
     add_link(&pool).await;
