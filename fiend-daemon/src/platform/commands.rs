@@ -158,6 +158,8 @@ fn already_undone(error: &io::Error) -> bool {
         "Cannot find device",
         "No such file or directory",
         "does not exist",
+        "No chain/target/match by that name",
+        "does a matching rule exist",
     ]
     .iter()
     .any(|needle| text.contains(needle))
@@ -306,7 +308,12 @@ mod tests {
             .unwrap();
         assert!(v4 > fwmark, "added last, so the kernel checks it first");
         assert!(text.contains(&"ip -6 rule add to 2001:db8::7/128 table main".to_owned()));
-        assert_eq!(text.iter().filter(|line| line.contains("203.0.113.5")).count(), 1);
+        assert_eq!(
+            text.iter()
+                .filter(|line| line.contains("203.0.113.5"))
+                .count(),
+            1
+        );
         assert_eq!(steps.len(), 10);
     }
 
@@ -366,7 +373,13 @@ mod tests {
             ..Recorder::default()
         };
         assert!(
-            apply_steps(&route_steps("fiend0", 7, &[]), &mut journal, &file, &mut runner).is_err()
+            apply_steps(
+                &route_steps("fiend0", 7, &[]),
+                &mut journal,
+                &file,
+                &mut runner
+            )
+            .is_err()
         );
         assert_eq!(journal.undo.len(), 5);
         assert_eq!(file.load().unwrap().undo.len(), 5);

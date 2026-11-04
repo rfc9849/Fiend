@@ -2436,6 +2436,7 @@ dependencies = [
  "fiend-app",
  "fiend-core",
  "fiend-ipc",
+ "fiend-root",
  "fiend-tun",
  "rand 0.10.3",
  "route_manager",

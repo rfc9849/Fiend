@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -164,6 +165,13 @@ fn engine_settings(store: &Store) -> EngineSettings {
     }
 }
 
+/// What the platform opened: a TUN device, or TPROXY sockets on Linux.
+enum Link<D> {
+    Tun(D),
+    #[cfg(target_os = "linux")]
+    Transparent(fiend_tun::TransparentSockets),
+}
+
 struct Running {
     cancel: CancellationToken,
     task: JoinHandle<()>,
@@ -312,13 +320,22 @@ impl<P: Platform> Inner<P> {
             let engine = tun.clone();
             let changed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || engine.network_changed());
             tokio::task::spawn_blocking(move || {
-                platform.open(&request, &|step| inner.set_step(session, step), changed)
+                let progress = |step| inner.set_step(session, step);
+                #[cfg(target_os = "linux")]
+                if let Some((sockets, guard)) =
+                    platform.open_transparent(&request, &progress, changed.clone())?
+                {
+                    return Ok((Link::Transparent(sockets), guard));
+                }
+                platform
+                    .open(&request, &progress, changed)
+                    .map(|(device, guard)| (Link::Tun(device), guard))
             })
             .await
             .map_err(|error| error.to_string())?
-            .map_err(|error| error.to_string())?
+            .map_err(|error: io::Error| error.to_string())?
         };
-        let (device, guard) = opened;
+        let (link, guard) = opened;
         if cancel.is_cancelled() {
             drop(guard);
             return Ok(());
@@ -338,8 +355,24 @@ impl<P: Platform> Inner<P> {
             client.clone(),
         ));
 
-        let device = Arc::new(device);
-        let run = tun.run(device.clone());
+        let (device, link) = match link {
+            Link::Tun(device) => {
+                let device = Arc::new(device);
+                (Some(device.clone()), Link::Tun(device))
+            }
+            #[cfg(target_os = "linux")]
+            Link::Transparent(sockets) => (None, Link::Transparent(sockets)),
+        };
+        let run = {
+            let tun = tun.clone();
+            async move {
+                match link {
+                    Link::Tun(device) => tun.run(device).await,
+                    #[cfg(target_os = "linux")]
+                    Link::Transparent(sockets) => tun.run_transparent(sockets).await,
+                }
+            }
+        };
         tokio::pin!(run);
         let result = tokio::select! {
             result = &mut run => result,

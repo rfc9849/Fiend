@@ -596,6 +596,334 @@ pub fn cleanup() -> Vec<(bool, Command)> {
     rules
 }
 
+/// The desktop Linux setup: every packet goes through Fiend, except packets
+/// of the daemon itself, which carry `protect_mark`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Desktop {
+    pub ipv6: bool,
+    pub bypass_lan: bool,
+    pub protect_mark: u32,
+    pub port: u16,
+}
+
+const FORWARD: &str = "fiend_fwd";
+const PROBE: &str = "fiend_probe";
+
+fn undo_of(apply: &Command) -> Command {
+    let mut undo = apply.clone();
+    for word in undo.iter_mut() {
+        let swapped = match word.as_str() {
+            "-A" | "-I" => "-D",
+            "-N" => "-X",
+            "add" => "del",
+            _ => continue,
+        };
+        *word = swapped.to_owned();
+        break;
+    }
+    undo
+}
+
+fn desktop_capture(family: Family, config: &Desktop) -> Vec<Command> {
+    let mark = mark();
+    let port = config.port.to_string();
+    let protect = config.protect_mark.to_string();
+    let table = TABLE.to_string();
+    let priority = PRIORITY.to_string();
+    let mut rules = vec![
+        command(&[
+            "ip",
+            family.ip(),
+            "rule",
+            "add",
+            "fwmark",
+            &mark,
+            "lookup",
+            &table,
+            "pref",
+            &priority,
+        ]),
+        command(&[
+            "ip",
+            family.ip(),
+            "route",
+            "add",
+            "local",
+            family.any(),
+            "dev",
+            "lo",
+            "table",
+            &table,
+        ]),
+    ];
+    for (name, chain) in [
+        ("mangle", OUT),
+        ("mangle", PRE),
+        ("mangle", FORWARD),
+        ("filter", GUARD),
+    ] {
+        rules.push(table_rule(family, name, &["-N", chain]));
+    }
+    let out = |parts: &[&str]| {
+        let mut all = vec!["-A", OUT];
+        all.extend_from_slice(parts);
+        table_rule(family, "mangle", &all)
+    };
+    rules.push(out(&["-m", "mark", "--mark", &protect, "-j", "RETURN"]));
+    rules.push(out(&["-o", "lo", "-j", "RETURN"]));
+    for protocol in ["udp", "tcp"] {
+        rules.push(out(&[
+            "-p",
+            protocol,
+            "--dport",
+            "53",
+            "-j",
+            "MARK",
+            "--set-xmark",
+            &mark,
+        ]));
+    }
+    for network in family.reserved(config.bypass_lan) {
+        rules.push(out(&["-d", network, "-j", "RETURN"]));
+    }
+    for protocol in ["tcp", "udp"] {
+        rules.push(out(&["-p", protocol, "-j", "MARK", "--set-xmark", &mark]));
+    }
+    let tproxy = |chain: &str, prefix: &[&str], protocol: &str| {
+        let mut all = vec!["-A", chain];
+        all.extend_from_slice(prefix);
+        all.extend_from_slice(&[
+            "-p",
+            protocol,
+            "-j",
+            "TPROXY",
+            "--on-ip",
+            family.loopback(),
+            "--on-port",
+            &port,
+            "--tproxy-mark",
+            &mark,
+        ]);
+        table_rule(family, "mangle", &all)
+    };
+    rules.push(table_rule(
+        family,
+        "mangle",
+        &[
+            "-A",
+            PRE,
+            "-i",
+            "lo",
+            "-p",
+            "tcp",
+            "-m",
+            "mark",
+            "--mark",
+            &mark,
+            "-m",
+            "socket",
+            "--nowildcard",
+            "-j",
+            "RETURN",
+        ],
+    ));
+    for protocol in ["tcp", "udp"] {
+        rules.push(tproxy(
+            PRE,
+            &["-i", "lo", "-m", "mark", "--mark", &mark],
+            protocol,
+        ));
+    }
+    rules.push(table_rule(
+        family,
+        "mangle",
+        &["-A", PRE, "!", "-i", "lo", "-j", FORWARD],
+    ));
+    rules.push(table_rule(
+        family,
+        "mangle",
+        &[
+            "-A",
+            FORWARD,
+            "-m",
+            "addrtype",
+            "--dst-type",
+            "LOCAL",
+            "-j",
+            "RETURN",
+        ],
+    ));
+    for network in family.reserved(config.bypass_lan) {
+        rules.push(table_rule(
+            family,
+            "mangle",
+            &["-A", FORWARD, "-d", network, "-j", "RETURN"],
+        ));
+    }
+    for protocol in ["tcp", "udp"] {
+        rules.push(tproxy(FORWARD, &[], protocol));
+    }
+    for (protocol, reject) in [
+        ("tcp", "tcp-reset"),
+        (
+            "udp",
+            match family {
+                Family::V4 => "icmp-port-unreachable",
+                Family::V6 => "icmp6-port-unreachable",
+            },
+        ),
+    ] {
+        rules.push(table_rule(
+            family,
+            "filter",
+            &[
+                "-A",
+                GUARD,
+                "-d",
+                family.loopback(),
+                "-p",
+                protocol,
+                "--dport",
+                &port,
+                "-j",
+                "REJECT",
+                "--reject-with",
+                reject,
+            ],
+        ));
+    }
+    rules.extend(jumps(family, true));
+    rules
+}
+
+/// IPv6 off: the IPv6 traffic of this system is refused, except loopback,
+/// local networks and the daemon.
+fn desktop_refuse(family: Family, config: &Desktop) -> Vec<Command> {
+    let protect = config.protect_mark.to_string();
+    let mut rules = vec![table_rule(family, "filter", &["-N", GUARD])];
+    let guard = |parts: &[&str]| {
+        let mut all = vec!["-A", GUARD];
+        all.extend_from_slice(parts);
+        table_rule(family, "filter", &all)
+    };
+    rules.push(guard(&["-m", "mark", "--mark", &protect, "-j", "RETURN"]));
+    rules.push(guard(&["-o", "lo", "-j", "RETURN"]));
+    for network in family.reserved(config.bypass_lan) {
+        rules.push(guard(&["-d", network, "-j", "RETURN"]));
+    }
+    rules.push(guard(&[
+        "-p",
+        "tcp",
+        "-j",
+        "REJECT",
+        "--reject-with",
+        "tcp-reset",
+    ]));
+    rules.push(guard(&["-j", "REJECT"]));
+    rules.push(table_rule(family, "filter", &["-I", "OUTPUT", "-j", GUARD]));
+    rules
+}
+
+/// The desktop rules as (apply, undo) pairs, in apply order. Undo them in
+/// reverse order.
+pub fn desktop(config: &Desktop) -> Vec<(Command, Command)> {
+    let mut rules = desktop_capture(Family::V4, config);
+    if config.ipv6 {
+        rules.extend(desktop_capture(Family::V6, config));
+    } else {
+        rules.extend(desktop_refuse(Family::V6, config));
+    }
+    rules
+        .into_iter()
+        .map(|apply| {
+            let undo = undo_of(&apply);
+            (apply, undo)
+        })
+        .collect()
+}
+
+/// Commands that must succeed while the desktop rules are in place.
+pub fn desktop_check(config: &Desktop) -> Vec<Command> {
+    let mut rules = jumps(Family::V4, false);
+    if config.ipv6 {
+        rules.extend(jumps(Family::V6, false));
+    } else {
+        rules.push(table_rule(
+            Family::V6,
+            "filter",
+            &["-C", "OUTPUT", "-j", GUARD],
+        ));
+    }
+    rules
+}
+
+/// Commands that try every match and target of the desktop rules in a
+/// chain of their own, and the commands that remove the chain again.
+pub fn probe(ipv6: bool) -> (Vec<Command>, Vec<Command>) {
+    let mut setup = Vec::new();
+    let mut cleanup = Vec::new();
+    let families: &[Family] = if ipv6 {
+        &[Family::V4, Family::V6]
+    } else {
+        &[Family::V4]
+    };
+    let mark = mark();
+    for family in families {
+        let family = *family;
+        cleanup.push(table_rule(family, "mangle", &["-F", PROBE]));
+        cleanup.push(table_rule(family, "mangle", &["-X", PROBE]));
+        setup.push(table_rule(family, "mangle", &["-N", PROBE]));
+        setup.push(table_rule(
+            family,
+            "mangle",
+            &[
+                "-A",
+                PROBE,
+                "-p",
+                "tcp",
+                "-m",
+                "socket",
+                "--nowildcard",
+                "-j",
+                "RETURN",
+            ],
+        ));
+        setup.push(table_rule(
+            family,
+            "mangle",
+            &[
+                "-A",
+                PROBE,
+                "-m",
+                "addrtype",
+                "--dst-type",
+                "LOCAL",
+                "-j",
+                "RETURN",
+            ],
+        ));
+        setup.push(table_rule(
+            family,
+            "mangle",
+            &[
+                "-A",
+                PROBE,
+                "-p",
+                "udp",
+                "-j",
+                "TPROXY",
+                "--on-ip",
+                family.loopback(),
+                "--on-port",
+                "9",
+                "--tproxy-mark",
+                &mark,
+            ],
+        ));
+    }
+    (setup, cleanup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +955,81 @@ mod tests {
 
     fn lines_of(commands: &[Command]) -> Vec<String> {
         lines(commands)
+    }
+
+    fn desktop_config(ipv6: bool) -> Desktop {
+        Desktop {
+            ipv6,
+            bypass_lan: true,
+            protect_mark: 51820,
+            port: 34567,
+        }
+    }
+
+    #[test]
+    fn desktop_captures_everything_but_the_daemon() {
+        let rules = desktop(&desktop_config(true));
+        let apply: Vec<String> = rules.iter().map(|(apply, _)| apply.join(" ")).collect();
+        let position = |line: &str| {
+            apply
+                .iter()
+                .position(|item| item == line)
+                .unwrap_or_else(|| panic!("missing {line}"))
+        };
+        let protect = position("iptables -w -t mangle -A fiend_out -m mark --mark 51820 -j RETURN");
+        let dns = position(
+            "iptables -w -t mangle -A fiend_out -p udp --dport 53 -j MARK --set-xmark 0x1000000/0x1000000",
+        );
+        let lan = position("iptables -w -t mangle -A fiend_out -d 192.168.0.0/16 -j RETURN");
+        let all = position(
+            "iptables -w -t mangle -A fiend_out -p tcp -j MARK --set-xmark 0x1000000/0x1000000",
+        );
+        assert!(protect < dns && dns < lan && lan < all);
+        assert!(!apply.iter().any(|line| line.contains("--uid-owner")));
+        position("ip6tables -w -t mangle -A fiend_pre ! -i lo -j fiend_fwd");
+        position("ip6tables -w -t mangle -A fiend_fwd -m addrtype --dst-type LOCAL -j RETURN");
+        position(
+            "iptables -w -t mangle -A fiend_fwd -p udp -j TPROXY --on-ip 127.0.0.1 --on-port 34567 --tproxy-mark 0x1000000/0x1000000",
+        );
+        let jump = position("iptables -w -t mangle -I OUTPUT -j fiend_out");
+        assert!(
+            apply[..jump]
+                .iter()
+                .any(|line| line.contains("fiend_fwd -p tcp -j TPROXY"))
+        );
+        for (apply, undo) in &rules {
+            let changed: Vec<_> = apply.iter().zip(undo).filter(|(a, b)| a != b).collect();
+            assert_eq!(changed.len(), 1, "one word changes in {}", apply.join(" "));
+        }
+        let (_, undo) =
+            &rules[position("ip -4 rule add fwmark 0x1000000/0x1000000 lookup 1097 pref 9000")];
+        assert_eq!(
+            undo.join(" "),
+            "ip -4 rule del fwmark 0x1000000/0x1000000 lookup 1097 pref 9000"
+        );
+        let (_, undo) = &rules[position("iptables -w -t mangle -N fiend_fwd")];
+        assert_eq!(undo.join(" "), "iptables -w -t mangle -X fiend_fwd");
+        assert_eq!(desktop_check(&desktop_config(true)).len(), 6);
+    }
+
+    #[test]
+    fn desktop_without_ipv6_refuses_it() {
+        let apply: Vec<String> = desktop(&desktop_config(false))
+            .iter()
+            .map(|(apply, _)| apply.join(" "))
+            .collect();
+        assert!(!apply.iter().any(|line| line.starts_with("ip -6")));
+        assert!(apply.contains(
+            &"ip6tables -w -t filter -A fiend_guard -m mark --mark 51820 -j RETURN".to_owned()
+        ));
+        assert_eq!(
+            apply.last().unwrap(),
+            "ip6tables -w -t filter -I OUTPUT -j fiend_guard"
+        );
+        let (setup, cleanup) = probe(false);
+        assert_eq!(setup.len(), 4);
+        assert_eq!(cleanup.len(), 2);
+        assert_eq!(probe(true).0.len(), 8);
     }
 
     #[test]

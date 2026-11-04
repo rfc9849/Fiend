@@ -44,6 +44,19 @@ pub trait Platform: Send + Sync + 'static {
         network_changed: Arc<dyn Fn() + Send + Sync>,
     ) -> io::Result<(Self::Device, Self::Guard)>;
 
+    /// Capture traffic with TPROXY instead of a TUN device. `None` means that
+    /// this system cannot, and the daemon opens the TUN device instead.
+    #[cfg(target_os = "linux")]
+    fn open_transparent(
+        &self,
+        request: &NetworkRequest,
+        progress: &dyn Fn(ConnectStep),
+        network_changed: Arc<dyn Fn() + Send + Sync>,
+    ) -> io::Result<Option<(fiend_tun::TransparentSockets, Self::Guard)>> {
+        let _ = (request, progress, network_changed);
+        Ok(None)
+    }
+
     /// Undo changes that an earlier daemon process left after a crash.
     fn recover(&self) -> io::Result<()> {
         Ok(())

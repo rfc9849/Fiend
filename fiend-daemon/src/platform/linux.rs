@@ -1,8 +1,12 @@
-//! Linux network setup: TUN device, policy routing with a firewall mark as in
-//! wg-quick, and DNS through systemd-resolved with a resolv.conf fallback.
+//! Linux network setup. TPROXY is the default: the kernel gives the TCP
+//! streams and UDP datagrams of the system to transparent sockets of the
+//! daemon, and DNS stays as it is. When the kernel or iptables cannot do
+//! TPROXY, or `FIEND_NETWORK_MODE=tun` is set, the daemon uses a TUN device
+//! with policy routing as in wg-quick, and DNS through systemd-resolved with
+//! a resolv.conf fallback.
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,7 +17,9 @@ use fiend_core::net::ProtectSocket;
 use fiend_ipc::ConnectStep;
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
-use super::commands::{SystemRunner, apply_steps, dns_steps, route_steps, undo_all};
+use fiend_root::rules::{self as tproxy, Desktop};
+
+use super::commands::{Runner, Step, SystemRunner, apply_steps, dns_steps, route_steps, undo_all};
 use super::{NetworkRequest, Platform};
 use crate::journal::{Journal, JournalFile};
 
@@ -25,6 +31,95 @@ const TUN_V6: Ipv6Addr = Ipv6Addr::new(0xfd42, 0x6669, 0x656e, 0x6400, 0, 0, 0, 
 const DNS_ADDRESS: &str = "198.18.0.1";
 const RESOLV: &str = "/etc/resolv.conf";
 const MONITOR_PERIOD: Duration = Duration::from_secs(2);
+const RULE_CHECK: Duration = Duration::from_secs(10);
+const PORT_ATTEMPTS: usize = 32;
+const MODE: &str = "FIEND_NETWORK_MODE";
+
+/// Tries every match and target that the TPROXY rules use.
+fn tproxy_available(ipv6: bool) -> io::Result<()> {
+    let (setup, cleanup) = tproxy::probe(ipv6);
+    let mut runner = SystemRunner;
+    for command in &cleanup {
+        let _ = runner.run(command);
+    }
+    let result = setup.iter().try_for_each(|command| runner.run(command));
+    for command in &cleanup {
+        let _ = runner.run(command);
+    }
+    result
+}
+
+struct LocalReplies;
+
+impl fiend_tun::ReplySockets for LocalReplies {
+    fn open(&self, local: SocketAddr) -> io::Result<std::net::UdpSocket> {
+        fiend_root::sockets::reply(local, Some(MARK)).map(Into::into)
+    }
+}
+
+/// The TPROXY rules that the monitor keeps in place.
+struct WatchedRules {
+    steps: Vec<Step>,
+    check: Vec<Vec<String>>,
+    state: Arc<Mutex<Journal>>,
+    file: JournalFile,
+}
+
+/// Watches the primary network, and in TPROXY mode also the rules, which a
+/// firewall manager can remove.
+fn monitor(
+    stop: Arc<AtomicBool>,
+    network_changed: Arc<dyn Fn() + Send + Sync>,
+    rules: Option<WatchedRules>,
+) -> io::Result<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("fiend-network-monitor".into())
+        .spawn(move || {
+            let mut last = current_default();
+            let mut since_check = Duration::ZERO;
+            loop {
+                let mut waited = Duration::ZERO;
+                while waited < MONITOR_PERIOD {
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                    waited += Duration::from_millis(100);
+                }
+                let now = current_default();
+                if now != last {
+                    tracing::info!("primary network changed");
+                    last = now;
+                    network_changed();
+                }
+                since_check += waited;
+                if since_check < RULE_CHECK {
+                    continue;
+                }
+                since_check = Duration::ZERO;
+                let Some(WatchedRules {
+                    steps,
+                    check,
+                    state,
+                    file,
+                }) = &rules
+                else {
+                    continue;
+                };
+                let mut runner = SystemRunner;
+                if check.iter().all(|command| runner.run(command).is_ok()) {
+                    continue;
+                }
+                tracing::warn!("TPROXY rules are missing, adding them again");
+                let mut journal = state.lock().unwrap_or_else(|error| error.into_inner());
+                undo_all(&journal, &mut runner);
+                *journal = Journal::default();
+                if let Err(error) = apply_steps(steps, &mut journal, file, &mut runner) {
+                    tracing::error!(%error, "cannot add the TPROXY rules again");
+                }
+            }
+        })
+}
 
 pub struct LinuxPlatform {
     journal: JournalFile,
@@ -116,6 +211,88 @@ impl Platform for LinuxPlatform {
         self.journal.clear()
     }
 
+    fn open_transparent(
+        &self,
+        request: &NetworkRequest,
+        progress: &dyn Fn(ConnectStep),
+        network_changed: Arc<dyn Fn() + Send + Sync>,
+    ) -> io::Result<Option<(fiend_tun::TransparentSockets, LinuxGuard)>> {
+        if std::env::var(MODE).is_ok_and(|mode| mode == "tun") {
+            tracing::info!("{MODE}=tun is set, using the TUN device");
+            return Ok(None);
+        }
+        self.recover()?;
+        if let Err(error) = tproxy_available(request.ipv6) {
+            tracing::info!(%error, "TPROXY is not available, using the TUN device");
+            return Ok(None);
+        }
+        let mut last = io::Error::other("no free port");
+        let mut found = None;
+        for _ in 0..PORT_ATTEMPTS {
+            let port = fiend_root::sockets::random_port();
+            match fiend_root::sockets::listeners(port, request.ipv6, Some(MARK)) {
+                Ok(sockets) => {
+                    found = Some((port, sockets));
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => last = error,
+                Err(error) => return Err(error),
+            }
+        }
+        let Some((port, (tcp, udp))) = found else {
+            return Err(last);
+        };
+        let config = Desktop {
+            ipv6: request.ipv6,
+            bypass_lan: request.bypass_lan,
+            protect_mark: MARK,
+            port,
+        };
+        let steps: Vec<Step> = tproxy::desktop(&config)
+            .into_iter()
+            .map(|(apply, undo)| Step {
+                apply,
+                undo: Some(undo),
+            })
+            .collect();
+        let state = Arc::new(Mutex::new(Journal::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut guard = LinuxGuard {
+            file: self.journal.clone(),
+            state: state.clone(),
+            stop: stop.clone(),
+            monitor: None,
+        };
+        progress(ConnectStep::Routes);
+        let applied = {
+            let mut journal = state.lock().unwrap_or_else(|error| error.into_inner());
+            apply_steps(&steps, &mut journal, &self.journal, &mut SystemRunner)
+        };
+        if let Err(error) = applied {
+            drop(guard);
+            tracing::warn!(%error, "TPROXY rules failed, using the TUN device");
+            return Ok(None);
+        }
+        progress(ConnectStep::Dns);
+        tracing::info!(port, "traffic goes through TPROXY");
+        guard.monitor = Some(monitor(
+            stop,
+            network_changed,
+            Some(WatchedRules {
+                steps,
+                check: tproxy::desktop_check(&config),
+                state,
+                file: self.journal.clone(),
+            }),
+        )?);
+        let sockets = fiend_tun::TransparentSockets {
+            tcp: tcp.into_iter().map(Into::into).collect(),
+            udp: udp.into_iter().map(Into::into).collect(),
+            replies: Arc::new(LocalReplies),
+        };
+        Ok(Some((sockets, guard)))
+    }
+
     fn open(
         &self,
         request: &NetworkRequest,
@@ -171,29 +348,7 @@ impl Platform for LinuxPlatform {
             apply_steps(&steps, &mut journal, &self.journal, &mut runner)?;
         }
 
-        guard.monitor = Some(
-            std::thread::Builder::new()
-                .name("fiend-network-monitor".into())
-                .spawn(move || {
-                    let mut last = current_default();
-                    loop {
-                        let mut waited = Duration::ZERO;
-                        while waited < MONITOR_PERIOD {
-                            if stop.load(Ordering::Acquire) {
-                                return;
-                            }
-                            std::thread::sleep(Duration::from_millis(100));
-                            waited += Duration::from_millis(100);
-                        }
-                        let now = current_default();
-                        if now != last {
-                            tracing::info!("primary network changed");
-                            last = now;
-                            network_changed();
-                        }
-                    }
-                })?,
-        );
+        guard.monitor = Some(monitor(stop, network_changed, None)?);
         Ok((device, guard))
     }
 }

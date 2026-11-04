@@ -1,14 +1,13 @@
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod helper {
     use std::io;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::net::UnixStream;
     use std::path::Path;
     use std::process::{Command, ExitCode, Stdio};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use fiend_root::bpf;
     use fiend_root::frame;
@@ -18,14 +17,13 @@ mod helper {
     use nix::sys::signal::{
         SaFlags, SigAction, SigHandler, SigSet, SigmaskHow, Signal, pthread_sigmask, sigaction,
     };
-    use nix::sys::socket::{getsockopt, setsockopt, sockopt};
-    use socket2::{Domain, Protocol, Socket, Type};
+    use nix::sys::socket::{getsockopt, sockopt};
+    use socket2::Socket;
 
     static STOP: AtomicBool = AtomicBool::new(false);
     const SIGNALS: [Signal; 3] = [Signal::SIGTERM, Signal::SIGINT, Signal::SIGHUP];
     const CHECK_PERIOD: Duration = Duration::from_secs(10);
     const STEP: Duration = Duration::from_millis(250);
-    const BACKLOG: i32 = 1024;
     const PORT_ATTEMPTS: usize = 32;
     const LOCK: &str = "/data/adb/fiend-root.lock";
     const LOCK_WAIT: Duration = Duration::from_secs(15);
@@ -315,7 +313,7 @@ mod helper {
                         .unwrap_or_else(|error| error.into_inner())
                         .is_some();
                     let socket = if running {
-                        reply(address)
+                        fiend_root::sockets::reply(address, None)
                     } else {
                         Err(io::Error::other("The rules are not in place"))
                     };
@@ -354,8 +352,8 @@ mod helper {
         cleanup();
         let mut last = io::Error::other("no free port");
         for _ in 0..PORT_ATTEMPTS {
-            let port = random_port();
-            match sockets(port, policy.ipv6) {
+            let port = fiend_root::sockets::random_port();
+            match fiend_root::sockets::listeners(port, policy.ipv6, None) {
                 Ok((tcp, udp)) => {
                     let data_saver = data_saver(&policy);
                     let support = support(&policy);
@@ -401,86 +399,6 @@ mod helper {
                 }
             }
         }
-    }
-
-    fn random_port() -> u16 {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|time| time.as_nanos() as u64)
-            .unwrap_or(0);
-        let mut seed = nanos
-            ^ (u64::from(std::process::id()) << 32)
-            ^ COUNTER
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        seed ^= seed >> 33;
-        seed = seed.wrapping_mul(0xff51_afd7_ed55_8ccd);
-        seed ^= seed >> 33;
-        20000 + (seed % 40000) as u16
-    }
-
-    fn transparent(socket: &Socket, ipv6: bool) -> io::Result<()> {
-        socket.set_reuse_address(true)?;
-        if ipv6 {
-            socket.set_only_v6(true)?;
-            socket.set_ip_transparent_v6(true)
-        } else {
-            socket.set_ip_transparent_v4(true)
-        }
-    }
-
-    fn sockets(port: u16, ipv6: bool) -> io::Result<(Vec<Socket>, Vec<Socket>)> {
-        let mut loopbacks = vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
-        if ipv6 {
-            loopbacks.push(IpAddr::V6(Ipv6Addr::LOCALHOST));
-        }
-        let mut tcp = Vec::new();
-        let mut udp = Vec::new();
-        for ip in loopbacks {
-            let address = SocketAddr::new(ip, port);
-            let v6 = ip.is_ipv6();
-            let listener = Socket::new(
-                Domain::for_address(address),
-                Type::STREAM,
-                Some(Protocol::TCP),
-            )?;
-            transparent(&listener, v6)?;
-            listener.bind(&address.into())?;
-            listener.listen(BACKLOG)?;
-            tcp.push(listener);
-            let receiver = Socket::new(
-                Domain::for_address(address),
-                Type::DGRAM,
-                Some(Protocol::UDP),
-            )?;
-            transparent(&receiver, v6)?;
-            if v6 {
-                setsockopt(&receiver, sockopt::Ipv6OrigDstAddr, &true)?;
-            } else {
-                setsockopt(&receiver, sockopt::Ipv4OrigDstAddr, &true)?;
-            }
-            receiver.bind(&address.into())?;
-            udp.push(receiver);
-        }
-        Ok((tcp, udp))
-    }
-
-    fn reply(address: SocketAddr) -> io::Result<Socket> {
-        if address.ip().is_loopback() || address.ip().is_unspecified() || address.port() == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "reply address is not valid",
-            ));
-        }
-        let socket = Socket::new(
-            Domain::for_address(address),
-            Type::DGRAM,
-            Some(Protocol::UDP),
-        )?;
-        transparent(&socket, address.is_ipv6())?;
-        socket.bind(&address.into())?;
-        Ok(socket)
     }
 }
 

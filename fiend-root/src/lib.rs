@@ -11,3 +11,5 @@ pub mod bpf;
 pub mod client;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod frame;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod sockets;
