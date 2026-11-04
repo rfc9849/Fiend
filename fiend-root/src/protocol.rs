@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_ENTRIES: usize = 1024;
+/// 1: DNS capture on request, the `Metered` request and the background rule.
+pub const PROTOCOL: u32 = 1;
 pub const FIRST_APP_UID: u32 = 10000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +20,13 @@ pub struct Policy {
     pub exclude: Vec<u32>,
     pub ipv6: bool,
     pub bypass_lan: bool,
+    /// The network is metered, so the Data Saver rules of Android apply.
+    #[serde(default)]
+    pub metered: bool,
+    /// Send the DNS of the captured apps to the engine. Older apps do not
+    /// answer DNS, so the helper captures it only on request.
+    #[serde(default)]
+    pub dns: bool,
 }
 
 impl Policy {
@@ -44,6 +53,7 @@ impl Policy {
 pub enum Request {
     Start { policy: Policy },
     Reply { address: SocketAddr },
+    Metered { metered: bool },
 }
 
 /// `Ready` carries the TCP listeners and then the UDP sockets. `Socket`
@@ -51,9 +61,17 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
-    Ready { tcp: usize, udp: usize },
+    Ready {
+        tcp: usize,
+        udp: usize,
+        #[serde(default)]
+        protocol: u32,
+    },
     Socket,
-    Failed { message: String },
+    Done,
+    Failed {
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -66,6 +84,8 @@ mod tests {
             exclude: vec![10100],
             ipv6: true,
             bypass_lan: true,
+            metered: false,
+            dns: true,
         }
     }
 
@@ -106,7 +126,25 @@ mod tests {
         let text = serde_json::to_string(&request).unwrap();
         assert_eq!(text, r#"{"op":"reply","address":"192.0.2.1:443"}"#);
         assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
-        let text = serde_json::to_string(&Response::Ready { tcp: 2, udp: 2 }).unwrap();
-        assert_eq!(text, r#"{"status":"ready","tcp":2,"udp":2}"#);
+        let text = serde_json::to_string(&Response::Ready {
+            tcp: 2,
+            udp: 2,
+            protocol: PROTOCOL,
+        })
+        .unwrap();
+        assert_eq!(text, r#"{"status":"ready","tcp":2,"udp":2,"protocol":1}"#);
+        assert_eq!(
+            serde_json::from_str::<Response>(r#"{"status":"ready","tcp":2,"udp":2}"#).unwrap(),
+            Response::Ready {
+                tcp: 2,
+                udp: 2,
+                protocol: 0
+            }
+        );
+        let old: Policy = serde_json::from_str(
+            r#"{"include":[{"first":10000,"last":19999}],"exclude":[],"ipv6":true,"bypass_lan":true}"#,
+        )
+        .unwrap();
+        assert!(!old.dns && !old.metered);
     }
 }

@@ -6,9 +6,17 @@
 //! keeps free, so the network ID bits of Android stay the same.
 //!
 //! Android sets `tcp_fwmark_accept` and `fwmark_reflect`, so the packets that
-//! the transparent sockets send back to an app also carry the mark. A packet
-//! that belongs to a socket already goes to that socket without TPROXY,
-//! because TPROXY drops packets for sockets that are not transparent.
+//! the transparent sockets send back to an app also carry the mark. A TCP
+//! packet that belongs to a socket already goes to that socket without
+//! TPROXY, because TPROXY drops packets for sockets that are not transparent.
+//! UDP replies have no mark, and a UDP packet from an app must not go to the
+//! reply socket that is bound to its destination.
+//!
+//! netd does not apply two app rules to loopback: the background rule, and
+//! Data Saver with "Background data" on metered networks. A BPF program does
+//! the background check, and `fiend_metered` jumps to the Data Saver chain of
+//! netd while the network is metered. Blocked packets are dropped, so they
+//! never leave outside the tunnel.
 
 use crate::protocol::Policy;
 
@@ -18,18 +26,20 @@ pub const PRIORITY: u32 = 9000;
 const OUT: &str = "fiend_out";
 const PRE: &str = "fiend_pre";
 const GUARD: &str = "fiend_guard";
+const METERED: &str = "fiend_metered";
+pub const DATA_SAVER_CHAIN: &str = "bw_penalty_box";
 pub const CLEANUP_REPEATS: usize = 8;
 
 pub type Command = Vec<String>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Family {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Family {
     V4,
     V6,
 }
 
 impl Family {
-    fn iptables(self) -> &'static str {
+    pub fn iptables(self) -> &'static str {
         match self {
             Self::V4 => "iptables",
             Self::V6 => "ip6tables",
@@ -101,27 +111,24 @@ fn mark() -> String {
     format!("{MARK:#x}/{MARK:#x}")
 }
 
-/// Rules that skip traffic that must never reach the transparent sockets.
-fn skip_rules(family: Family, chain: &str, table: &str, policy: &Policy) -> Vec<Command> {
+/// Rules that skip traffic that must never reach the transparent sockets:
+/// loopback and the excluded UIDs, then `middle`, then the reserved and local
+/// networks. DNS goes in `middle`, so that queries to a resolver on the local
+/// network also go through Fiend.
+fn skip_rules(
+    family: Family,
+    chain: &str,
+    table: &str,
+    policy: &Policy,
+    first: Vec<Command>,
+    middle: Vec<Command>,
+) -> Vec<Command> {
     let mut rules = vec![table_rule(
         family,
         table,
         &["-A", chain, "-o", "lo", "-j", "RETURN"],
     )];
-    for network in family.reserved(policy.bypass_lan) {
-        rules.push(table_rule(
-            family,
-            table,
-            &["-A", chain, "-d", network, "-j", "RETURN"],
-        ));
-    }
-    for protocol in ["udp", "tcp"] {
-        rules.push(table_rule(
-            family,
-            table,
-            &["-A", chain, "-p", protocol, "--dport", "53", "-j", "RETURN"],
-        ));
-    }
+    rules.extend(first);
     let mut exclude = vec![0];
     exclude.extend(policy.exclude.iter().copied());
     for uid in exclude {
@@ -141,6 +148,82 @@ fn skip_rules(family: Family, chain: &str, table: &str, policy: &Policy) -> Vec<
             ],
         ));
     }
+    rules.extend(middle);
+    for network in family.reserved(policy.bypass_lan) {
+        rules.push(table_rule(
+            family,
+            table,
+            &["-A", chain, "-d", network, "-j", "RETURN"],
+        ));
+    }
+    rules
+}
+
+fn dns_rules(
+    family: Family,
+    table: &str,
+    chain: &str,
+    policy: &Policy,
+    target: &[&str],
+) -> Vec<Command> {
+    let mut rules = Vec::new();
+    for range in ranges(policy) {
+        for protocol in ["udp", "tcp"] {
+            let mut parts = vec![
+                "-A",
+                chain,
+                "-p",
+                protocol,
+                "--dport",
+                "53",
+                "-m",
+                "owner",
+                "--uid-owner",
+                &range,
+                "-j",
+            ];
+            parts.extend_from_slice(target);
+            rules.push(table_rule(family, table, &parts));
+        }
+    }
+    rules
+}
+
+/// DNS rules by socket UID, for queries that the Android resolver sends for
+/// the apps. They come before the UID exceptions, because the resolver
+/// socket has the file owner of netd.
+fn resolver_rules(
+    family: Family,
+    table: &str,
+    chain: &str,
+    uids: &str,
+    background: Option<&str>,
+    target: &[&str],
+) -> Vec<Command> {
+    let mut rules = Vec::new();
+    for protocol in ["udp", "tcp"] {
+        let base = [
+            "-A",
+            chain,
+            "-p",
+            protocol,
+            "--dport",
+            "53",
+            "-m",
+            "bpf",
+            "--object-pinned",
+            uids,
+        ];
+        if let Some(program) = background {
+            let mut parts = base.to_vec();
+            parts.extend_from_slice(&["-m", "bpf", "--object-pinned", program, "-j", "DROP"]);
+            rules.push(table_rule(family, table, &parts));
+        }
+        let mut parts = base.to_vec();
+        parts.push("-j");
+        parts.extend_from_slice(target);
+        rules.push(table_rule(family, table, &parts));
+    }
     rules
 }
 
@@ -158,7 +241,16 @@ fn ranges(policy: &Policy) -> Vec<String> {
         .collect()
 }
 
-fn capture(family: Family, policy: &Policy, port: u16) -> Vec<Command> {
+/// What the helper found on this system.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Support {
+    /// The path of the pinned background program.
+    pub background: Option<String>,
+    /// The path of the pinned program that matches the captured socket UIDs.
+    pub uids: Option<String>,
+}
+
+fn capture(family: Family, policy: &Policy, port: u16, support: &Support) -> Vec<Command> {
     let mark = mark();
     let port = port.to_string();
     let mut rules = vec![
@@ -189,8 +281,47 @@ fn capture(family: Family, policy: &Policy, port: u16) -> Vec<Command> {
         table_rule(family, "mangle", &["-N", OUT]),
         table_rule(family, "mangle", &["-N", PRE]),
         table_rule(family, "filter", &["-N", GUARD]),
+        table_rule(family, "filter", &["-N", METERED]),
     ];
-    rules.extend(skip_rules(family, OUT, "mangle", policy));
+    let mut middle = Vec::new();
+    if let Some(program) = &support.background {
+        for range in ranges(policy) {
+            middle.push(table_rule(
+                family,
+                "mangle",
+                &[
+                    "-A",
+                    OUT,
+                    "-m",
+                    "owner",
+                    "--uid-owner",
+                    &range,
+                    "-m",
+                    "bpf",
+                    "--object-pinned",
+                    program,
+                    "-j",
+                    "DROP",
+                ],
+            ));
+        }
+    }
+    let mut first = Vec::new();
+    if policy.dns {
+        let target = ["MARK", "--set-xmark", &mark];
+        match &support.uids {
+            Some(uids) => first.extend(resolver_rules(
+                family,
+                "mangle",
+                OUT,
+                uids,
+                support.background.as_deref(),
+                &target,
+            )),
+            None => middle.extend(dns_rules(family, "mangle", OUT, policy, &target)),
+        }
+    }
+    rules.extend(skip_rules(family, OUT, "mangle", policy, first, middle));
     for range in ranges(policy) {
         for protocol in ["tcp", "udp"] {
             rules.push(table_rule(
@@ -221,6 +352,8 @@ fn capture(family: Family, policy: &Policy, port: u16) -> Vec<Command> {
             PRE,
             "-i",
             "lo",
+            "-p",
+            "tcp",
             "-m",
             "mark",
             "--mark",
@@ -287,15 +420,58 @@ fn capture(family: Family, policy: &Policy, port: u16) -> Vec<Command> {
             ],
         ));
     }
+    rules.push(table_rule(
+        family,
+        "filter",
+        &["-A", GUARD, "-m", "mark", "--mark", &mark, "-j", METERED],
+    ));
     rules.extend(jumps(family, true));
     rules
 }
 
+/// Commands that make `fiend_metered` follow the metered state. With no
+/// Data Saver chain on the system the chain stays empty.
+pub fn metered(family: Family, on: bool, chain_present: bool) -> Vec<Command> {
+    let mut rules = vec![table_rule(family, "filter", &["-F", METERED])];
+    if on && chain_present {
+        rules.push(table_rule(
+            family,
+            "filter",
+            &["-A", METERED, "-j", DATA_SAVER_CHAIN],
+        ));
+    }
+    rules
+}
+
+/// The families that capture traffic for this policy.
+pub fn families(policy: &Policy) -> Vec<Family> {
+    if policy.ipv6 {
+        vec![Family::V4, Family::V6]
+    } else {
+        vec![Family::V4]
+    }
+}
+
 /// IPv6 of the selected apps is refused, so that the apps use IPv4 and no
 /// IPv6 traffic goes around the tunnel.
-fn refuse(family: Family, policy: &Policy) -> Vec<Command> {
+fn refuse(family: Family, policy: &Policy, support: &Support) -> Vec<Command> {
     let mut rules = vec![table_rule(family, "filter", &["-N", GUARD])];
-    rules.extend(skip_rules(family, GUARD, "filter", policy));
+    let mut first = Vec::new();
+    let mut middle = Vec::new();
+    if policy.dns {
+        match &support.uids {
+            Some(uids) => first.extend(resolver_rules(
+                family,
+                "filter",
+                GUARD,
+                uids,
+                None,
+                &["REJECT"],
+            )),
+            None => middle.extend(dns_rules(family, "filter", GUARD, policy, &["REJECT"])),
+        }
+    }
+    rules.extend(skip_rules(family, GUARD, "filter", policy, first, middle));
     for range in ranges(policy) {
         rules.push(table_rule(
             family,
@@ -346,12 +522,12 @@ fn jumps(family: Family, insert: bool) -> Vec<Command> {
 
 /// Commands that set up the rules. Run them in order and stop at the first
 /// error.
-pub fn apply(policy: &Policy, port: u16) -> Vec<Command> {
-    let mut rules = capture(Family::V4, policy, port);
+pub fn apply(policy: &Policy, port: u16, support: &Support) -> Vec<Command> {
+    let mut rules = capture(Family::V4, policy, port, support);
     if policy.ipv6 {
-        rules.extend(capture(Family::V6, policy, port));
+        rules.extend(capture(Family::V6, policy, port, support));
     } else {
-        rules.extend(refuse(Family::V6, policy));
+        rules.extend(refuse(Family::V6, policy, support));
     }
     rules
 }
@@ -388,6 +564,8 @@ pub fn cleanup() -> Vec<(bool, Command)> {
             rules.push((false, table_rule(family, table, &["-F", chain])));
             rules.push((false, table_rule(family, table, &["-X", chain])));
         }
+        rules.push((false, table_rule(family, "filter", &["-F", METERED])));
+        rules.push((false, table_rule(family, "filter", &["-X", METERED])));
         rules.push((
             true,
             command(&[
@@ -438,6 +616,8 @@ mod tests {
             exclude: vec![10200],
             ipv6,
             bypass_lan: true,
+            metered: false,
+            dns: true,
         }
     }
 
@@ -445,9 +625,34 @@ mod tests {
         commands.iter().map(|command| command.join(" ")).collect()
     }
 
+    fn lines_of(commands: &[Command]) -> Vec<String> {
+        lines(commands)
+    }
+
+    #[test]
+    fn metered_state_jumps_to_the_data_saver_chain() {
+        assert_eq!(
+            lines(&metered(Family::V4, true, true)),
+            [
+                "iptables -w -t filter -F fiend_metered",
+                "iptables -w -t filter -A fiend_metered -j bw_penalty_box"
+            ]
+        );
+        assert_eq!(
+            lines(&metered(Family::V6, false, true)),
+            ["ip6tables -w -t filter -F fiend_metered"]
+        );
+        assert_eq!(lines(&metered(Family::V4, true, false)).len(), 1);
+        assert_eq!(families(&policy(false)), [Family::V4]);
+    }
+
     #[test]
     fn capture_marks_selected_apps_and_skips_the_rest() {
-        let lines = lines(&apply(&policy(true), 34567));
+        let support = Support {
+            background: Some("/sys/fs/bpf/fiend_background".into()),
+            uids: None,
+        };
+        let lines = lines(&apply(&policy(true), 34567, &support));
         let has = |line: &str| lines.iter().any(|item| item == line);
         assert!(has(
             "ip -4 rule add fwmark 0x1000000/0x1000000 lookup 1097 pref 9000"
@@ -470,14 +675,26 @@ mod tests {
             position("iptables -w -t mangle -A fiend_out -m owner --uid-owner 0 -j RETURN");
         let skip_app =
             position("iptables -w -t mangle -A fiend_out -m owner --uid-owner 10200 -j RETURN");
-        let skip_dns = position("iptables -w -t mangle -A fiend_out -p udp --dport 53 -j RETURN");
+        let dns = position(
+            "iptables -w -t mangle -A fiend_out -p udp --dport 53 -m owner --uid-owner 10000-19999 -j MARK --set-xmark 0x1000000/0x1000000",
+        );
+        let lan = position("iptables -w -t mangle -A fiend_out -d 192.168.0.0/16 -j RETURN");
+        assert!(skip_app < dns && dns < lan);
         let first_mark = lines
             .iter()
             .position(|line| line.contains("-j MARK"))
             .unwrap();
-        assert!(skip_root < first_mark && skip_app < first_mark && skip_dns < first_mark);
+        let background = position(
+            "iptables -w -t mangle -A fiend_out -m owner --uid-owner 10000-19999 -m bpf --object-pinned /sys/fs/bpf/fiend_background -j DROP",
+        );
+        assert!(skip_root < background && skip_app < background && background < first_mark);
+        assert!(has(
+            "ip6tables -w -t filter -A fiend_guard -m mark --mark 0x1000000/0x1000000 -j fiend_metered"
+        ));
+        let plain = lines_of(&apply(&policy(true), 34567, &Support::default()));
+        assert!(!plain.iter().any(|line| line.contains("-m bpf")));
         let existing = position(
-            "iptables -w -t mangle -A fiend_pre -i lo -m mark --mark 0x1000000/0x1000000 -m socket --nowildcard -j RETURN",
+            "iptables -w -t mangle -A fiend_pre -i lo -p tcp -m mark --mark 0x1000000/0x1000000 -m socket --nowildcard -j RETURN",
         );
         let tproxy = lines
             .iter()
@@ -492,8 +709,53 @@ mod tests {
     }
 
     #[test]
+    fn resolver_queries_match_by_socket_uid_before_the_root_exception() {
+        let support = Support {
+            background: Some("/sys/fs/bpf/fiend_background".into()),
+            uids: Some("/sys/fs/bpf/fiend_uids".into()),
+        };
+        let lines = lines(&apply(&policy(true), 34567, &support));
+        let position = |line: &str| lines.iter().position(|item| item == line).unwrap();
+        let drop = position(
+            "iptables -w -t mangle -A fiend_out -p udp --dport 53 -m bpf --object-pinned /sys/fs/bpf/fiend_uids -m bpf --object-pinned /sys/fs/bpf/fiend_background -j DROP",
+        );
+        let mark = position(
+            "iptables -w -t mangle -A fiend_out -p tcp --dport 53 -m bpf --object-pinned /sys/fs/bpf/fiend_uids -j MARK --set-xmark 0x1000000/0x1000000",
+        );
+        let root = position("iptables -w -t mangle -A fiend_out -m owner --uid-owner 0 -j RETURN");
+        assert!(drop < mark && mark < root);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("--dport 53 -m owner"))
+        );
+        let off = lines_of(&apply(&policy(false), 34567, &support));
+        let reject = off
+            .iter()
+            .position(|line| {
+                line == "ip6tables -w -t filter -A fiend_guard -p udp --dport 53 -m bpf --object-pinned /sys/fs/bpf/fiend_uids -j REJECT"
+            })
+            .unwrap();
+        let root = off
+            .iter()
+            .position(|line| {
+                line == "ip6tables -w -t filter -A fiend_guard -m owner --uid-owner 0 -j RETURN"
+            })
+            .unwrap();
+        assert!(reject < root);
+    }
+
+    #[test]
+    fn dns_stays_direct_for_older_apps() {
+        let mut old = policy(true);
+        old.dns = false;
+        let lines = lines(&apply(&old, 34567, &Support::default()));
+        assert!(!lines.iter().any(|line| line.contains("--dport 53")));
+    }
+
+    #[test]
     fn ipv6_off_refuses_ipv6_of_selected_apps() {
-        let lines = lines(&apply(&policy(false), 34567));
+        let lines = lines(&apply(&policy(false), 34567, &Support::default()));
         assert!(!lines.iter().any(|line| line.starts_with("ip -6")));
         assert!(
             !lines
@@ -531,6 +793,15 @@ mod tests {
             .position(|(_, line)| line == "iptables -w -t mangle -X fiend_out")
             .unwrap();
         assert!(jump < delete && lines[jump].0);
+        let guard = lines
+            .iter()
+            .position(|(_, line)| line == "iptables -w -t filter -F fiend_guard")
+            .unwrap();
+        let metered = lines
+            .iter()
+            .position(|(_, line)| line == "iptables -w -t filter -X fiend_metered")
+            .unwrap();
+        assert!(guard < metered);
         assert!(lines.iter().any(|(repeat, line)| *repeat
             && line == "ip -6 rule del fwmark 0x1000000/0x1000000 lookup 1097 pref 9000"));
         assert_eq!(check(&policy(true)).len(), 6);

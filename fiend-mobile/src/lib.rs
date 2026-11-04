@@ -124,6 +124,7 @@ pub struct RootOptions {
     pub socket_path: String,
     pub include: Vec<UidRange>,
     pub exclude: Vec<u32>,
+    pub metered: bool,
 }
 
 #[derive(uniffi::Record)]
@@ -188,7 +189,10 @@ pub struct Tunnel {
     stopped: Arc<AtomicBool>,
     latency_ms: Arc<AtomicU64>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    metered: Option<MeteredHook>,
 }
+
+type MeteredHook = Arc<dyn Fn(bool) -> io::Result<()> + Send + Sync>;
 
 fn runtime() -> Result<&'static Runtime, FiendError> {
     static RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
@@ -251,7 +255,7 @@ impl Tunnel {
             unsafe { tun_rs::AsyncDevice::from_fd(fd.into_raw_fd()) }.map_err(engine_error)?
         };
         let runner = engine.clone();
-        Ok(Self::launch(engine, client, platform, async move {
+        Ok(Self::launch(engine, client, platform, None, async move {
             runner.run(device).await
         }))
     }
@@ -290,6 +294,8 @@ impl Tunnel {
                 exclude,
                 ipv6,
                 bypass_lan,
+                metered: root.metered,
+                dns: true,
             };
             policy
                 .validate()
@@ -311,11 +317,29 @@ impl Tunnel {
                 }
             };
             let runner = engine.clone();
-            Ok(Self::launch(engine, client, platform, async move {
-                let result = runner.run_transparent(sockets).await;
-                let _ = tokio::task::spawn_blocking(move || drop(helper)).await;
-                result
-            }))
+            let watched = helper.clone();
+            let control = Arc::downgrade(&helper);
+            let metered: MeteredHook = Arc::new(move |metered| match control.upgrade() {
+                Some(helper) => helper.0.set_metered(metered),
+                None => Ok(()),
+            });
+            Ok(Self::launch(
+                engine,
+                client,
+                platform,
+                Some(metered),
+                async move {
+                    let result = tokio::select! {
+                        result = runner.run_transparent(sockets) => result,
+                        () = helper_exit(&watched) => Err(io::Error::other(
+                            "The root helper stopped. Connect again",
+                        )),
+                    };
+                    drop(watched);
+                    let _ = tokio::task::spawn_blocking(move || drop(helper)).await;
+                    result
+                },
+            ))
         }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
@@ -342,6 +366,21 @@ impl Tunnel {
                 .map(|rtt| u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX))
                 .or_else(|| u32::try_from(self.latency_ms.load(Ordering::Acquire)).ok()),
         }
+    }
+
+    /// Root mode only: the network is metered, so the Data Saver rules of
+    /// Android apply to the captured apps. The VPN mode ignores it.
+    pub fn set_metered(&self, metered: bool) -> Result<(), FiendError> {
+        let Some(hook) = self.metered.clone() else {
+            return Ok(());
+        };
+        let runtime = runtime()?;
+        runtime.spawn_blocking(move || {
+            if let Err(error) = hook(metered) {
+                tracing::warn!(%error, metered, "cannot update the metered state");
+            }
+        });
+        Ok(())
     }
 
     pub fn network_changed(&self) -> Result<(), FiendError> {
@@ -385,6 +424,20 @@ const ROOT_PROMPT_WAIT: Duration = Duration::from_secs(60);
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 struct RootHelper(fiend_root::client::Helper);
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+async fn helper_exit(helper: &RootHelper) {
+    let mut tick = tokio::time::interval(HELPER_CHECK);
+    loop {
+        tick.tick().await;
+        if helper.0.exited() {
+            return;
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const HELPER_CHECK: Duration = Duration::from_secs(1);
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 impl fiend_tun::ReplySockets for RootHelper {
@@ -451,6 +504,7 @@ impl Tunnel {
         engine: Arc<TunEngine>,
         client: Client,
         platform: Arc<dyn Platform>,
+        metered: Option<MeteredHook>,
         run: F,
     ) -> Arc<Self>
     where
@@ -467,6 +521,7 @@ impl Tunnel {
             stopped: stopped.clone(),
             latency_ms: latency_ms.clone(),
             task: Mutex::new(None),
+            metered,
         });
         let _ = platform.on_state(TunnelState::Connecting);
         let task = runtime.spawn(async move {

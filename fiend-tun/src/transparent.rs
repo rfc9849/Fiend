@@ -1,10 +1,17 @@
 //! Front end for sockets that the kernel fills with TPROXY: the local address
 //! of each accepted TCP stream and the original destination of each UDP
 //! datagram are the addresses that the app asked for.
+//!
+//! DNS of the captured apps also comes here. Answers are real: a query for a
+//! site with a direct rule goes to the resolver that the app asked, other
+//! queries go through the tunnel. The answers fill a table from address to
+//! name, so that domain rules also work for UDP and for TCP without a name
+//! in the first data.
 
 use std::collections::HashMap;
 use std::io::{self, IoSliceMut};
-use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,17 +20,25 @@ use std::task::{Context as Task, Poll};
 use std::time::Duration;
 
 use fiend_core::addr::Address;
+use hickory_proto::op::{Message, ResponseCode};
+use hickory_proto::rr::RData;
+use lru::LruCache;
 use nix::sys::socket::{
     ControlMessageOwned, MsgFlags, SockaddrIn, SockaddrIn6, SockaddrLike, SockaddrStorage, recvmsg,
 };
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, Interest, ReadBuf, copy_bidirectional};
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, ReadBuf, copy_bidirectional,
+};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{OnceCell, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::desync;
-use crate::engine::{Context, FlowCount, Running, TunEngine, UdpReply, udp_flow};
+use crate::dns::valid_domain;
+use crate::engine::{
+    Context, FlowCount, Plan, Running, TunEngine, UdpReply, protected_udp, udp_flow,
+};
 use crate::packet::FlowKey;
 use crate::rules::{Host, Route, is_blocked_udp_port};
 use crate::sniff;
@@ -31,6 +46,14 @@ use crate::sniff;
 const SNIFF_PORTS: [u16; 4] = [80, 443, 8080, 8443];
 const DIRECT_DIAL: Duration = Duration::from_secs(10);
 const MAX_DATAGRAM: usize = 65535;
+const DNS_PORT: u16 = 53;
+const TUNNEL_RESOLVER: SocketAddr =
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), DNS_PORT);
+const DNS_WAIT: Duration = Duration::from_secs(5);
+const DNS_TCP_IDLE: Duration = Duration::from_secs(10);
+const MAX_DNS_MESSAGE: usize = 4096;
+const MAX_DNS_QUERIES: usize = 256;
+const NAMES: usize = 8192;
 
 /// Opens UDP sockets bound to a foreign address, so that replies come from
 /// the address that the app sent to. The kernel needs privileges for this.
@@ -57,6 +80,41 @@ enum Done {
     Infrastructure,
     Tcp,
     Udp(FlowKey, u64),
+    Dns,
+}
+
+/// The site names of the addresses in recent DNS answers.
+struct Names(std::sync::Mutex<LruCache<IpAddr, String>>);
+
+impl Names {
+    fn new() -> Self {
+        Self(std::sync::Mutex::new(LruCache::new(
+            NonZeroUsize::new(NAMES).unwrap_or(NonZeroUsize::MIN),
+        )))
+    }
+
+    fn get(&self, ip: IpAddr) -> Option<String> {
+        self.lock().get(&ip).cloned()
+    }
+
+    fn remember(&self, name: &str, answer: &[u8]) {
+        let Ok(message) = Message::from_vec(answer) else {
+            return;
+        };
+        let mut names = self.lock();
+        for record in &message.answers {
+            let ip = match &record.data {
+                RData::A(address) => IpAddr::V4(address.0),
+                RData::AAAA(address) => IpAddr::V6(address.0),
+                _ => continue,
+            };
+            names.put(ip, name.to_owned());
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LruCache<IpAddr, String>> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
 }
 
 impl TunEngine {
@@ -103,7 +161,9 @@ async fn serve(context: Arc<Context>, sockets: TransparentSockets) -> io::Result
         open: std::sync::Mutex::new(HashMap::new()),
         limit: context.options.max_udp_flows,
     });
+    let names = Arc::new(Names::new());
     let mut tcp = 0usize;
+    let mut dns = 0usize;
     let mut udp: HashMap<FlowKey, (u64, mpsc::Sender<Vec<u8>>)> = HashMap::new();
     let mut next_id = 0u64;
     loop {
@@ -121,10 +181,11 @@ async fn serve(context: Arc<Context>, sockets: TransparentSockets) -> io::Result
                         }
                         tcp += 1;
                         let flow_context = context.clone();
+                        let flow_names = names.clone();
                         let count = FlowCount::new(context.clone());
                         tasks.spawn(async move {
                             let _count = count;
-                            (Done::Tcp, tcp_flow(flow_context, stream, original).await)
+                            (Done::Tcp, tcp_flow(flow_context, flow_names, stream, original).await)
                         });
                     }
                     Event::Udp { payload, source, destination } => {
@@ -133,6 +194,30 @@ async fn serve(context: Arc<Context>, sockets: TransparentSockets) -> io::Result
                             continue;
                         }
                         context.counters.uploaded.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                        if destination.port() == DNS_PORT {
+                            if dns >= MAX_DNS_QUERIES {
+                                context.drop_packet();
+                                continue;
+                            }
+                            dns += 1;
+                            let reply = TransparentReply {
+                                context: context.clone(),
+                                replies: replies.clone(),
+                                socket: OnceCell::new(),
+                                local: destination,
+                                client: source,
+                            };
+                            let query_context = context.clone();
+                            let query_names = names.clone();
+                            tasks.spawn(async move {
+                                let result = async {
+                                    let answer = resolve(&query_context, &query_names, destination, &payload).await?;
+                                    reply.send(&answer).await
+                                }.await;
+                                (Done::Dns, result)
+                            });
+                            continue;
+                        }
                         let key = FlowKey { source, destination };
                         if let Some((_, sender)) = udp.get(&key) && !sender.is_closed() {
                             if sender.try_send(payload).is_err() { context.drop_packet(); }
@@ -155,11 +240,12 @@ async fn serve(context: Arc<Context>, sockets: TransparentSockets) -> io::Result
                             local: destination,
                             client: source,
                         };
+                        let plan = plan(&context, names.get(destination.ip()).as_deref(), destination);
                         let flow_context = context.clone();
                         let count = FlowCount::new(context.clone());
                         tasks.spawn(async move {
                             let _count = count;
-                            let result = udp_flow(flow_context, destination.port(), Address::Ip(destination), receiver, reply).await;
+                            let result = udp_flow(flow_context, destination.port(), Address::Ip(destination), plan, receiver, reply).await;
                             (Done::Udp(key, id), result)
                         });
                     }
@@ -175,6 +261,7 @@ async fn serve(context: Arc<Context>, sockets: TransparentSockets) -> io::Result
                         return result.and(Err(io::Error::other("transparent socket stopped")));
                     }
                     Done::Tcp => tcp -= 1,
+                    Done::Dns => dns -= 1,
                     Done::Udp(key, id) => {
                         if udp.get(&key).is_some_and(|(current, _)| *current == id) {
                             udp.remove(&key);
@@ -268,28 +355,57 @@ fn socket_address(address: &SockaddrStorage) -> Option<SocketAddr> {
         .then(|| SocketAddr::V6(SocketAddrV6::from(*v6)))
 }
 
+/// Turns an IPv4-mapped address into IPv4. Other IPv6 addresses keep their
+/// scope, which a link-local resolver needs.
 fn canonical(address: SocketAddr) -> SocketAddr {
-    SocketAddr::new(address.ip().to_canonical(), address.port())
+    match address {
+        SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+            Some(v4) => SocketAddr::new(v4.into(), v6.port()),
+            None => address,
+        },
+        SocketAddr::V4(_) => address,
+    }
 }
 
 fn reset(stream: &TcpStream) {
     let _ = socket2::SockRef::from(stream).set_linger(Some(Duration::ZERO));
 }
 
-fn route(context: &Context, destination: &Address) -> Route {
-    let host = match destination {
-        Address::Ip(address) => Host::Ip(address.ip()),
-        Address::Domain { host, .. } => Host::Name(host),
+fn route(context: &Context, name: Option<&str>, original: SocketAddr) -> Route {
+    let host = match name {
+        Some(name) => Host::Name(name),
+        None => Host::Ip(original.ip()),
     };
     context.rules.route(host, context.options.bypass_lan)
 }
 
+/// The plan for a UDP flow: the route comes from the site name when it is
+/// known, and a direct flow goes to the address that the app chose.
+fn plan(context: &Context, name: Option<&str>, original: SocketAddr) -> Plan {
+    match route(context, name, original) {
+        Route::Block => Plan::Block,
+        Route::Proxy => Plan::Proxy,
+        Route::Direct => Plan::Direct {
+            addresses: vec![original],
+            dpi: false,
+        },
+        Route::Dpi => Plan::Direct {
+            addresses: vec![original],
+            dpi: true,
+        },
+    }
+}
+
 async fn tcp_flow(
     context: Arc<Context>,
+    names: Arc<Names>,
     stream: TcpStream,
     original: SocketAddr,
 ) -> io::Result<()> {
     stream.set_nodelay(true)?;
+    if original.port() == DNS_PORT {
+        return dns_stream(&context, &names, stream, original).await;
+    }
     let mut stream = Counted {
         inner: stream,
         context: context.clone(),
@@ -299,12 +415,14 @@ async fn tcp_flow(
     } else {
         Vec::new()
     };
-    let destination = match sniff::host(&first) {
+    let sniffed = sniff::host(&first);
+    let name = sniffed.clone().or_else(|| names.get(original.ip()));
+    let route = route(&context, name.as_deref(), original);
+    let destination = match sniffed {
         Some(host) => Address::domain(host, original.port()),
         None => Address::Ip(original),
     };
-    let route = route(&context, &destination);
-    tracing::debug!(%destination, ?route, "transparent TCP flow");
+    tracing::debug!(%destination, ?name, ?route, "transparent TCP flow");
     match route {
         Route::Block => {
             reset(&stream.inner);
@@ -452,4 +570,126 @@ impl UdpReply for TransparentReply {
             .fetch_add(size as u64, Ordering::Relaxed);
         Ok(())
     }
+}
+
+async fn dns_stream(
+    context: &Context,
+    names: &Names,
+    mut stream: TcpStream,
+    server: SocketAddr,
+) -> io::Result<()> {
+    loop {
+        let length = match timeout(DNS_TCP_IDLE, stream.read_u16()).await {
+            Err(_) => return Ok(()),
+            Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Ok(result) => usize::from(result?),
+        };
+        if length > MAX_DNS_MESSAGE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DNS message is too large",
+            ));
+        }
+        let mut query = vec![0; length];
+        timeout(DNS_TCP_IDLE, stream.read_exact(&mut query)).await??;
+        let answer = resolve(context, names, server, &query).await?;
+        let length = u16::try_from(answer.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DNS answer is too large"))?;
+        stream.write_u16(length).await?;
+        stream.write_all(&answer).await?;
+    }
+}
+
+fn invalid_dns() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "DNS query is not valid")
+}
+
+/// Answers one DNS query. `server` is the resolver that the app asked.
+async fn resolve(
+    context: &Context,
+    names: &Names,
+    server: SocketAddr,
+    query: &[u8],
+) -> io::Result<Vec<u8>> {
+    if query.len() > MAX_DNS_MESSAGE {
+        return Err(invalid_dns());
+    }
+    let request = Message::from_vec(query).map_err(|_| invalid_dns())?;
+    let question = request.queries.first().ok_or_else(invalid_dns)?;
+    let name = question
+        .name
+        .to_ascii()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let id = request.metadata.id;
+    if !valid_domain(&name) {
+        return exchange_tunnel(context, query, id).await;
+    }
+    let answer = match context.rules.route(Host::Name(&name), false) {
+        Route::Block => {
+            let mut response = Message::response(id, request.metadata.op_code);
+            response.metadata.recursion_desired = request.metadata.recursion_desired;
+            response.metadata.recursion_available = true;
+            response.metadata.response_code = ResponseCode::NXDomain;
+            response.add_query(question.clone());
+            return response.to_vec().map_err(|_| invalid_dns());
+        }
+        Route::Direct | Route::Dpi => exchange_direct(context, server, query, id).await?,
+        Route::Proxy => exchange_tunnel(context, query, id).await?,
+    };
+    names.remember(&name, &answer);
+    Ok(answer)
+}
+
+fn answers(answer: &[u8], id: u16) -> bool {
+    answer.len() >= 12 && u16::from_be_bytes([answer[0], answer[1]]) == id && answer[2] & 0x80 != 0
+}
+
+async fn exchange_direct(
+    context: &Context,
+    server: SocketAddr,
+    query: &[u8],
+    id: u16,
+) -> io::Result<Vec<u8>> {
+    let socket = protected_udp(server, &context.options.protect_socket)?;
+    socket.send(query).await?;
+    let mut buffer = vec![0; MAX_DATAGRAM];
+    timeout(DNS_WAIT, async {
+        loop {
+            let size = socket.recv(&mut buffer).await?;
+            if answers(&buffer[..size], id) {
+                return Ok(buffer[..size].to_vec());
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "DNS timed out")))
+}
+
+async fn exchange_tunnel(context: &Context, query: &[u8], id: u16) -> io::Result<Vec<u8>> {
+    let flow = context
+        .client
+        .open_udp(&Address::Ip(TUNNEL_RESOLVER))
+        .await
+        .map_err(io::Error::other)?;
+    let (mut sender, mut receiver) = flow.into_split();
+    sender.send(query).await?;
+    let answer = timeout(DNS_WAIT, async {
+        loop {
+            match receiver.recv().await? {
+                Some(response) if answers(&response.payload, id) => return Ok(response.payload),
+                Some(_) => {}
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "DNS flow closed",
+                    ));
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "DNS timed out")));
+    let _ = sender.shutdown().await;
+    answer
 }

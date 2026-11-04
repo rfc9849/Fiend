@@ -6,6 +6,8 @@ pub mod protocol;
 pub mod rules;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod bpf;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod client;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod frame;

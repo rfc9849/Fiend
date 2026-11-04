@@ -76,7 +76,12 @@ class FiendVpnService : VpnService() {
             scope.launch { networks -= network; if (network == underlying) setNetwork(findUnderlying()) }
         }
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
-            scope.launch { if (network == underlying) setUnderlyingNetworks(arrayOf(network)) }
+            scope.launch {
+                if (network != underlying) return@launch
+                setUnderlyingNetworks(arrayOf(network))
+                val native = synchronized(nativeLock) { tunnel }
+                runCatching { native?.setMetered(!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) }
+            }
         }
     }
 
@@ -222,6 +227,7 @@ class FiendVpnService : VpnService() {
             socketPath = File(noBackupFilesDir, "root.sock").path,
             include = include,
             exclude = exclude.map { it.toUInt() },
+            metered = isMetered(underlying),
         )
     }
 
@@ -236,7 +242,13 @@ class FiendVpnService : VpnService() {
         } else {
             val native = synchronized(nativeLock) { tunnel }
             runCatching { native?.networkChanged() }
+            runCatching { native?.setMetered(isMetered(network)) }
         }
+    }
+
+    private fun isMetered(network: Network?): Boolean {
+        val capabilities = network?.let { connectivity.getNetworkCapabilities(it) } ?: return false
+        return !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
     }
 
     private fun findUnderlying(): Network? {

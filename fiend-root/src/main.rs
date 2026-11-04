@@ -10,8 +10,9 @@ mod helper {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use fiend_root::bpf;
     use fiend_root::frame;
-    use fiend_root::protocol::{Policy, Request, Response};
+    use fiend_root::protocol::{PROTOCOL, Policy, Request, Response};
     use fiend_root::rules;
     use nix::fcntl::{Flock, FlockArg};
     use nix::sys::signal::{
@@ -36,6 +37,8 @@ mod helper {
     struct Active {
         policy: Policy,
         port: u16,
+        support: rules::Support,
+        data_saver: Vec<(rules::Family, bool)>,
     }
 
     pub fn main() -> ExitCode {
@@ -79,6 +82,12 @@ mod helper {
     }
 
     fn cleanup() {
+        remove_rules();
+        let _ = std::fs::remove_file(bpf::BACKGROUND_PROGRAM);
+        let _ = std::fs::remove_file(bpf::UID_PROGRAM);
+    }
+
+    fn remove_rules() {
         for (repeat, command) in rules::cleanup() {
             let times = if repeat { rules::CLEANUP_REPEATS } else { 1 };
             for _ in 0..times {
@@ -90,10 +99,86 @@ mod helper {
     }
 
     fn apply(active: &Active) -> io::Result<()> {
-        for command in rules::apply(&active.policy, active.port) {
+        for command in rules::apply(&active.policy, active.port, &active.support) {
             run(&command)?;
         }
+        follow_metered(active)
+    }
+
+    fn follow_metered(active: &Active) -> io::Result<()> {
+        for (family, present) in &active.data_saver {
+            for command in rules::metered(*family, active.policy.metered, *present) {
+                run(&command)?;
+            }
+        }
         Ok(())
+    }
+
+    /// Loads the program for the background rule of Android. Without it the
+    /// captured apps can use the network in the background.
+    fn support(policy: &Policy) -> rules::Support {
+        let background = bpf::pin_background_program(
+            Path::new(bpf::CONFIGURATION_MAP),
+            Path::new(bpf::UID_OWNER_MAP),
+            Path::new(bpf::BACKGROUND_PROGRAM),
+        )
+        .map(|()| bpf::BACKGROUND_PROGRAM.to_owned())
+        .inspect_err(|error| eprintln!("the Android background rule is not followed: {error}"))
+        .ok();
+        let uids = if policy.dns {
+            captured_uids(policy)
+                .and_then(|uids| bpf::pin_uid_program(&uids, Path::new(bpf::UID_PROGRAM)))
+                .map(|()| bpf::UID_PROGRAM.to_owned())
+                .inspect_err(|error| {
+                    eprintln!("resolver queries are matched by file owner: {error}")
+                })
+                .ok()
+        } else {
+            None
+        };
+        rules::Support { background, uids }
+    }
+
+    fn captured_uids(policy: &Policy) -> io::Result<Vec<u32>> {
+        let mut uids = Vec::new();
+        for range in &policy.include {
+            for uid in range.first..=range.last {
+                if !policy.exclude.contains(&uid) {
+                    uids.push(uid);
+                }
+                if uids.len() > bpf::MAX_UIDS {
+                    return Err(io::Error::other("too many UIDs"));
+                }
+            }
+        }
+        uids.sort_unstable();
+        uids.dedup();
+        Ok(uids)
+    }
+
+    fn data_saver(policy: &Policy) -> Vec<(rules::Family, bool)> {
+        rules::families(policy)
+            .into_iter()
+            .map(|family| {
+                let command: Vec<String> = [
+                    family.iptables(),
+                    "-w",
+                    "-t",
+                    "filter",
+                    "-n",
+                    "-L",
+                    rules::DATA_SAVER_CHAIN,
+                ]
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect();
+                let present = run(&command).is_ok();
+                if !present {
+                    eprintln!("no Data Saver chain for {family:?}");
+                }
+                (family, present)
+            })
+            .collect()
     }
 
     fn intact(policy: &Policy) -> bool {
@@ -186,6 +271,10 @@ mod helper {
                 Ok(Some((request, _))) => request,
                 Ok(None) => return Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    frame::send(stream, &failure(error), &[])?;
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             match request {
@@ -198,12 +287,28 @@ mod helper {
                             &Response::Ready {
                                 tcp: tcp.len(),
                                 udp: udp.len(),
+                                protocol: PROTOCOL,
                             },
                             &fds,
                         )?;
                     }
                     Err(error) => frame::send(stream, &failure(error), &[])?,
                 },
+                Request::Metered { metered } => {
+                    let mut active = state.lock().unwrap_or_else(|error| error.into_inner());
+                    let result = match active.as_mut() {
+                        Some(active) => {
+                            active.policy.metered = metered;
+                            follow_metered(active)
+                        }
+                        None => Err(io::Error::other("The rules are not in place")),
+                    };
+                    drop(active);
+                    match result {
+                        Ok(()) => frame::send(stream, &Response::Done, &[])?,
+                        Err(error) => frame::send(stream, &failure(error), &[])?,
+                    }
+                }
                 Request::Reply { address } => {
                     let running = state
                         .lock()
@@ -252,7 +357,14 @@ mod helper {
             let port = random_port();
             match sockets(port, policy.ipv6) {
                 Ok((tcp, udp)) => {
-                    let next = Active { policy, port };
+                    let data_saver = data_saver(&policy);
+                    let support = support(&policy);
+                    let next = Active {
+                        policy,
+                        port,
+                        support,
+                        data_saver,
+                    };
                     if let Err(error) = apply(&next) {
                         cleanup();
                         return Err(error);
@@ -283,7 +395,7 @@ mod helper {
                 && !intact(&active.policy)
             {
                 eprintln!("rules are missing, adding them again");
-                cleanup();
+                remove_rules();
                 if let Err(error) = apply(active) {
                     eprintln!("cannot add the rules again: {error}");
                 }

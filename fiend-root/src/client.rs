@@ -20,6 +20,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const EXIT_WAIT: Duration = Duration::from_secs(3);
 
 pub struct Helper {
+    protocol: u32,
     stream: Mutex<UnixStream>,
     child: Mutex<Child>,
     path: PathBuf,
@@ -101,7 +102,8 @@ impl Helper {
             return Err(stop(child, failed("The root helper does not run as root")));
         }
         stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-        let helper = Helper {
+        let mut helper = Helper {
+            protocol: 0,
             stream: Mutex::new(stream),
             child: Mutex::new(child),
             path: socket.to_owned(),
@@ -109,9 +111,10 @@ impl Helper {
         let (response, fds) = helper.request(&Request::Start {
             policy: policy.clone(),
         })?;
-        let Response::Ready { tcp, udp } = response else {
+        let Response::Ready { tcp, udp, protocol } = response else {
             return Err(failed("The root helper sent an unexpected answer"));
         };
+        helper.protocol = protocol;
         if fds.len() != tcp + udp {
             return Err(failed("The root helper sent the wrong number of sockets"));
         }
@@ -138,6 +141,27 @@ impl Helper {
             return Err(failed(message));
         }
         Ok((response, fds))
+    }
+
+    /// True when the helper process is gone. Its rules are gone too, so the
+    /// apps no longer go through the tunnel.
+    pub fn exited(&self) -> bool {
+        let mut child = self.child.lock().unwrap_or_else(|error| error.into_inner());
+        !matches!(child.try_wait(), Ok(None))
+    }
+
+    /// Tells the helper whether the network is metered, so that the Data
+    /// Saver rules of Android apply to the captured apps.
+    /// A helper from an older module does not know the request and does
+    /// nothing.
+    pub fn set_metered(&self, metered: bool) -> io::Result<()> {
+        if self.protocol < 1 {
+            return Ok(());
+        }
+        match self.request(&Request::Metered { metered })?.0 {
+            Response::Done => Ok(()),
+            _ => Err(failed("The root helper sent an unexpected answer")),
+        }
     }
 
     pub fn reply_socket(&self, address: SocketAddr) -> io::Result<UdpSocket> {

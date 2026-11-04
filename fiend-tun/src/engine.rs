@@ -387,7 +387,7 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                         let key = packet.key;
                         let count = FlowCount::new(context.clone());
                         let reply = TunReply { context: flow_context.clone(), output, key };
-                        tasks.spawn(async move { let _count = count; let result = udp_flow(flow_context, key.destination.port(), destination, receiver, reply).await; (Completed::Udp(key, id), result) });
+                        tasks.spawn(async move { let _count = count; let plan = flow_context.plan(&destination).await; let result = udp_flow(flow_context, key.destination.port(), destination, plan, receiver, reply).await; (Completed::Udp(key, id), result) });
                     }
                 }
             }
@@ -704,10 +704,10 @@ pub(crate) async fn udp_flow<R: UdpReply>(
     context: Arc<Context>,
     port: u16,
     destination: Address,
+    plan: Plan,
     mut packets: mpsc::Receiver<Vec<u8>>,
     reply: R,
 ) -> io::Result<()> {
-    let plan = context.plan(&destination).await;
     if matches!(plan, Plan::Block) {
         return Ok(());
     }
