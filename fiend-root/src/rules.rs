@@ -4,6 +4,11 @@
 //! routes them to `lo` through a local table, and `mangle PREROUTING` gives
 //! them to the transparent sockets. The mark bit is in the range that netd
 //! keeps free, so the network ID bits of Android stay the same.
+//!
+//! Android sets `tcp_fwmark_accept` and `fwmark_reflect`, so the packets that
+//! the transparent sockets send back to an app also carry the mark. A packet
+//! that belongs to a socket already goes to that socket without TPROXY,
+//! because TPROXY drops packets for sockets that are not transparent.
 
 use crate::protocol::Policy;
 
@@ -208,6 +213,25 @@ fn capture(family: Family, policy: &Policy, port: u16) -> Vec<Command> {
             ));
         }
     }
+    rules.push(table_rule(
+        family,
+        "mangle",
+        &[
+            "-A",
+            PRE,
+            "-i",
+            "lo",
+            "-m",
+            "mark",
+            "--mark",
+            &mark,
+            "-m",
+            "socket",
+            "--nowildcard",
+            "-j",
+            "RETURN",
+        ],
+    ));
     for protocol in ["tcp", "udp"] {
         rules.push(table_rule(
             family,
@@ -452,6 +476,14 @@ mod tests {
             .position(|line| line.contains("-j MARK"))
             .unwrap();
         assert!(skip_root < first_mark && skip_app < first_mark && skip_dns < first_mark);
+        let existing = position(
+            "iptables -w -t mangle -A fiend_pre -i lo -m mark --mark 0x1000000/0x1000000 -m socket --nowildcard -j RETURN",
+        );
+        let tproxy = lines
+            .iter()
+            .position(|line| line.contains("-j TPROXY"))
+            .unwrap();
+        assert!(existing < tproxy);
         let jump = position("iptables -w -t mangle -I OUTPUT -j fiend_out");
         assert!(lines[..jump].iter().any(|line| line.contains("TPROXY")));
         assert!(has(
