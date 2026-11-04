@@ -186,6 +186,8 @@ fn bpf<T>(command: u32, attributes: &mut T) -> io::Result<i64> {
     if result < 0 {
         return Err(io::Error::last_os_error());
     }
+    #[allow(clippy::useless_conversion, reason = "c_long is i32 on 32-bit targets")]
+    let result = i64::from(result);
     Ok(result)
 }
 
