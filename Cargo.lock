@@ -2370,7 +2370,7 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "fiend-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "fiend-core",
  "fiend-tun",
@@ -2385,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "fiend-ipc",
@@ -2395,7 +2395,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-daemon"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "core-foundation 0.10.1",
@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-desktop"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "age",
  "auto-launch",
@@ -2478,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-ipc"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -2489,7 +2489,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-mobile"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "fiend-app",
  "fiend-core",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-panel"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "argon2",
  "axum",
@@ -2535,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-root"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "nix 0.31.3",
  "serde",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-rules"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flate2",
  "hickory-proto",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "fiend-tun"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "etherparse 0.20.3",
  "fiend-core",
