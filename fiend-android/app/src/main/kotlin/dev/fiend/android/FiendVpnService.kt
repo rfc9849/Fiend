@@ -293,7 +293,10 @@ class FiendVpnService : VpnService() {
             .setContentIntent(launch).setOngoing(true).setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .addAction(DesignR.drawable.ic_power_settings_new, "Disconnect", disconnect).build()
-        if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIFICATION, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
+        if (Build.VERSION.SDK_INT >= 34) {
+            val type = if (prepare(this) == null) ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED else ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            startForeground(NOTIFICATION, notification, type)
+        }
         else startForeground(NOTIFICATION, notification)
     }
 
