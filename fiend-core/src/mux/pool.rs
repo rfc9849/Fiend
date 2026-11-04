@@ -1,10 +1,11 @@
 use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout, timeout_at};
@@ -23,31 +24,64 @@ type LinkFuture = Pin<Box<dyn Future<Output = Result<ClientLink>> + Send>>;
 const GROWTH_COOLDOWN: Duration = Duration::from_secs(5);
 const SPREAD_WAIT: Duration = Duration::from_secs(1);
 const SPREAD_LANES: usize = 2;
+const SLOW_FACTOR: u32 = 3;
+const SLOW_MARGIN: Duration = Duration::from_millis(300);
 
-fn placement(link: &ClientLink, kind: LaneKind) -> (bool, bool, bool, usize, usize) {
+fn slow_bar(links: &[Arc<ClientLink>]) -> Option<Duration> {
+    let best = links
+        .iter()
+        .filter(|link| !link.is_closed())
+        .filter_map(|link| link.shared().srtt())
+        .min()?;
+    Some((best * SLOW_FACTOR).max(best + SLOW_MARGIN))
+}
+
+fn is_slow(link: &ClientLink, bar: Option<Duration>) -> bool {
+    bar.zip(link.shared().srtt())
+        .is_some_and(|(bar, srtt)| srtt > bar)
+}
+
+fn placement(
+    link: &ClientLink,
+    kind: LaneKind,
+    bar: Option<Duration>,
+) -> (bool, bool, bool, bool, usize, usize, Duration) {
     let work = link.shared().work();
     let suspect = link.shared().is_suspect();
+    let slow = is_slow(link, bar);
+    let srtt = link.shared().srtt().unwrap_or_default();
     if kind.is_datagram() {
         (
             suspect,
+            slow,
             link.is_bulk(),
             work.datagrams == 0,
             work.streams(),
             work.total(),
+            srtt,
         )
     } else {
-        (suspect, link.is_bulk(), work.datagrams > 0, 0, work.total())
+        (
+            suspect,
+            slow,
+            link.is_bulk(),
+            work.datagrams > 0,
+            0,
+            work.total(),
+            srtt,
+        )
     }
 }
 
-fn fits(link: &ClientLink, kind: LaneKind) -> bool {
+fn fits(link: &ClientLink, kind: LaneKind, bar: Option<Duration>) -> bool {
     !link.shared().is_suspect()
+        && !is_slow(link, bar)
         && !link.is_bulk()
         && (kind.is_datagram() || link.shared().work().datagrams == 0)
 }
 
-fn healthy(link: &ClientLink) -> bool {
-    !link.is_closed() && !link.shared().is_suspect() && link.has_capacity()
+fn healthy(link: &ClientLink, bar: Option<Duration>) -> bool {
+    !link.is_closed() && !link.shared().is_suspect() && !is_slow(link, bar) && link.has_capacity()
 }
 
 #[cfg(test)]
@@ -63,6 +97,7 @@ struct PoolInner<S> {
     dial: DialFn<S>,
     state: Mutex<State>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    runtime: OnceLock<Handle>,
     wake: Arc<Notify>,
     ready: Notify,
     shutdown: Arc<Notify>,
@@ -81,6 +116,7 @@ struct State {
     dial_attempts: u64,
     dial_failures: u64,
     idle_closures: u64,
+    slow_closures: u64,
     failed_closures: u64,
     pressure_watermark: usize,
     speculative_attempts: usize,
@@ -130,6 +166,7 @@ pub struct PoolStats {
     pub dial_attempts: u64,
     pub dial_failures: u64,
     pub idle_closures: u64,
+    pub slow_closures: u64,
     pub failed_closures: u64,
     pub link_wait_us: u64,
     pub link_ids: Vec<u64>,
@@ -159,6 +196,7 @@ where
                     dial_attempts: 0,
                     dial_failures: 0,
                     idle_closures: 0,
+                    slow_closures: 0,
                     failed_closures: 0,
                     pressure_watermark: 0,
                     speculative_attempts: 0,
@@ -167,6 +205,7 @@ where
                     quiet_since: None,
                 }),
                 worker: Mutex::new(None),
+                runtime: Handle::try_current().map_or_else(|_| OnceLock::new(), OnceLock::from),
                 wake: Arc::new(Notify::new()),
                 ready: Notify::new(),
                 shutdown: Arc::new(Notify::new()),
@@ -362,6 +401,7 @@ impl<S> PoolInner<S> {
             dial_attempts: state.dial_attempts,
             dial_failures: state.dial_failures,
             idle_closures: state.idle_closures,
+            slow_closures: state.slow_closures,
             failed_closures: state.failed_closures,
             link_wait_us: self.wait_us.load(Ordering::Relaxed),
             link_ids: links.iter().map(|link| link.id()).collect(),
@@ -390,9 +430,16 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     fn start_worker(self: &Arc<Self>) {
+        let runtime = match Handle::try_current() {
+            Ok(current) => self.runtime.get_or_init(|| current).clone(),
+            Err(_) => match self.runtime.get() {
+                Some(stored) => stored.clone(),
+                None => return,
+            },
+        };
         let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
         if worker.is_none() && !self.closed() {
-            *worker = Some(tokio::spawn(Self::run(
+            *worker = Some(runtime.spawn(Self::run(
                 Arc::downgrade(self),
                 self.wake.clone(),
                 self.state().generation,
@@ -422,6 +469,7 @@ where
                     return Err(Error::Closed);
                 }
                 let now = Instant::now();
+                let bar = slow_bar(&state.links);
                 let loaded = !state.links.is_empty()
                     && state.links.len() < self.config.max_links
                     && state.links.iter().all(|link| {
@@ -432,7 +480,7 @@ where
                         .links
                         .iter()
                         .any(|link| !link.is_closed() && link.has_capacity())
-                    && !state.links.iter().any(|link| healthy(link));
+                    && !state.links.iter().any(|link| healthy(link, bar));
                 let spread = (loaded || doubtful)
                     && state.backoff.delay.is_zero()
                     && spread_until.is_none_or(|until| now < until);
@@ -444,7 +492,7 @@ where
                     .links
                     .iter()
                     .filter(|link| !link.is_closed() && link.has_capacity())
-                    .min_by_key(|link| placement(link, kind))
+                    .min_by_key(|link| placement(link, kind, bar))
                 {
                     let separate = state.links.len() < self.config.max_links
                         && state.backoff.delay.is_zero()
@@ -452,7 +500,7 @@ where
                             .links
                             .iter()
                             .filter(|link| !link.is_closed() && link.has_capacity())
-                            .any(|link| fits(link, kind));
+                            .any(|link| fits(link, kind, bar));
                     let reservation = link.reserve(kind);
                     if separate && !state.spread_request {
                         state.spread_request = true;
@@ -511,6 +559,21 @@ where
                 index += 1;
             }
         }
+        let bar = slow_bar(&state.links);
+        if state.links.iter().any(|link| healthy(link, bar)) {
+            let mut index = 0;
+            while index < state.links.len() {
+                let link = &state.links[index];
+                if is_slow(link, bar) && link.shared().idle_for_work().is_some() {
+                    let link = state.links.remove(index);
+                    link.close();
+                    state.slow_closures += 1;
+                    tracing::debug!(link_id = link.id(), reason = "slow", "mux link closed");
+                } else {
+                    index += 1;
+                }
+            }
+        }
         let now = Instant::now();
         let pressure = state.links.iter().filter(|link| link.is_bulk()).count();
         if pressure == 0 {
@@ -526,11 +589,10 @@ where
         let waiters = self.waiters.load(Ordering::Acquire);
         let required = waiters > 0 && !capacity;
         let spread = state.spread_request && state.links.len() < self.config.max_links;
-        let replace = state
-            .links
-            .iter()
-            .any(|link| !link.is_closed() && link.shared().is_suspect())
-            && !state.links.iter().any(|link| healthy(link));
+        let replace =
+            state.links.iter().any(|link| {
+                !link.is_closed() && (link.shared().is_suspect() || is_slow(link, bar))
+            }) && !state.links.iter().any(|link| healthy(link, bar));
         let speculative = pressure > state.pressure_watermark
             && state
                 .links

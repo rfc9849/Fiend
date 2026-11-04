@@ -23,6 +23,7 @@ const LOAD_COOLDOWN: Duration = Duration::from_secs(1);
 pub(crate) const STALE: Duration = Duration::from_secs(5);
 const QUIET_PROBE: Duration = Duration::from_secs(2);
 const SUSPECT_FLOOR: Duration = Duration::from_secs(1);
+const BUSY_PROBE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Work {
@@ -67,6 +68,8 @@ pub(crate) struct LinkShared {
     last_inbound_ms: AtomicU64,
     rtt_us: AtomicU64,
     rtt_at_ms: AtomicU64,
+    srtt_us: AtomicU64,
+    probed_ms: AtomicU64,
     check_requested: AtomicBool,
     check: Notify,
     epoch: Instant,
@@ -98,6 +101,8 @@ impl LinkShared {
             last_inbound_ms: AtomicU64::new(0),
             rtt_us: AtomicU64::new(u64::MAX),
             rtt_at_ms: AtomicU64::new(0),
+            srtt_us: AtomicU64::new(u64::MAX),
+            probed_ms: AtomicU64::new(0),
             check_requested: AtomicBool::new(false),
             check: Notify::new(),
             epoch: now,
@@ -141,6 +146,15 @@ impl LinkShared {
             return None;
         }
         Some(QUIET_PROBE.saturating_sub(self.idle_for()))
+    }
+
+    fn busy_probe_due(&self) -> Option<Duration> {
+        if !self.armed.load(Ordering::Acquire) || self.work().lanes == 0 {
+            return None;
+        }
+        let probed = self.probed_ms.load(Ordering::Acquire);
+        let since = Duration::from_millis(self.elapsed_ms().saturating_sub(probed));
+        Some(BUSY_PROBE.saturating_sub(since))
     }
 
     fn suspect_after(&self, probe: Duration) -> Duration {
@@ -239,10 +253,22 @@ impl LinkShared {
         self.bulk.load(Ordering::Acquire) && self.work().total() > 0
     }
 
-    fn record_rtt(&self, rtt: Duration) {
+    pub(crate) fn record_rtt(&self, rtt: Duration) {
         let micros = u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX - 1);
         self.rtt_at_ms.store(self.elapsed_ms(), Ordering::Release);
         self.rtt_us.store(micros, Ordering::Release);
+        let old = self.srtt_us.load(Ordering::Acquire);
+        let smooth = if old == u64::MAX {
+            micros
+        } else {
+            old / 2 + micros / 2
+        };
+        self.srtt_us.store(smooth, Ordering::Release);
+    }
+
+    pub(crate) fn srtt(&self) -> Option<Duration> {
+        let micros = self.srtt_us.load(Ordering::Acquire);
+        (micros != u64::MAX).then(|| Duration::from_micros(micros))
     }
 
     pub(crate) fn rtt(&self) -> Option<(Duration, Duration)> {
@@ -608,9 +634,10 @@ async fn keepalive_loop(
             } else {
                 idle_wait.saturating_sub(shared.idle_for())
             };
-            let wait = shared
-                .quiet_probe_due()
-                .map_or(idle, |quiet| quiet.min(idle));
+            let wait = [shared.quiet_probe_due(), shared.busy_probe_due()]
+                .into_iter()
+                .flatten()
+                .fold(idle, Duration::min);
             let check = shared.check.notified();
             tokio::pin!(check);
             check.as_mut().enable();
@@ -628,11 +655,19 @@ async fn keepalive_loop(
         let checked = shared.take_check();
         let quiet = shared.idle_for();
         let quiet_probe = shared.quiet_probe_due().is_some_and(|left| left.is_zero());
-        let due = timing.measure || quiet >= idle_wait || checked && quiet >= STALE || quiet_probe;
+        let busy_probe = shared.busy_probe_due().is_some_and(|left| left.is_zero());
+        let due = timing.measure
+            || quiet >= idle_wait
+            || checked && quiet >= STALE
+            || quiet_probe
+            || busy_probe;
         if !due {
             continue;
         }
         shared.armed.store(false, Ordering::Release);
+        shared
+            .probed_ms
+            .store(shared.elapsed_ms(), Ordering::Release);
         let started = Instant::now();
         let ping = ping_pong.ping(Ping::opaque());
         tokio::pin!(ping);
@@ -790,7 +825,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_live_link_gets_one_quiet_probe_per_silence() {
+    async fn a_live_link_gets_one_probe_per_burst_of_data() {
         use crate::mux::ServerConnection;
 
         let (client, server) = tokio::io::duplex(64 << 10);
@@ -808,9 +843,10 @@ mod tests {
         link.shared().reserve_lane(LaneKind::Tcp);
         link.shared().lane_opened();
         link.shared().note_io(512, false);
-        run_for(QUIET_PROBE + Duration::from_millis(300)).await;
-        let (_, age) = link.shared().rtt().expect("one quiet probe");
+        run_for(BUSY_PROBE + Duration::from_millis(300)).await;
+        let (_, age) = link.shared().rtt().expect("one busy probe");
         assert!(age < Duration::from_millis(500));
+        assert!(link.shared().srtt().is_some());
         assert!(!link.shared().is_suspect());
         run_for(Duration::from_secs(10)).await;
         let (_, age) = link.shared().rtt().expect("sample");
@@ -819,14 +855,38 @@ mod tests {
             "no new probe without new data"
         );
         link.shared().note_io(512, true);
-        run_for(QUIET_PROBE + Duration::from_millis(300)).await;
+        run_for(Duration::from_millis(300)).await;
         let (_, age) = link.shared().rtt().expect("sample");
         assert!(
-            age < Duration::from_millis(500),
-            "new data arms one more probe"
+            age < Duration::from_millis(300),
+            "new data arms one more probe at once"
         );
         assert!(!link.is_closed());
         served.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn smoothed_rtt_moves_halfway_to_each_sample() {
+        let shared = LinkShared::new(Arc::new(Notify::new()));
+        assert_eq!(shared.srtt(), None);
+        shared.record_rtt(Duration::from_millis(60));
+        assert_eq!(shared.srtt(), Some(Duration::from_millis(60)));
+        shared.record_rtt(Duration::from_millis(1000));
+        assert_eq!(shared.srtt(), Some(Duration::from_millis(530)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_probe_needs_lanes_and_new_data() {
+        let shared = LinkShared::new(Arc::new(Notify::new()));
+        shared.note_io(512, true);
+        assert_eq!(shared.busy_probe_due(), None, "no lanes");
+        shared.reserve_lane(LaneKind::Tcp);
+        shared.lane_opened();
+        assert_eq!(shared.busy_probe_due(), Some(BUSY_PROBE));
+        tokio::time::advance(BUSY_PROBE).await;
+        assert_eq!(shared.busy_probe_due(), Some(Duration::ZERO));
+        shared.armed.store(false, Ordering::Release);
+        assert_eq!(shared.busy_probe_due(), None, "no data since the probe");
     }
 
     #[tokio::test(start_paused = true)]

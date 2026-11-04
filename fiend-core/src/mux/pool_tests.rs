@@ -108,6 +108,25 @@ async fn network_change_cancels_old_dial_and_keeps_waiters() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
+#[tokio::test]
+async fn network_change_from_a_plain_thread_restarts_the_worker() {
+    let pool = Arc::new(pool(Config::default()));
+    pool.ready().await.unwrap();
+    let monitor = pool.clone();
+    std::thread::spawn(move || monitor.network_changed())
+        .join()
+        .expect("no runtime panic on a plain thread");
+    assert!(pool.inner.worker.lock().unwrap().is_some());
+    let mut lane = pool
+        .open_lane("example.com:443", LaneKind::Tcp)
+        .await
+        .unwrap();
+    lane.write_all(b"after").await.unwrap();
+    let mut result = [0; 5];
+    lane.read_exact(&mut result).await.unwrap();
+    assert_eq!(&result, b"after");
+}
+
 #[tokio::test(start_paused = true)]
 async fn network_change_discards_a_late_dial_result() {
     let pool = pool(Config::default());
@@ -272,6 +291,55 @@ async fn new_lanes_avoid_a_suspect_link() {
     let call = reserve_now(&pool, LaneKind::Udp).await;
     assert_eq!(call.link.id(), fine.id());
     assert!(pool.inner.maintain().is_none(), "a healthy link is left");
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_lanes_avoid_a_slow_link() {
+    let pool = pool(Config::default());
+    let lossy = add_link(&pool).await;
+    let fine = add_link(&pool).await;
+    let _a = fine.reserve(LaneKind::Tcp);
+    let _b = fine.reserve(LaneKind::Tcp);
+    fine.shared().record_rtt(Duration::from_millis(60));
+    lossy.shared().record_rtt(Duration::from_millis(900));
+    let page = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(page.link.id(), fine.id());
+    let call = reserve_now(&pool, LaneKind::Udp).await;
+    assert_eq!(call.link.id(), fine.id());
+}
+
+#[tokio::test(start_paused = true)]
+async fn equal_delay_on_all_links_marks_none_slow() {
+    let pool = pool(Config::default());
+    let first = add_link(&pool).await;
+    let second = add_link(&pool).await;
+    let _a = second.reserve(LaneKind::Tcp);
+    first.shared().record_rtt(Duration::from_millis(700));
+    second.shared().record_rtt(Duration::from_millis(650));
+    let page = reserve_now(&pool, LaneKind::Tcp).await;
+    assert_eq!(page.link.id(), first.id(), "fewest lanes still wins");
+    drop(page);
+    pool.inner.maintain();
+    assert_eq!(pool.stats().links, 2);
+    assert_eq!(pool.stats().slow_closures, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_idle_slow_link_closes_when_a_healthy_link_is_left() {
+    let pool = pool(Config::default());
+    let lossy = add_link(&pool).await;
+    let fine = add_link(&pool).await;
+    fine.shared().record_rtt(Duration::from_millis(60));
+    lossy.shared().record_rtt(Duration::from_millis(900));
+    let busy = lossy.reserve(LaneKind::Tcp);
+    assert!(pool.inner.maintain().is_none());
+    assert_eq!(pool.stats().links, 2, "a slow link keeps its lanes");
+    drop(busy);
+    assert!(pool.inner.maintain().is_none());
+    assert_eq!(pool.stats().links, 1);
+    assert_eq!(pool.stats().slow_closures, 1);
+    assert!(lossy.is_closed());
+    assert!(!fine.is_closed());
 }
 
 #[tokio::test(start_paused = true)]
