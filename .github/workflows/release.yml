@@ -119,9 +119,12 @@ jobs:
           FIEND_ANDROID_KEY_ALIAS: fiend
           FIEND_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: ./gradlew --no-daemon lintRelease testDebugUnitTest assembleRelease
+      - name: Build the root module
+        run: sh tools/package/android-module.sh
       - name: Package
         run: |
           mkdir dist
+          cp "target/module/fiend-module-$VERSION.zip" "dist/fiend-$VERSION-android-module.zip"
           apk=fiend-android/app/build/outputs/apk/release
           if [ -n "${FIEND_ANDROID_KEYSTORE:-}" ]; then
             apksigner=$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name apksigner | sort -V | tail -n 1)
