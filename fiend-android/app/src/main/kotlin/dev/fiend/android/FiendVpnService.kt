@@ -17,6 +17,7 @@ import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import androidx.core.app.NotificationCompat
 import dagger.hilt.android.AndroidEntryPoint
 import dev.fiend.core.data.ProfileRepository
@@ -28,14 +29,18 @@ import dev.fiend.core.engine.EngineState
 import dev.fiend.core.engine.engineConfig
 import dev.fiend.core.engine.bindings.LogLine as NativeLog
 import dev.fiend.core.engine.bindings.Platform
+import dev.fiend.core.engine.bindings.RootOptions
 import dev.fiend.core.engine.bindings.RuleFile
 import dev.fiend.core.engine.bindings.TunOptions
 import dev.fiend.core.engine.bindings.Tunnel
 import dev.fiend.core.engine.bindings.TunnelState as NativeState
+import dev.fiend.core.engine.bindings.UidRange
+import dev.fiend.core.model.AppSettings
 import dev.fiend.core.model.LogLevel
 import dev.fiend.core.model.LogLine
 import dev.fiend.core.model.SplitTunnelMode
 import dev.fiend.core.model.TunnelState
+import java.io.File
 import java.lang.ref.WeakReference
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -116,34 +121,37 @@ class FiendVpnService : VpnService() {
         currentProfileId = id
         val session = engine.begin(id)
         try {
-            check(prepare(this) == null) { "VPN permission is required" }
             val profile = profiles.profile(id).first() ?: error("The selected profile is not available")
             val appSettings = settings.settings.first()
+            check(appSettings.rootMode || prepare(this) == null) { "VPN permission is required" }
             if (Build.VERSION.SDK_INT >= 37 && needsLocalNetworkAccess(profile.host, appSettings.bypassLan)) {
                 check(ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) { "Open fiend and grant local network permission" }
             }
             val config = profile.engineConfig()
             profileName = profile.name
             underlying = findUnderlying()
-            val builder = Builder().setSession(profile.name).setMtu(appSettings.mtu)
+            val builder = if (appSettings.rootMode) null else Builder().setSession(profile.name).setMtu(appSettings.mtu)
                 .addAddress("10.42.0.2", 32)
                 .addAddress("fd42:6669:656e:6400::2", 128)
                 .addRoute("0.0.0.0", 0)
                 .addRoute("::", 0)
                 .addDnsServer("198.18.0.1")
-                .setUnderlyingNetworks(underlying?.let { arrayOf(it) })
-            if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
-            var allowed = 0
-            for (packageName in appSettings.splitTunnelApps) {
-                try {
-                    when (appSettings.splitTunnelMode) {
-                        SplitTunnelMode.OnlySelected -> { builder.addAllowedApplication(packageName); allowed += 1 }
-                        SplitTunnelMode.ExceptSelected -> builder.addDisallowedApplication(packageName)
-                        SplitTunnelMode.AllApps -> Unit
-                    }
-                } catch (_: PackageManager.NameNotFoundException) { }
+                ?.setUnderlyingNetworks(underlying?.let { arrayOf(it) })
+            if (builder != null) {
+                if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
+                var allowed = 0
+                for (packageName in appSettings.splitTunnelApps) {
+                    try {
+                        when (appSettings.splitTunnelMode) {
+                            SplitTunnelMode.OnlySelected -> { builder.addAllowedApplication(packageName); allowed += 1 }
+                            SplitTunnelMode.ExceptSelected -> builder.addDisallowedApplication(packageName)
+                            SplitTunnelMode.AllApps -> Unit
+                        }
+                    } catch (_: PackageManager.NameNotFoundException) { }
+                }
+                check(appSettings.splitTunnelMode != SplitTunnelMode.OnlySelected || allowed > 0) { "Select at least one installed app" }
             }
-            check(appSettings.splitTunnelMode != SplitTunnelMode.OnlySelected || allowed > 0) { "Select at least one installed app" }
+            val root = if (appSettings.rootMode) rootOptions(appSettings) else null
             val options = TunOptions(
                 mtu = appSettings.mtu.toUShort(),
                 ipv6 = appSettings.ipv6,
@@ -172,10 +180,14 @@ class FiendVpnService : VpnService() {
             val platform = ServicePlatform(this, session)
             withContext(Dispatchers.IO) {
                 if (!engine.isCurrent(session)) return@withContext
-                val descriptor = builder.establish() ?: error("Android could not create the VPN interface")
-                val fd = descriptor.detachFd()
-                descriptor.close()
-                val native = Tunnel.start(fd, config, options, platform)
+                val native = if (builder == null) {
+                    Tunnel.startRoot(config, options, root ?: error("Root mode is not ready"), platform)
+                } else {
+                    val descriptor = builder.establish() ?: error("Android could not create the VPN interface")
+                    val fd = descriptor.detachFd()
+                    descriptor.close()
+                    Tunnel.start(fd, config, options, platform)
+                }
                 val retain = synchronized(nativeLock) {
                     if (destroyed || !engine.isCurrent(session)) false else { tunnel = native; true }
                 }
@@ -190,6 +202,27 @@ class FiendVpnService : VpnService() {
                 showForeground("Connection failed")
             }
         }
+    }
+
+    private fun rootOptions(appSettings: AppSettings): RootOptions {
+        val own = Process.myUid()
+        val user = own / PER_USER_RANGE * PER_USER_RANGE
+        val apps = UidRange((user + FIRST_APP_UID).toUInt(), (user + LAST_APP_UID).toUInt())
+        val selected = appSettings.splitTunnelApps.mapNotNull { packageName ->
+            runCatching { packageManager.getApplicationInfo(packageName, 0).uid }.getOrNull()
+        }.filter { it != own }.distinct()
+        val (include, exclude) = when (appSettings.splitTunnelMode) {
+            SplitTunnelMode.AllApps -> listOf(apps) to emptyList()
+            SplitTunnelMode.OnlySelected -> selected.map { UidRange(it.toUInt(), it.toUInt()) } to emptyList()
+            SplitTunnelMode.ExceptSelected -> listOf(apps) to selected
+        }
+        check(include.isNotEmpty()) { "Select at least one installed app" }
+        return RootOptions(
+            helper = ROOT_HELPER,
+            socketPath = File(noBackupFilesDir, "root.sock").path,
+            include = include,
+            exclude = exclude.map { it.toUInt() },
+        )
     }
 
     private fun setNetwork(network: Network?) {
@@ -285,5 +318,12 @@ class FiendVpnService : VpnService() {
         }
     }
 
-    private companion object { const val CHANNEL = "vpn"; const val NOTIFICATION = 1 }
+    private companion object {
+        const val CHANNEL = "vpn"
+        const val NOTIFICATION = 1
+        const val ROOT_HELPER = "/data/adb/modules/fiend/fiend-root"
+        const val PER_USER_RANGE = 100_000
+        const val FIRST_APP_UID = 10_000
+        const val LAST_APP_UID = 19_999
+    }
 }

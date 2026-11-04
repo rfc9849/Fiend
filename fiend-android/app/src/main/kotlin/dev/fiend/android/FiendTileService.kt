@@ -4,7 +4,6 @@ import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.net.VpnService
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
@@ -65,7 +64,7 @@ class FiendTileService : TileService() {
     private fun connect() {
         val id = profiles.activeProfileId.value ?: profiles.profiles.value.firstOrNull()?.id
         if (id != null) tunnel.connect(id)
-        if (id == null || VpnService.prepare(this) != null || tunnel.permissionRequired.value) openApp()
+        if (id == null || tunnel.permissionRequired.value) openApp()
     }
 
     private fun render(state: TunnelState) {

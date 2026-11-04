@@ -40,6 +40,7 @@ data class RuleFileSpec(val path: String, val kind: RuleKind)
 data class AppSettings(
     val themeMode: ThemeMode = ThemeMode.System,
     val connectOnStart: Boolean = false,
+    val rootMode: Boolean = false,
     val bypassLan: Boolean = true,
     val ipv6: Boolean = true,
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.AllApps,

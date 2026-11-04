@@ -116,91 +116,35 @@ pub struct TunnelStats {
 }
 
 #[derive(Default)]
-struct Counters {
-    uploaded: AtomicU64,
-    downloaded: AtomicU64,
-    dropped: AtomicU64,
+pub(crate) struct Counters {
+    pub(crate) uploaded: AtomicU64,
+    pub(crate) downloaded: AtomicU64,
+    pub(crate) dropped: AtomicU64,
     flows: AtomicU64,
     packet_id: AtomicU32,
 }
 
 pub struct TunEngine {
-    context: Arc<Context>,
-    cancel: CancellationToken,
+    pub(crate) context: Arc<Context>,
+    pub(crate) cancel: CancellationToken,
     network: watch::Sender<u64>,
-    running: AtomicBool,
+    pub(crate) running: AtomicBool,
 }
 
-struct Context {
-    client: Client,
-    options: TunOptions,
-    rules: Arc<Rules>,
+pub(crate) struct Context {
+    pub(crate) client: Client,
+    pub(crate) options: TunOptions,
+    pub(crate) rules: Arc<Rules>,
     resolver: Resolver,
     dns: Arc<Mutex<FakeDns>>,
-    counters: Counters,
+    pub(crate) counters: Counters,
 }
 
 impl TunEngine {
-    pub fn new(client: Client, mut options: TunOptions) -> io::Result<Self> {
-        if !(1280..=9000).contains(&options.mtu)
-            || options.max_tcp_flows == 0
-            || options.max_tcp_flows > 4096
-            || options.max_udp_flows == 0
-            || options.max_udp_flows > 4096
-            || options.udp_idle.is_zero()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "TUN options are not valid",
-            ));
-        }
-        let mut rules = Rules::parse(
-            &std::mem::take(&mut options.direct_rules),
-            &std::mem::take(&mut options.block_rules),
-            &std::mem::take(&mut options.proxy_rules),
-        )
-        .and_then(|rules| rules.with_dpi(&std::mem::take(&mut options.dpi_rules)))
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        for file in std::mem::take(&mut options.rule_files) {
-            match rules.add_file(&file) {
-                Ok(counts) => tracing::info!(
-                    path = %file.path,
-                    kind = ?file.kind,
-                    entries = counts.total(),
-                    "loaded rule file"
-                ),
-                Err(error) => tracing::warn!(%error, "skipped rule file"),
-            }
-        }
-        rules.finish();
-        let rules = Arc::new(rules);
-        let resolver = Resolver::new(
-            parse_server(&options.direct_resolver)?,
-            options.protect_socket.clone(),
-        );
-        let dns = match options.fake_dns.take() {
-            Some(dns) => {
-                dns.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .set_rules(rules.clone());
-                dns
-            }
-            None => Arc::new(Mutex::new(
-                FakeDns::new(options.dns_capacity, options.dns_ttl)
-                    .map_err(io::Error::other)?
-                    .with_rules(rules.clone()),
-            )),
-        };
+    pub fn new(client: Client, options: TunOptions) -> io::Result<Self> {
         let (network, _) = watch::channel(0);
         Ok(Self {
-            context: Arc::new(Context {
-                client,
-                options,
-                rules,
-                resolver,
-                dns,
-                counters: Counters::default(),
-            }),
+            context: Arc::new(Context::new(client, options)?),
             cancel: CancellationToken::new(),
             network,
             running: AtomicBool::new(false),
@@ -265,16 +209,16 @@ impl Drop for TunEngine {
     }
 }
 
-struct Running<'a>(&'a AtomicBool);
+pub(crate) struct Running<'a>(pub(crate) &'a AtomicBool);
 impl Drop for Running<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
 }
 
-struct FlowCount(Arc<Context>);
+pub(crate) struct FlowCount(Arc<Context>);
 impl FlowCount {
-    fn new(context: Arc<Context>) -> Self {
+    pub(crate) fn new(context: Arc<Context>) -> Self {
         context.counters.flows.fetch_add(1, Ordering::Relaxed);
         Self(context)
     }
@@ -285,7 +229,7 @@ impl Drop for FlowCount {
     }
 }
 
-enum Plan {
+pub(crate) enum Plan {
     Proxy,
     Block,
     Direct {
@@ -442,7 +386,8 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                         let output = output.clone();
                         let key = packet.key;
                         let count = FlowCount::new(context.clone());
-                        tasks.spawn(async move { let _count = count; let result = udp_flow(flow_context, key, destination, receiver, output).await; (Completed::Udp(key, id), result) });
+                        let reply = TunReply { context: flow_context.clone(), output, key };
+                        tasks.spawn(async move { let _count = count; let result = udp_flow(flow_context, key.destination.port(), destination, receiver, reply).await; (Completed::Udp(key, id), result) });
                     }
                 }
             }
@@ -469,6 +414,66 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
 }
 
 impl Context {
+    fn new(client: Client, mut options: TunOptions) -> io::Result<Self> {
+        if !(1280..=9000).contains(&options.mtu)
+            || options.max_tcp_flows == 0
+            || options.max_tcp_flows > 4096
+            || options.max_udp_flows == 0
+            || options.max_udp_flows > 4096
+            || options.udp_idle.is_zero()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TUN options are not valid",
+            ));
+        }
+        let mut rules = Rules::parse(
+            &std::mem::take(&mut options.direct_rules),
+            &std::mem::take(&mut options.block_rules),
+            &std::mem::take(&mut options.proxy_rules),
+        )
+        .and_then(|rules| rules.with_dpi(&std::mem::take(&mut options.dpi_rules)))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        for file in std::mem::take(&mut options.rule_files) {
+            match rules.add_file(&file) {
+                Ok(counts) => tracing::info!(
+                    path = %file.path,
+                    kind = ?file.kind,
+                    entries = counts.total(),
+                    "loaded rule file"
+                ),
+                Err(error) => tracing::warn!(%error, "skipped rule file"),
+            }
+        }
+        rules.finish();
+        let rules = Arc::new(rules);
+        let resolver = Resolver::new(
+            parse_server(&options.direct_resolver)?,
+            options.protect_socket.clone(),
+        );
+        let dns = match options.fake_dns.take() {
+            Some(dns) => {
+                dns.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .set_rules(rules.clone());
+                dns
+            }
+            None => Arc::new(Mutex::new(
+                FakeDns::new(options.dns_capacity, options.dns_ttl)
+                    .map_err(io::Error::other)?
+                    .with_rules(rules.clone()),
+            )),
+        };
+        Ok(Self {
+            client,
+            options,
+            rules,
+            resolver,
+            dns,
+            counters: Counters::default(),
+        })
+    }
+
     fn destination(&self, address: SocketAddr) -> io::Result<Address> {
         self.dns
             .lock()
@@ -477,11 +482,11 @@ impl Context {
             .map_err(io::Error::other)
     }
 
-    fn drop_packet(&self) {
+    pub(crate) fn drop_packet(&self) {
         self.counters.dropped.fetch_add(1, Ordering::Relaxed);
     }
 
-    async fn plan(&self, destination: &Address) -> Plan {
+    pub(crate) async fn plan(&self, destination: &Address) -> Plan {
         let host = match destination {
             Address::Ip(address) => crate::rules::Host::Ip(address.ip()),
             Address::Domain { host, .. } => crate::rules::Host::Name(host),
@@ -679,19 +684,35 @@ async fn echo_flow(
     Ok(())
 }
 
-async fn udp_flow(
+pub(crate) trait UdpReply: Send + Sync + 'static {
+    fn send(&self, payload: &[u8]) -> impl Future<Output = io::Result<()>> + Send;
+}
+
+struct TunReply {
     context: Arc<Context>,
+    output: mpsc::Sender<Vec<u8>>,
     key: FlowKey,
+}
+
+impl UdpReply for TunReply {
+    async fn send(&self, payload: &[u8]) -> io::Result<()> {
+        self.context.send_udp(&self.output, self.key, payload).await
+    }
+}
+
+pub(crate) async fn udp_flow<R: UdpReply>(
+    context: Arc<Context>,
+    port: u16,
     destination: Address,
     mut packets: mpsc::Receiver<Vec<u8>>,
-    output: mpsc::Sender<Vec<u8>>,
+    reply: R,
 ) -> io::Result<()> {
     let plan = context.plan(&destination).await;
     if matches!(plan, Plan::Block) {
         return Ok(());
     }
     if let Plan::Direct { dpi: true, .. } = plan
-        && key.destination.port() == QUIC_PORT
+        && port == QUIC_PORT
     {
         while let Ok(Some(_)) = timeout(context.options.udp_idle, packets.recv()).await {
             context.drop_packet();
@@ -711,7 +732,7 @@ async fn udp_flow(
                         let Some(packet) = packet else { return Err(io::Error::new(io::ErrorKind::BrokenPipe, "UDP flow is closed")); };
                         socket.send(&packet).await?;
                     }
-                    size = socket.recv(&mut buffer) => { context.send_udp(&output, key, &buffer[..size?]).await?; }
+                    size = socket.recv(&mut buffer) => { reply.send(&buffer[..size?]).await?; }
                 }
                 Ok(())
             };
@@ -743,7 +764,7 @@ async fn udp_flow(
         loop {
             match receiver.recv().await {
                 Ok(Some(response)) => {
-                    context.send_udp(&output, key, &response.payload).await?;
+                    reply.send(&response.payload).await?;
                     activity.send_replace(tokio::time::Instant::now());
                 }
                 Ok(None) => {}

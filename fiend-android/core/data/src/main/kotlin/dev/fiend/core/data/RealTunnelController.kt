@@ -64,7 +64,8 @@ class RealTunnelController @Inject constructor(
 
     override fun connect(profileId: String) {
         runCatching {
-            if (VpnService.prepare(context) != null || needsLocalPermission(profileId)) {
+            val vpnConsent = !settings.settings.value.rootMode && VpnService.prepare(context) != null
+            if (vpnConsent || needsLocalPermission(profileId)) {
                 pending.set(profileId)
                 mutablePermissionRequired.value = true
             } else {

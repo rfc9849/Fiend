@@ -85,7 +85,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestVpnConsent() {
-        val request = VpnService.prepare(this)
+        val request = if (viewModel.settings.value.rootMode) null else VpnService.prepare(this)
         if (request == null) tunnel.permissionResult(true) else consent.launch(request)
     }
 

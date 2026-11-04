@@ -17,6 +17,7 @@ val rustInputs = files(
     fileTree(workspace.dir("fiend-core")) { include("Cargo.toml", "src/**", "testdata/template.json") },
     fileTree(workspace.dir("fiend-tun")) { include("Cargo.toml", "src/**") },
     fileTree(workspace.dir("fiend-app")) { include("Cargo.toml", "src/**") },
+    fileTree(workspace.dir("fiend-root")) { include("Cargo.toml", "src/**") },
     fileTree(workspace.dir("fiend-mobile")) { include("Cargo.toml", "src/**", "uniffi.toml") },
 )
 val generatedBindings = layout.buildDirectory.dir("generated/uniffi")

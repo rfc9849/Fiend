@@ -79,6 +79,15 @@ internal fun SettingsScreen(
                         )
                     }
                     item {
+                        SwitchItem(
+                            headline = stringResource(R.string.settings_root_mode),
+                            supporting = stringResource(R.string.settings_root_mode_body),
+                            icon = FiendIcons.Key,
+                            checked = settings.rootMode,
+                            onCheckedChange = { v -> onUpdate { s -> s.copy(rootMode = v) } },
+                        )
+                    }
+                    item {
                         ActionItem(
                             headline = stringResource(R.string.settings_always_on),
                             supporting = stringResource(R.string.settings_always_on_body),

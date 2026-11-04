@@ -110,6 +110,22 @@ pub struct TunOptions {
     pub max_udp_flows: u32,
 }
 
+#[derive(Clone, Copy, uniffi::Record)]
+pub struct UidRange {
+    pub first: u32,
+    pub last: u32,
+}
+
+/// Root mode: `helper` is the root helper of the Fiend module, `socket_path`
+/// is a free path in the app data. The app itself is always excluded.
+#[derive(uniffi::Record)]
+pub struct RootOptions {
+    pub helper: String,
+    pub socket_path: String,
+    pub include: Vec<UidRange>,
+    pub exclude: Vec<u32>,
+}
+
 #[derive(uniffi::Record)]
 pub struct RuleStats {
     pub domains: u32,
@@ -229,106 +245,83 @@ impl Tunnel {
         let fd = unsafe { OwnedFd::from_raw_fd(tun_fd) };
         let runtime = runtime()?;
         logging::initialize(runtime);
-        let mut config = profile::client_config(&profile)?;
-        numeric_servers(&config)?;
-        config.handshake_timeout = Duration::from_millis(options.handshake_timeout_ms);
-        config.protect_socket = protect(platform.clone());
-        let config = fiend_core::config::build_client(config).map_err(engine_error)?;
-        let direct_protect = config.protect_socket.clone();
-        let max_connections = (options.max_connections as usize).min(256);
-        let max_udp_flows = options.max_udp_flows as usize;
-        let udp_idle = Duration::from_millis(options.udp_idle_ms);
-        let client = Client::new(config);
-        let engine = Arc::new(
-            TunEngine::new(
-                client.clone(),
-                fiend_tun::TunOptions {
-                    mtu: options.mtu,
-                    ipv6: options.ipv6,
-                    bypass_lan: options.bypass_lan,
-                    direct_rules: options.direct_rules,
-                    block_rules: options.block_rules,
-                    proxy_rules: options.proxy_rules,
-                    dpi_rules: options.dpi_rules,
-                    rule_files: options
-                        .rule_files
-                        .into_iter()
-                        .map(|file| fiend_tun::rules::RuleFile {
-                            path: file.path,
-                            kind: match file.kind {
-                                RuleKind::Direct => fiend_tun::rules::RuleKind::Direct,
-                                RuleKind::Block => fiend_tun::rules::RuleKind::Block,
-                                RuleKind::Proxy => fiend_tun::rules::RuleKind::Proxy,
-                                RuleKind::Dpi => fiend_tun::rules::RuleKind::Dpi,
-                            },
-                        })
-                        .collect(),
-                    direct_resolver: options.direct_resolver,
-                    max_tcp_flows: max_connections,
-                    max_udp_flows,
-                    udp_idle,
-                    fake_dns: Some(fiend_tun::shared_fake_dns()),
-                    protect_socket: direct_protect,
-                    ..fiend_tun::TunOptions::default()
-                },
-            )
-            .map_err(engine_error)?,
-        );
+        let (engine, client) = build_engine(profile, options, protect(platform.clone()))?;
         let device = {
             let _enter = runtime.enter();
             unsafe { tun_rs::AsyncDevice::from_fd(fd.into_raw_fd()) }.map_err(engine_error)?
         };
+        let runner = engine.clone();
+        Ok(Self::launch(engine, client, platform, async move {
+            runner.run(device).await
+        }))
+    }
+
+    /// Starts the root mode: the root helper adds TPROXY rules for the
+    /// selected apps and gives the transparent sockets to the engine. No
+    /// VPN interface is made.
+    #[uniffi::constructor]
+    pub fn start_root(
+        profile: ProfileConfig,
+        options: TunOptions,
+        root: RootOptions,
+        platform: Arc<dyn Platform>,
+    ) -> Result<Arc<Self>, FiendError> {
+        let runtime = runtime()?;
+        logging::initialize(runtime);
         logging::set_platform(&platform);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let latency_ms = Arc::new(AtomicU64::new(u64::MAX));
-        let tunnel = Arc::new(Self {
-            engine: engine.clone(),
-            client: client.clone(),
-            platform: platform.clone(),
-            stopped: stopped.clone(),
-            latency_ms: latency_ms.clone(),
-            task: Mutex::new(None),
-        });
-        let _ = platform.on_state(TunnelState::Connecting);
-        let task = runtime.spawn(async move {
-            tracing::info!("tunnel handshake started");
-            let result = async {
-                let start = Instant::now();
-                client.ready().await.map_err(engine_error)?;
-                latency_ms.store(
-                    start.elapsed().as_millis().min(u128::from(u32::MAX)) as u64,
-                    Ordering::Release,
-                );
-                tracing::info!("tunnel handshake completed");
-                if stopped.load(Ordering::Acquire) {
-                    return Ok(());
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            let ipv6 = options.ipv6;
+            let bypass_lan = options.bypass_lan;
+            let (engine, client) = build_engine(profile, options, Arc::new(|_| Ok(())))?;
+            let mut exclude = root.exclude;
+            exclude.push(nix::unistd::getuid().as_raw());
+            exclude.sort_unstable();
+            exclude.dedup();
+            let policy = fiend_root::protocol::Policy {
+                include: root
+                    .include
+                    .iter()
+                    .map(|range| fiend_root::protocol::UidRange {
+                        first: range.first,
+                        last: range.last,
+                    })
+                    .collect(),
+                exclude,
+                ipv6,
+                bypass_lan,
+            };
+            policy
+                .validate()
+                .map_err(|reason| FiendError::Engine { reason })?;
+            let started = fiend_root::client::Helper::launch(
+                &root.helper,
+                std::path::Path::new(&root.socket_path),
+                &policy,
+                ROOT_PROMPT_WAIT,
+            )
+            .map_err(engine_error)?;
+            let helper = Arc::new(RootHelper(started.helper));
+            let sockets = {
+                let _enter = runtime.enter();
+                fiend_tun::TransparentSockets {
+                    tcp: started.tcp,
+                    udp: started.udp,
+                    replies: helper.clone(),
                 }
-                let _ = platform.on_state(TunnelState::Connected);
-                let watch = watch_server(client.clone(), platform.clone(), stopped.clone());
-                let result = engine.run(device).await.map_err(engine_error);
-                watch.abort();
+            };
+            let runner = engine.clone();
+            Ok(Self::launch(engine, client, platform, async move {
+                let result = runner.run_transparent(sockets).await;
+                let _ = tokio::task::spawn_blocking(move || drop(helper)).await;
                 result
-            }
-            .await;
-            engine.stop();
-            if let Err(error) = &result {
-                tracing::error!(%error, "tunnel stopped with an error");
-            }
-            if stopped.load(Ordering::Acquire) {
-                let _ = platform.on_state(TunnelState::Disconnected);
-            } else if let Err(error) = result {
-                let _ = platform.on_state(TunnelState::Failed {
-                    reason: error.to_string(),
-                });
-            } else {
-                let _ = platform.on_state(TunnelState::Disconnected);
-            }
-        });
-        *tunnel
-            .task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(task);
-        Ok(tunnel)
+            }))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            let _ = (profile, options, root);
+            Err(engine_error("Root mode needs Android"))
+        }
     }
 
     pub fn stop(&self) {
@@ -384,6 +377,137 @@ impl Tunnel {
             let _ = platform.on_state(state);
         });
         Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const ROOT_PROMPT_WAIT: Duration = Duration::from_secs(60);
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+struct RootHelper(fiend_root::client::Helper);
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+impl fiend_tun::ReplySockets for RootHelper {
+    fn open(&self, local: SocketAddr) -> io::Result<std::net::UdpSocket> {
+        self.0.reply_socket(local)
+    }
+}
+
+fn build_engine(
+    profile: ProfileConfig,
+    options: TunOptions,
+    protect_socket: fiend_core::net::ProtectSocket,
+) -> Result<(Arc<TunEngine>, Client), FiendError> {
+    let mut config = profile::client_config(&profile)?;
+    numeric_servers(&config)?;
+    config.handshake_timeout = Duration::from_millis(options.handshake_timeout_ms);
+    config.protect_socket = protect_socket;
+    let config = fiend_core::config::build_client(config).map_err(engine_error)?;
+    let direct_protect = config.protect_socket.clone();
+    let max_connections = (options.max_connections as usize).min(256);
+    let max_udp_flows = options.max_udp_flows as usize;
+    let udp_idle = Duration::from_millis(options.udp_idle_ms);
+    let client = Client::new(config);
+    let engine = Arc::new(
+        TunEngine::new(
+            client.clone(),
+            fiend_tun::TunOptions {
+                mtu: options.mtu,
+                ipv6: options.ipv6,
+                bypass_lan: options.bypass_lan,
+                direct_rules: options.direct_rules,
+                block_rules: options.block_rules,
+                proxy_rules: options.proxy_rules,
+                dpi_rules: options.dpi_rules,
+                rule_files: options
+                    .rule_files
+                    .into_iter()
+                    .map(|file| fiend_tun::rules::RuleFile {
+                        path: file.path,
+                        kind: match file.kind {
+                            RuleKind::Direct => fiend_tun::rules::RuleKind::Direct,
+                            RuleKind::Block => fiend_tun::rules::RuleKind::Block,
+                            RuleKind::Proxy => fiend_tun::rules::RuleKind::Proxy,
+                            RuleKind::Dpi => fiend_tun::rules::RuleKind::Dpi,
+                        },
+                    })
+                    .collect(),
+                direct_resolver: options.direct_resolver,
+                max_tcp_flows: max_connections,
+                max_udp_flows,
+                udp_idle,
+                fake_dns: Some(fiend_tun::shared_fake_dns()),
+                protect_socket: direct_protect,
+                ..fiend_tun::TunOptions::default()
+            },
+        )
+        .map_err(engine_error)?,
+    );
+    Ok((engine, client))
+}
+
+impl Tunnel {
+    fn launch<F>(
+        engine: Arc<TunEngine>,
+        client: Client,
+        platform: Arc<dyn Platform>,
+        run: F,
+    ) -> Arc<Self>
+    where
+        F: std::future::Future<Output = io::Result<()>> + Send + 'static,
+    {
+        let runtime = runtime().expect("the runtime is ready before launch");
+        logging::set_platform(&platform);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let latency_ms = Arc::new(AtomicU64::new(u64::MAX));
+        let tunnel = Arc::new(Self {
+            engine: engine.clone(),
+            client: client.clone(),
+            platform: platform.clone(),
+            stopped: stopped.clone(),
+            latency_ms: latency_ms.clone(),
+            task: Mutex::new(None),
+        });
+        let _ = platform.on_state(TunnelState::Connecting);
+        let task = runtime.spawn(async move {
+            tracing::info!("tunnel handshake started");
+            let result = async {
+                let start = Instant::now();
+                client.ready().await.map_err(engine_error)?;
+                latency_ms.store(
+                    start.elapsed().as_millis().min(u128::from(u32::MAX)) as u64,
+                    Ordering::Release,
+                );
+                tracing::info!("tunnel handshake completed");
+                if stopped.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                let _ = platform.on_state(TunnelState::Connected);
+                let watch = watch_server(client.clone(), platform.clone(), stopped.clone());
+                let result = run.await.map_err(engine_error);
+                watch.abort();
+                result
+            }
+            .await;
+            engine.stop();
+            if let Err(error) = &result {
+                tracing::error!(%error, "tunnel stopped with an error");
+            }
+            if stopped.load(Ordering::Acquire) {
+                let _ = platform.on_state(TunnelState::Disconnected);
+            } else if let Err(error) = result {
+                let _ = platform.on_state(TunnelState::Failed {
+                    reason: error.to_string(),
+                });
+            } else {
+                let _ = platform.on_state(TunnelState::Disconnected);
+            }
+        });
+        *tunnel
+            .task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(task);
+        tunnel
     }
 }
 

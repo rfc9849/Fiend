@@ -173,7 +173,7 @@ pub fn is_fake_ip(ip: Ipv4Addr) -> bool {
     u32::from(ip) & 0xfffe_0000 == u32::from_be_bytes([198, 18, 0, 0])
 }
 
-fn valid_domain(domain: &str) -> bool {
+pub(crate) fn valid_domain(domain: &str) -> bool {
     !domain.is_empty()
         && domain.len() <= 253
         && domain.split('.').all(|label| {

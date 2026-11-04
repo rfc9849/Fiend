@@ -1,0 +1,6 @@
+id=fiend
+name=Fiend root mode
+version=v@VERSION@
+versionCode=@CODE@
+author=Fiend
+description=Root helper for the root mode of the Fiend app. The app adds TPROXY rules through it instead of the Android VPN.

@@ -1,0 +1,18 @@
+[package]
+name = "fiend-root"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+[[bin]]
+name = "fiend-root"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+nix = { version = "0.31", features = ["fs", "socket", "uio", "net", "signal", "user"] }
+socket2 = { version = "0.6", features = ["all"] }

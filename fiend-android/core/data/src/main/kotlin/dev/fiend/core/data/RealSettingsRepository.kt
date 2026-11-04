@@ -55,6 +55,7 @@ internal class RealSettingsRepository @Inject constructor(
                 val next = transform(decode(values))
                 values[THEME] = next.themeMode.name
                 values[CONNECT] = next.connectOnStart
+                values[ROOT] = next.rootMode
                 values[LAN] = next.bypassLan
                 values[IPV6] = next.ipv6
                 values[SPLIT_MODE] = next.splitTunnelMode.name
@@ -75,6 +76,7 @@ internal class RealSettingsRepository @Inject constructor(
     private fun decode(values: Preferences) = AppSettings(
         themeMode = ThemeMode.entries.firstOrNull { it.name == values[THEME] } ?: ThemeMode.System,
         connectOnStart = values[CONNECT] ?: false,
+        rootMode = values[ROOT] ?: false,
         bypassLan = values[LAN] ?: true,
         ipv6 = values[IPV6] ?: true,
         splitTunnelMode = SplitTunnelMode.entries.firstOrNull { it.name == values[SPLIT_MODE] } ?: SplitTunnelMode.AllApps,
@@ -101,6 +103,7 @@ internal class RealSettingsRepository @Inject constructor(
 
         val THEME = stringPreferencesKey("theme_mode")
         val CONNECT = booleanPreferencesKey("connect_on_start")
+        val ROOT = booleanPreferencesKey("root_mode")
         val LAN = booleanPreferencesKey("bypass_lan")
         val IPV6 = booleanPreferencesKey("ipv6")
         val SPLIT_MODE = stringPreferencesKey("split_mode")

@@ -4,6 +4,8 @@
     <string name="settings_group_connection">Connection</string>
     <string name="settings_connect_on_start">Connect on app start</string>
     <string name="settings_connect_on_start_body">Use the active profile when you open fiend</string>
+    <string name="settings_root_mode">Root mode</string>
+    <string name="settings_root_mode_body">Use root and the Fiend module instead of the Android VPN. Apps do not see a VPN.</string>
     <string name="settings_always_on">Always-on VPN</string>
     <string name="settings_always_on_body">Keep fiend on and block traffic outside the tunnel. Managed by Android.</string>
     <string name="settings_group_routing">Routing</string>
