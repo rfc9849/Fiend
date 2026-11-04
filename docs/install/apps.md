@@ -6,6 +6,12 @@ Files are in the [latest release](https://github.com/rfc9849/Fiend/releases/late
 
 Install `fiend-0.1.4-android.apk`. Android 8.0 or later.
 
+Root mode replaces the Android VPN with TPROXY rules, so apps do not see a VPN. It needs KernelSU or Magisk:
+
+1. Install `fiend-0.1.4-android-module.zip` as a module and restart the phone.
+2. Give root access to Fiend.
+3. In Fiend, turn on **Settings** → **Root mode**.
+
 ## macOS
 
 macOS 13 or later. Open `fiend-0.1.4-macos-universal.dmg` and drag Fiend to Applications.

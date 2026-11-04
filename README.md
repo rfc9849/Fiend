@@ -32,6 +32,7 @@ Native apps for Android, macOS, Windows and Linux, plus a CLI.
 - DPI bypass without the tunnel: direct connections send the ClientHello as two TLS records in three TCP segments, cut inside the site name, and QUIC to these sites is dropped so apps fall back to TCP
 - Rule lists by URL, including sing-box `.srs`
 - Per-app split tunneling on Android
+- Root mode on Android with a KernelSU or Magisk module: TPROXY instead of the Android VPN
 - Encrypted backups on desktop
 
 ## Install
