@@ -69,6 +69,7 @@ pub struct TunOptions {
     pub mtu: u16,
     pub ipv6: bool,
     pub bypass_lan: bool,
+    pub default_route: crate::rules::DefaultRoute,
     pub direct_rules: String,
     pub block_rules: String,
     pub proxy_rules: String,
@@ -90,6 +91,7 @@ impl Default for TunOptions {
             mtu: 1500,
             ipv6: true,
             bypass_lan: false,
+            default_route: crate::rules::DefaultRoute::default(),
             direct_rules: String::new(),
             block_rules: String::new(),
             proxy_rules: String::new(),
@@ -433,7 +435,8 @@ impl Context {
             &std::mem::take(&mut options.proxy_rules),
         )
         .and_then(|rules| rules.with_dpi(&std::mem::take(&mut options.dpi_rules)))
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?
+        .with_default_route(options.default_route);
         for file in std::mem::take(&mut options.rule_files) {
             match rules.add_file(&file) {
                 Ok(counts) => tracing::info!(

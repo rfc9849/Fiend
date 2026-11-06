@@ -6,6 +6,8 @@ enum class ThemeMode { System, Light, Dark }
 
 enum class SplitTunnelMode { AllApps, OnlySelected, ExceptSelected }
 
+enum class DefaultRoute { Tunnel, Direct }
+
 @Serializable
 enum class RuleKind { Direct, Block, Proxy, Dpi }
 
@@ -42,6 +44,7 @@ data class AppSettings(
     val connectOnStart: Boolean = false,
     val rootMode: Boolean = false,
     val bypassLan: Boolean = true,
+    val defaultRoute: DefaultRoute = DefaultRoute.Tunnel,
     val ipv6: Boolean = true,
     val splitTunnelMode: SplitTunnelMode = SplitTunnelMode.AllApps,
     val splitTunnelApps: Set<String> = emptySet(),

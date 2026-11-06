@@ -28,6 +28,22 @@ pub enum Route {
     Dpi,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DefaultRoute {
+    #[default]
+    Tunnel,
+    Direct,
+}
+
+impl From<DefaultRoute> for Route {
+    fn from(route: DefaultRoute) -> Self {
+        match route {
+            DefaultRoute::Tunnel => Self::Proxy,
+            DefaultRoute::Direct => Self::Direct,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleKind {
     Direct,
@@ -460,6 +476,7 @@ pub fn is_blocked_udp_port(port: u16) -> bool {
 
 #[derive(Clone, Debug, Default)]
 pub struct Rules {
+    default_route: DefaultRoute,
     direct: RuleList,
     block: RuleList,
     proxy: RuleList,
@@ -470,12 +487,18 @@ pub struct Rules {
 impl Rules {
     pub fn parse(direct: &str, block: &str, proxy: &str) -> Result<Self, RuleError> {
         Ok(Self {
+            default_route: DefaultRoute::default(),
             direct: parse_list(direct, true)?,
             block: parse_list(block, false)?,
             proxy: parse_list(proxy, true)?,
             dpi: RuleList::default(),
             skipped: SrsSkipped::default(),
         })
+    }
+
+    pub fn with_default_route(mut self, route: DefaultRoute) -> Self {
+        self.default_route = route;
+        self
     }
 
     pub fn with_dpi(mut self, dpi: &str) -> Result<Self, RuleError> {
@@ -580,7 +603,7 @@ impl Rules {
                 if self.direct.cidrs.contains(ip) {
                     return Route::Direct;
                 }
-                Route::Proxy
+                self.default_route.into()
             }
             Host::Name(host) => {
                 let host = host.trim_end_matches('.').to_ascii_lowercase();
@@ -597,7 +620,7 @@ impl Rules {
                 if self.direct.domains.contains(&host) {
                     return Route::Direct;
                 }
-                Route::Proxy
+                self.default_route.into()
             }
         }
     }
@@ -630,6 +653,63 @@ mod tests {
             .join(name)
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn default_route_applies_only_without_a_match() {
+        for (default_route, expected) in [
+            (DefaultRoute::Tunnel, Route::Proxy),
+            (DefaultRoute::Direct, Route::Direct),
+        ] {
+            let rules = Rules::parse(
+                "domain:direct.example\nip:192.0.2.0/24",
+                "domain:blocked.example",
+                "domain:proxy.example\nip:198.51.100.0/24",
+            )
+            .unwrap()
+            .with_dpi("domain:dpi.example\nip:203.0.113.0/24")
+            .unwrap()
+            .with_default_route(default_route);
+            for host in [
+                domain("unlisted.example"),
+                ip("8.8.8.8:443"),
+                ip("[2001:db8::1]:443"),
+            ] {
+                assert_eq!(rules.route(host, false), expected);
+            }
+            for (host, route) in [
+                (domain("direct.example"), Route::Direct),
+                (domain("blocked.example"), Route::Block),
+                (domain("proxy.example"), Route::Proxy),
+                (domain("dpi.example"), Route::Dpi),
+                (ip("192.0.2.1:443"), Route::Direct),
+                (ip("198.51.100.1:443"), Route::Proxy),
+                (ip("203.0.113.1:443"), Route::Dpi),
+            ] {
+                assert_eq!(rules.route(host, false), route);
+            }
+            assert_eq!(rules.route(ip("192.168.1.1:443"), true), Route::Direct);
+        }
+        assert_eq!(
+            Rules::default().route(domain("unlisted.example"), false),
+            Route::Proxy
+        );
+    }
+
+    #[test]
+    fn subscription_rules_override_the_default_route() {
+        let mut rules = Rules::default().with_default_route(DefaultRoute::Direct);
+        rules
+            .add_file(&RuleFile {
+                path: fixture("geosite-2gis.srs"),
+                kind: RuleKind::Proxy,
+            })
+            .unwrap();
+        assert_eq!(rules.route(domain("2gis.ru"), false), Route::Proxy);
+        assert_eq!(
+            rules.route(domain("unlisted.example"), false),
+            Route::Direct
+        );
     }
 
     #[test]

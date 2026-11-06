@@ -16,6 +16,7 @@ pub enum MenuId {
     LogLevel,
     Template,
     SubscriptionKind,
+    DefaultRoute,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,6 +178,15 @@ impl AppView {
     fn apply_menu(&mut self, id: MenuId, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         match id {
             MenuId::Profile => self.pick_profile(value.to_owned(), cx),
+            MenuId::DefaultRoute => {
+                let mut settings = self.model.settings.clone();
+                settings.default_route = if value == "direct" {
+                    fiend_ipc::DefaultRoute::Direct
+                } else {
+                    fiend_ipc::DefaultRoute::Tunnel
+                };
+                self.call_toast(fiend_ipc::Request::SetSettings { settings }, cx);
+            }
             MenuId::LogLevel => {
                 self.log_filter = LogFilter::from_value(value);
                 cx.notify();

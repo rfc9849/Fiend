@@ -161,6 +161,10 @@ class FiendVpnService : VpnService() {
                 mtu = appSettings.mtu.toUShort(),
                 ipv6 = appSettings.ipv6,
                 bypassLan = appSettings.bypassLan,
+                defaultRoute = when (appSettings.defaultRoute) {
+                    dev.fiend.core.model.DefaultRoute.Tunnel -> dev.fiend.core.engine.bindings.DefaultRoute.TUNNEL
+                    dev.fiend.core.model.DefaultRoute.Direct -> dev.fiend.core.engine.bindings.DefaultRoute.DIRECT
+                },
                 directRules = appSettings.directRules,
                 blockRules = appSettings.blockRules,
                 proxyRules = appSettings.proxyRules,

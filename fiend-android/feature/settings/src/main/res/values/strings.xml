@@ -41,6 +41,9 @@
     <string name="settings_rules_body">Rule lists, subscriptions, resolver and MTU</string>
 
     <string name="routing_title">Routing rules</string>
+    <string name="routing_default_route">Traffic with no matching rule</string>
+    <string name="routing_default_route_body">Direct uses your network address without the tunnel.</string>
+    <string name="routing_default_tunnel">Tunnel (default)</string>
     <string name="routing_group_rules">Rules</string>
     <string name="routing_group_network">Network</string>
     <string name="routing_direct_rules">Direct list</string>

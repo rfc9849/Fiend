@@ -12,6 +12,7 @@ import dev.fiend.core.data.RulesRepository
 import dev.fiend.core.data.SettingsRepository
 import dev.fiend.core.data.SubscriptionRepository
 import dev.fiend.core.model.AppSettings
+import dev.fiend.core.model.DefaultRoute
 import dev.fiend.core.model.InstalledApp
 import dev.fiend.core.model.LogLine
 import dev.fiend.core.model.RuleCounts
@@ -110,6 +111,7 @@ data class SubscriptionUi(
 
 data class RoutingUiState(
     val loaded: Boolean = false,
+    val defaultRoute: DefaultRoute = DefaultRoute.Tunnel,
     val directRules: Int = 0,
     val blockRules: Int = 0,
     val proxyRules: Int = 0,
@@ -144,6 +146,7 @@ class RoutingViewModel @Inject constructor(
     val uiState: StateFlow<RoutingUiState> = combine(settings.settings, loaded, busy, message) { s, ready, working, notice ->
         RoutingUiState(
             loaded = ready,
+            defaultRoute = s.defaultRoute,
             directRules = countOf(s.directRules, true),
             blockRules = countOf(s.blockRules, false),
             proxyRules = countOf(s.proxyRules, true),
@@ -160,6 +163,10 @@ class RoutingViewModel @Inject constructor(
 
     private fun countOf(text: String, allowIp: Boolean) =
         if (text.isBlank()) 0 else rules.validate(text, allowIp).getOrDefault(RuleCounts()).total
+
+    fun setDefaultRoute(value: DefaultRoute) {
+        viewModelScope.launch { settings.update { it.copy(defaultRoute = value) } }
+    }
 
     fun setResolver(value: String): RoutingInputError? {
         if (rules.validateResolver(value).isFailure) return RoutingInputError.Resolver

@@ -694,6 +694,23 @@ impl AppView {
             .into_any_element(),
         ];
         let settings = self.model.settings.clone();
+        let default_route = match settings.default_route {
+            fiend_ipc::DefaultRoute::Tunnel => ("tunnel", "Tunnel (default)"),
+            fiend_ipc::DefaultRoute::Direct => ("direct", "Direct"),
+        };
+        let default_route_select = self.select(
+            ui,
+            MenuId::DefaultRoute,
+            default_route.1.to_owned(),
+            vec![
+                MenuOption::new("tunnel", "Tunnel (default)"),
+                MenuOption::new("direct", "Direct"),
+            ],
+            default_route.0.to_owned(),
+            false,
+            160.,
+            cx,
+        );
         let cards = [
             (
                 RuleKind::Proxy,
@@ -923,6 +940,12 @@ impl AppView {
             .child(ui.group_title("Network"))
             .child(
                 ui.group()
+                    .child(ui.setting_row(
+                        "Traffic with no matching rule",
+                        Some("Direct uses your network address without the tunnel."),
+                        default_route_select,
+                        true,
+                    ))
                     .child(
                         ui.setting_row(
                             "Direct DNS resolver",
@@ -932,7 +955,7 @@ impl AppView {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_value(ValueKind::Resolver, window, cx)
                                 })),
-                            true,
+                            false,
                         ),
                     )
                     .child(

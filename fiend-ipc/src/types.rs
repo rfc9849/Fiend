@@ -134,6 +134,14 @@ pub fn url_title(url: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultRoute {
+    #[default]
+    Tunnel,
+    Direct,
+}
+
 pub const MIN_MTU: u16 = 1280;
 pub const MAX_MTU: u16 = 9000;
 pub const DEFAULT_MTU: u16 = 1500;
@@ -150,6 +158,7 @@ pub struct Settings {
     pub active_profile: Option<String>,
     pub connect_at_startup: bool,
     pub bypass_lan: bool,
+    pub default_route: DefaultRoute,
     pub ipv6: bool,
     pub mtu: u16,
     pub direct_resolver: String,
@@ -166,6 +175,7 @@ impl Default for Settings {
             active_profile: None,
             connect_at_startup: false,
             bypass_lan: true,
+            default_route: DefaultRoute::default(),
             ipv6: true,
             mtu: DEFAULT_MTU,
             direct_resolver: String::new(),
@@ -266,6 +276,24 @@ impl IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_route_is_backward_compatible_and_round_trips() {
+        let old: Settings = serde_json::from_str(r#"{"bypass_lan":false}"#).unwrap();
+        assert_eq!(old.default_route, DefaultRoute::Tunnel);
+        for default_route in [DefaultRoute::Tunnel, DefaultRoute::Direct] {
+            let settings = Settings {
+                default_route,
+                ..Settings::default()
+            };
+            let encoded = serde_json::to_string(&settings).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Settings>(&encoded).unwrap(),
+                settings
+            );
+        }
+        assert!(serde_json::from_str::<Settings>(r#"{"default_route":"block"}"#).is_err());
+    }
 
     #[test]
     fn subscription_title_is_the_name_or_the_file_name() {

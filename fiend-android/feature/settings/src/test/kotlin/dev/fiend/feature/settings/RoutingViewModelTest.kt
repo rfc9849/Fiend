@@ -4,6 +4,7 @@ import dev.fiend.core.data.RulesRepository
 import dev.fiend.core.data.SettingsRepository
 import dev.fiend.core.data.SubscriptionRepository
 import dev.fiend.core.model.AppSettings
+import dev.fiend.core.model.DefaultRoute
 import dev.fiend.core.model.RuleCounts
 import dev.fiend.core.model.RuleFileSpec
 import dev.fiend.core.model.RuleKind
@@ -85,6 +86,18 @@ class RoutingViewModelTest {
         assertEquals(1, state.blockRules)
         assertEquals(1400, state.mtu)
         assertEquals("9.9.9.9", state.directResolver)
+    }
+
+    @Test
+    fun defaultRouteStartsWithTunnelAndSavesBothChoices() = runBlocking {
+        val settings = FakeSettings()
+        val model = RoutingViewModel(settings, FakeRules(), FakeSubscriptions())
+        assertEquals(DefaultRoute.Tunnel, routing(model).defaultRoute)
+        model.setDefaultRoute(DefaultRoute.Direct)
+        assertEquals(DefaultRoute.Direct, routing(model) { it.defaultRoute == DefaultRoute.Direct }.defaultRoute)
+        assertEquals(DefaultRoute.Direct, settings.settings.value.defaultRoute)
+        model.setDefaultRoute(DefaultRoute.Tunnel)
+        assertEquals(DefaultRoute.Tunnel, routing(model) { it.defaultRoute == DefaultRoute.Tunnel }.defaultRoute)
     }
 
     @Test

@@ -3,6 +3,7 @@ use fiend_ipc::{ConnectStep, Profile, RuleKind, Stats, TunnelState};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineSettings {
     pub bypass_lan: bool,
+    pub default_route: fiend_ipc::DefaultRoute,
     pub ipv6: bool,
     pub mtu: u16,
     pub direct_resolver: String,
@@ -203,6 +204,7 @@ mod tests {
             },
             engine: EngineSettings {
                 bypass_lan: true,
+                default_route: fiend_ipc::DefaultRoute::default(),
                 ipv6: true,
                 mtu: 1500,
                 direct_resolver: String::new(),

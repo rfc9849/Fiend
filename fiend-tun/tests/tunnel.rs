@@ -654,6 +654,15 @@ async fn tcp_echo_once(peer: &mut Peer, source: SocketAddr, target: SocketAddr, 
 
 #[tokio::test]
 async fn direct_domain_connects_locally_without_a_lane() {
+    direct_domain_tcp(fiend_tun::rules::DefaultRoute::Tunnel, "full:direct.test\n").await;
+}
+
+#[tokio::test]
+async fn unlisted_domain_tcp_uses_the_direct_default() {
+    direct_domain_tcp(fiend_tun::rules::DefaultRoute::Direct, "").await;
+}
+
+async fn direct_domain_tcp(default_route: fiend_tun::rules::DefaultRoute, direct_rules: &str) {
     let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = echo.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -670,7 +679,8 @@ async fn direct_domain_connects_locally_without_a_lane() {
     let calls = Arc::new(AtomicUsize::new(0));
     let hook = calls.clone();
     let (engine, client, mut peer, task) = stack(TunOptions {
-        direct_rules: "full:direct.test\n".into(),
+        default_route,
+        direct_rules: direct_rules.into(),
         direct_resolver: resolver.to_string(),
         protect_socket: Arc::new(move |_| {
             hook.fetch_add(1, Ordering::SeqCst);
@@ -772,6 +782,15 @@ async fn dpi_domain_goes_direct_with_a_split_client_hello() {
 
 #[tokio::test]
 async fn proxied_domain_still_uses_a_lane() {
+    proxied_domain_tcp(fiend_tun::rules::DefaultRoute::Tunnel, "").await;
+}
+
+#[tokio::test]
+async fn proxy_rule_overrides_the_direct_default() {
+    proxied_domain_tcp(fiend_tun::rules::DefaultRoute::Direct, "domain:localhost\n").await;
+}
+
+async fn proxied_domain_tcp(default_route: fiend_tun::rules::DefaultRoute, proxy_rules: &str) {
     let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = echo.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -781,7 +800,9 @@ async fn proxied_domain_still_uses_a_lane() {
         stream.write_all(&data).await.unwrap();
     });
     let (engine, client, mut peer, task) = stack(TunOptions {
+        default_route,
         direct_rules: "full:other.test\n".into(),
+        proxy_rules: proxy_rules.into(),
         ..TunOptions::default()
     })
     .await;
@@ -836,6 +857,19 @@ async fn resolver_failure_falls_back_to_a_lane() {
 
 #[tokio::test]
 async fn direct_domain_udp_uses_a_protected_socket() {
+    direct_domain_udp(
+        fiend_tun::rules::DefaultRoute::Tunnel,
+        "domain:direct.test\n",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn unlisted_domain_udp_uses_the_direct_default() {
+    direct_domain_udp(fiend_tun::rules::DefaultRoute::Direct, "").await;
+}
+
+async fn direct_domain_udp(default_route: fiend_tun::rules::DefaultRoute, direct_rules: &str) {
     let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let port = echo.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -849,7 +883,8 @@ async fn direct_domain_udp_uses_a_protected_socket() {
     )
     .await;
     let (engine, client, mut peer, task) = stack(TunOptions {
-        direct_rules: "domain:direct.test\n".into(),
+        default_route,
+        direct_rules: direct_rules.into(),
         direct_resolver: resolver.to_string(),
         ..TunOptions::default()
     })

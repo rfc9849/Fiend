@@ -87,6 +87,12 @@ pub enum RuleKind {
     Dpi,
 }
 
+#[derive(Clone, Copy, uniffi::Enum)]
+pub enum DefaultRoute {
+    Tunnel,
+    Direct,
+}
+
 #[derive(Clone, uniffi::Record)]
 pub struct RuleFile {
     pub path: String,
@@ -98,6 +104,7 @@ pub struct TunOptions {
     pub mtu: u16,
     pub ipv6: bool,
     pub bypass_lan: bool,
+    pub default_route: DefaultRoute,
     pub direct_rules: String,
     pub block_rules: String,
     pub proxy_rules: String,
@@ -468,6 +475,10 @@ fn build_engine(
                 mtu: options.mtu,
                 ipv6: options.ipv6,
                 bypass_lan: options.bypass_lan,
+                default_route: match options.default_route {
+                    DefaultRoute::Tunnel => fiend_tun::rules::DefaultRoute::Tunnel,
+                    DefaultRoute::Direct => fiend_tun::rules::DefaultRoute::Direct,
+                },
                 direct_rules: options.direct_rules,
                 block_rules: options.block_rules,
                 proxy_rules: options.proxy_rules,
@@ -640,6 +651,7 @@ mod tests {
             mtu: 1500,
             ipv6: true,
             bypass_lan: false,
+            default_route: DefaultRoute::Tunnel,
             direct_rules: String::new(),
             block_rules: String::new(),
             proxy_rules: String::new(),

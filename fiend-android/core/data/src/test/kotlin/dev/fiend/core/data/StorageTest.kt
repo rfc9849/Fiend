@@ -11,6 +11,7 @@ import dev.fiend.core.data.storage.PreferencesStore
 import dev.fiend.core.data.storage.ProfileDatabase
 import dev.fiend.core.data.storage.SecretCipher
 import dev.fiend.core.engine.bindings.bundledTemplates
+import dev.fiend.core.model.DefaultRoute
 import dev.fiend.core.model.Profile
 import dev.fiend.core.model.RuleCounts
 import dev.fiend.core.model.RuleFileSpec
@@ -115,6 +116,25 @@ class StorageTest {
             assertTrue(settings.connectOnStart)
             assertFalse(settings.ipv6)
             assertEquals(setOf("dev.fiend.test"), settings.splitTunnelApps)
+        } finally { scope.cancel() }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun defaultRouteIsStoredAndMissingValuesUseTunnel() = runTest(UnconfinedTestDispatcher()) {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        try {
+            val store = PreferencesStore(context, scope)
+            val repository = RealSettingsRepository(store, RealLogRepository(), scope)
+            repository.awaitReady()
+            assertEquals(DefaultRoute.Tunnel, repository.settings.value.defaultRoute)
+            repository.update { it.copy(defaultRoute = DefaultRoute.Direct) }
+            val restored = RealSettingsRepository(store, RealLogRepository(), scope)
+            restored.awaitReady()
+            assertEquals(DefaultRoute.Direct, restored.settings.value.defaultRoute)
+            repository.update { it.copy(defaultRoute = DefaultRoute.Tunnel) }
+            assertEquals(DefaultRoute.Tunnel, repository.settings.value.defaultRoute)
         } finally { scope.cancel() }
     }
 

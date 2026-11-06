@@ -77,6 +77,10 @@ pub(crate) fn tun_options(
         mtu: engine.mtu,
         ipv6: engine.ipv6,
         bypass_lan: engine.bypass_lan,
+        default_route: match engine.default_route {
+            fiend_ipc::DefaultRoute::Tunnel => fiend_tun::rules::DefaultRoute::Tunnel,
+            fiend_ipc::DefaultRoute::Direct => fiend_tun::rules::DefaultRoute::Direct,
+        },
         direct_rules: engine.direct_rules.clone(),
         block_rules: engine.block_rules.clone(),
         proxy_rules: engine.proxy_rules.clone(),

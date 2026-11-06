@@ -149,6 +149,7 @@ fn engine_settings(store: &Store) -> EngineSettings {
     let settings = store.settings();
     EngineSettings {
         bypass_lan: settings.bypass_lan,
+        default_route: settings.default_route,
         ipv6: settings.ipv6,
         mtu: settings.mtu,
         direct_resolver: settings.direct_resolver.clone(),

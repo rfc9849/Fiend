@@ -48,6 +48,7 @@ import dev.fiend.core.designsystem.component.FiendTopBar
 import dev.fiend.core.designsystem.icon.FiendIcons
 import dev.fiend.core.designsystem.theme.FiendColors
 import dev.fiend.core.model.AppSettings
+import dev.fiend.core.model.DefaultRoute
 import dev.fiend.core.model.RuleKind
 import dev.fiend.core.model.RuleSubscription
 import dev.fiend.core.model.urlTitle
@@ -63,6 +64,7 @@ internal fun RoutingScreen(
     onOpenBlock: () -> Unit,
     onOpenProxy: () -> Unit,
     onOpenDpi: () -> Unit,
+    onDefaultRoute: (DefaultRoute) -> Unit,
     onResolver: (String) -> RoutingInputError?,
     onMtu: (String) -> RoutingInputError?,
     onAddSubscription: (String, RuleKind, String) -> RoutingInputError?,
@@ -210,6 +212,34 @@ internal fun RoutingScreen(
                 }
                 item {
                     FiendGroup(title = stringResource(R.string.routing_group_network)) {
+                        item {
+                            Column(Modifier.padding(16.dp)) {
+                                Text(
+                                    text = stringResource(R.string.routing_default_route),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    text = stringResource(R.string.routing_default_route_body),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = FiendColors.muted,
+                                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    DefaultRoute.entries.forEach { option ->
+                                        FiendButton(
+                                            label = stringResource(
+                                                if (option == DefaultRoute.Tunnel) R.string.routing_default_tunnel
+                                                else R.string.routing_kind_direct,
+                                            ),
+                                            onClick = { onDefaultRoute(option) },
+                                            kind = if (state.defaultRoute == option) FiendButtonKind.Primary else FiendButtonKind.Default,
+                                            enabled = state.loaded,
+                                            compact = true,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         item {
                             ActionItem(
                                 headline = stringResource(R.string.routing_resolver),

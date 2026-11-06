@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import dev.fiend.core.data.storage.PreferencesStore
 import dev.fiend.core.model.AppSettings
+import dev.fiend.core.model.DefaultRoute
 import dev.fiend.core.model.ThemeMode
 import dev.fiend.core.model.SplitTunnelMode
 import dev.fiend.core.model.LogLevel
@@ -57,6 +58,7 @@ internal class RealSettingsRepository @Inject constructor(
                 values[CONNECT] = next.connectOnStart
                 values[ROOT] = next.rootMode
                 values[LAN] = next.bypassLan
+                values[DEFAULT_ROUTE] = next.defaultRoute.name
                 values[IPV6] = next.ipv6
                 values[SPLIT_MODE] = next.splitTunnelMode.name
                 values[SPLIT_APPS] = next.splitTunnelApps
@@ -78,6 +80,7 @@ internal class RealSettingsRepository @Inject constructor(
         connectOnStart = values[CONNECT] ?: false,
         rootMode = values[ROOT] ?: false,
         bypassLan = values[LAN] ?: true,
+        defaultRoute = DefaultRoute.entries.firstOrNull { it.name == values[DEFAULT_ROUTE] } ?: DefaultRoute.Tunnel,
         ipv6 = values[IPV6] ?: true,
         splitTunnelMode = SplitTunnelMode.entries.firstOrNull { it.name == values[SPLIT_MODE] } ?: SplitTunnelMode.AllApps,
         splitTunnelApps = values[SPLIT_APPS] ?: emptySet(),
@@ -105,6 +108,7 @@ internal class RealSettingsRepository @Inject constructor(
         val CONNECT = booleanPreferencesKey("connect_on_start")
         val ROOT = booleanPreferencesKey("root_mode")
         val LAN = booleanPreferencesKey("bypass_lan")
+        val DEFAULT_ROUTE = stringPreferencesKey("default_route")
         val IPV6 = booleanPreferencesKey("ipv6")
         val SPLIT_MODE = stringPreferencesKey("split_mode")
         val SPLIT_APPS = stringSetPreferencesKey("split_apps")

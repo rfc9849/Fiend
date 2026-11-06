@@ -334,6 +334,13 @@ async fn settings_change_marks_the_session_as_stale() {
     client.connect_profile(Some(profile.id)).await.unwrap();
     wait_for(&mut events, |s| matches!(s, TunnelState::Connected { .. })).await;
     let mut settings = client.settings().await.unwrap();
+    assert_eq!(settings.default_route, fiend_ipc::DefaultRoute::Tunnel);
+    settings.default_route = fiend_ipc::DefaultRoute::Direct;
+    client.set_settings(settings.clone()).await.unwrap();
+    assert!(client.status().await.unwrap().restart_required);
+    settings.default_route = fiend_ipc::DefaultRoute::Tunnel;
+    client.set_settings(settings.clone()).await.unwrap();
+    assert!(!client.status().await.unwrap().restart_required);
     settings.mtu = 1400;
     client.set_settings(settings).await.unwrap();
     assert!(client.status().await.unwrap().restart_required);
@@ -365,6 +372,7 @@ async fn backup_restore_replaces_profiles_and_settings() {
     let settings = Settings {
         active_profile: Some(id.clone()),
         direct_rules: "domain:example.com\n".into(),
+        default_route: fiend_ipc::DefaultRoute::Direct,
         mtu: 1400,
         ..Settings::default()
     };

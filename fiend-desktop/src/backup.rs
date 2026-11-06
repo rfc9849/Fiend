@@ -120,6 +120,7 @@ mod tests {
                 settings: Settings {
                     active_profile: Some("ab".repeat(16)),
                     direct_rules: "domain:example.com\n".into(),
+                    default_route: fiend_ipc::DefaultRoute::Direct,
                     ..Settings::default()
                 },
             },
