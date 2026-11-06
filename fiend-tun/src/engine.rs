@@ -163,6 +163,10 @@ impl TunEngine {
         }
     }
 
+    pub fn rules(&self) -> Arc<Rules> {
+        self.context.rules.clone()
+    }
+
     pub fn stop(&self) {
         self.cancel.cancel();
         self.context.client.close();

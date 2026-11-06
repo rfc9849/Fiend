@@ -33,12 +33,14 @@ Native apps for Android, macOS, Windows and Linux, plus a CLI.
 - Rule lists by URL, including sing-box `.srs`
 - Per-app split tunneling on Android
 - Root mode on Android with a KernelSU or Magisk module: TPROXY instead of the Android VPN
+- OpenWrt routers with a LuCI app: only the sites in your lists go through Fiend, and all other traffic stays in the kernel
 - Encrypted backups on desktop
 
 ## Install
 
 - [Server](docs/install/server.md)
 - [Apps](docs/install/apps.md)
+- [Router (OpenWrt)](docs/install/router.md)
 - [ClientHello capture](docs/capture.md)
 
 ## How it works

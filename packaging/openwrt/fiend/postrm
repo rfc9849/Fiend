@@ -1,0 +1,4 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+fw4 -q reload
+exit 0

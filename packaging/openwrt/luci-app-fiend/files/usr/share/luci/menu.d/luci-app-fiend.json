@@ -1,0 +1,52 @@
+{
+	"admin/services/fiend": {
+		"title": "Fiend",
+		"order": 30,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-fiend" ]
+		}
+	},
+	"admin/services/fiend/overview": {
+		"title": "Overview",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "fiend/overview"
+		}
+	},
+	"admin/services/fiend/profiles": {
+		"title": "Profiles",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "fiend/profiles"
+		}
+	},
+	"admin/services/fiend/routing": {
+		"title": "Routing",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "fiend/routing"
+		}
+	},
+	"admin/services/fiend/settings": {
+		"title": "Settings",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "fiend/settings"
+		}
+	},
+	"admin/services/fiend/log": {
+		"title": "Log",
+		"order": 50,
+		"action": {
+			"type": "view",
+			"path": "fiend/log"
+		}
+	}
+}

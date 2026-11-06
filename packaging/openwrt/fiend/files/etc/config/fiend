@@ -1,0 +1,3 @@
+config fiend 'main'
+	list network 'lan'
+	option dns_redirect '1'

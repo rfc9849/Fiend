@@ -460,6 +460,29 @@ pub fn is_local(ip: IpAddr) -> bool {
     }
 }
 
+pub fn is_global(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => {
+            let [first, second, ..] = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_multicast()
+                || ip.is_broadcast()
+                || first == 0
+                || first >= 240
+                || (first == 100 && second & 0xc0 == 64))
+        }
+        IpAddr::V6(ip) => {
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local())
+        }
+    }
+}
+
 pub fn is_null_network(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => ip.octets()[0] == 0,
@@ -578,6 +601,19 @@ impl Rules {
 
     pub fn skipped(&self) -> SrsSkipped {
         self.skipped
+    }
+
+    pub fn default_route(&self) -> DefaultRoute {
+        self.default_route
+    }
+
+    pub fn networks(&self, kind: RuleKind) -> &CidrSet {
+        match kind {
+            RuleKind::Direct => &self.direct.cidrs,
+            RuleKind::Block => &self.block.cidrs,
+            RuleKind::Proxy => &self.proxy.cidrs,
+            RuleKind::Dpi => &self.dpi.cidrs,
+        }
     }
 
     pub fn is_blocked(&self, domain: &str) -> bool {
@@ -944,6 +980,25 @@ mod tests {
         assert!(is_blocked_udp_port(137));
         assert!(!is_blocked_udp_port(53));
         assert!(is_local("fd00::1".parse().unwrap()));
+        for ip in ["8.8.8.8", "2606:4700::1111", "100.128.0.1"] {
+            assert!(is_global(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "0.0.0.0",
+            "127.0.0.1",
+            "10.1.1.1",
+            "192.168.1.1",
+            "100.64.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(!is_global(ip.parse().unwrap()), "{ip}");
+        }
         assert!(!is_local("8.8.8.8".parse().unwrap()));
     }
 

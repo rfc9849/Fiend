@@ -1,0 +1,17 @@
+{
+	"luci-app-fiend": {
+		"description": "Grant access to Fiend",
+		"read": {
+			"ubus": {
+				"luci.fiend": [ "status", "profiles", "settings", "logs" ]
+			},
+			"uci": [ "fiend" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.fiend": [ "request" ]
+			},
+			"uci": [ "fiend" ]
+		}
+	}
+}

@@ -10,6 +10,10 @@ use crate::journal::{Journal, JournalFile};
 
 pub const WRITE_RESOLV: &str = "@write-resolv";
 pub const RESTORE_FILE: &str = "@restore-file";
+pub const DNSMASQ: &str = "@dnsmasq";
+pub const DNSMASQ_CONFIG: &str = "/var/etc";
+const DNSMASQ_DROP_IN: &str = "fiend.conf";
+const DNSMASQ_INIT: &str = "/etc/init.d/dnsmasq";
 const BLOCK_METRIC: u32 = u32::MAX;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +119,70 @@ pub fn dns_steps(
     }
 }
 
+pub fn dnsmasq_dirs(config: &Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    let Ok(entries) = std::fs::read_dir(config) else {
+        return dirs;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("dnsmasq.conf")
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in text.lines() {
+            if let Some(value) = line.trim().strip_prefix("conf-dir=") {
+                let dir = value.split(',').next().unwrap_or("").trim();
+                if dir.starts_with('/')
+                    && !dirs
+                        .iter()
+                        .any(|known: &std::path::PathBuf| known == Path::new(dir))
+                {
+                    dirs.push(dir.into());
+                }
+            }
+        }
+    }
+    dirs
+}
+
+fn dnsmasq(server: Option<&str>) -> io::Result<()> {
+    let dirs = dnsmasq_dirs(Path::new(DNSMASQ_CONFIG));
+    let mut changed = false;
+    for dir in &dirs {
+        let path = dir.join(DNSMASQ_DROP_IN);
+        match server {
+            Some(server) => {
+                std::fs::write(
+                    &path,
+                    format!("# Written by Fiend\nno-resolv\nserver={server}\n"),
+                )?;
+                changed = true;
+            }
+            None => match std::fs::remove_file(&path) {
+                Ok(()) => changed = true,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            },
+        }
+    }
+    if server.is_some() && dirs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "dnsmasq is not running: no configuration directory",
+        ));
+    }
+    if changed {
+        SystemRunner.run(&[DNSMASQ_INIT.to_owned(), "restart".to_owned()])?;
+    }
+    Ok(())
+}
+
 pub trait Runner {
     fn run(&mut self, argv: &[String]) -> io::Result<()>;
 }
@@ -198,6 +266,7 @@ impl Runner for SystemRunner {
                 }
                 Ok(())
             }
+            DNSMASQ => dnsmasq(arguments.first().map(String::as_str)),
             _ => {
                 let mut command = std::process::Command::new(program);
                 command.args(arguments);

@@ -1,0 +1,6 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+/etc/init.d/fiend enable
+/etc/init.d/fiend start
+fw4 -q reload
+exit 0

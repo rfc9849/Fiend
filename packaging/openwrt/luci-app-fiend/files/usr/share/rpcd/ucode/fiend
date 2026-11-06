@@ -1,0 +1,53 @@
+'use strict';
+
+import { popen } from 'fs';
+
+const CLI = '/usr/bin/fiend';
+
+function shellquote(s) {
+	return `'${replace(s, "'", "'\\''")}'`;
+}
+
+function send(request) {
+	const pipe = popen(`${CLI} request ${shellquote(sprintf('%J', request))} 2>&1`, 'r');
+	if (!pipe)
+		return { error: { code: 'unavailable', message: 'Cannot start the Fiend command' } };
+
+	const output = pipe.read('all');
+	pipe.close();
+
+	try {
+		return json(output);
+	}
+	catch (e) {
+		return { error: { code: 'unavailable', message: trim(output) || 'Fiend gave no answer' } };
+	}
+}
+
+function read_only(type) {
+	return { call: () => send({ type }) };
+}
+
+const methods = {
+	status: read_only('status'),
+	profiles: read_only('list_profiles'),
+	settings: read_only('get_settings'),
+
+	logs: {
+		args: { limit: 200 },
+		call: (request) => send({ type: 'logs', limit: +request.args.limit || 200 })
+	},
+
+	request: {
+		args: { request: {} },
+		call: (request) => {
+			const body = request.args.request;
+			if (type(body) != 'object' || type(body.type) != 'string')
+				return { error: { code: 'invalid_request', message: 'The request has no type' } };
+
+			return send(body);
+		}
+	}
+};
+
+return { 'luci.fiend': methods };

@@ -2,6 +2,8 @@
 //! helper adds the TPROXY rules for the selected apps and makes the sockets
 //! that need root, then gives them to the app over a Unix socket.
 
+pub mod gateway;
+pub mod nft;
 pub mod protocol;
 pub mod rules;
 

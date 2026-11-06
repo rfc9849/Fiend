@@ -102,6 +102,12 @@ enum Command {
     /// Rule list subscriptions.
     #[command(subcommand)]
     Subscriptions(SubscriptionCommand),
+    /// Send one request as JSON and print {"reply": ...} or {"error": ...}.
+    /// For scripts and web interfaces.
+    Request {
+        /// The request. Use - for standard input.
+        request: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -293,8 +299,41 @@ fn print_log(entry: &LogEntry) {
     println!("{} {level:<5} {}", entry.timestamp_ms, entry.message);
 }
 
+async fn request(socket: &std::path::Path, text: &str) -> Result<(), String> {
+    let output = match serde_json::from_str::<fiend_ipc::Request>(text) {
+        Err(error) => serde_json::json!({
+            "error": { "code": "invalid_request", "message": error.to_string() }
+        }),
+        Ok(request) => match Client::connect(socket, "fiend-request").await {
+            Err(error) => serde_json::json!({
+                "error": { "code": "unavailable", "message": fail(error) }
+            }),
+            Ok(client) => match client.request(request).await {
+                Ok(reply) => serde_json::json!({ "reply": reply }),
+                Err(ClientError::Daemon(error)) => serde_json::json!({ "error": error }),
+                Err(error) => serde_json::json!({
+                    "error": { "code": "unavailable", "message": fail(error) }
+                }),
+            },
+        },
+    };
+    println!("{output}");
+    if output.get("error").is_some() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 async fn run(cli: Cli) -> Result<(), String> {
     let socket = cli.socket.unwrap_or_else(fiend_ipc::path::default_socket);
+    if let Command::Request { request: source } = &cli.command {
+        let text = if source == "-" {
+            read_input(source).await?
+        } else {
+            source.clone()
+        };
+        return request(&socket, &text).await;
+    }
     let client = Client::connect(&socket, "fiend-cli").await.map_err(fail)?;
     let json = cli.json;
     match cli.command {
@@ -412,6 +451,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             );
         }
         Command::Subscriptions(command) => subscriptions(&client, command).await?,
+        Command::Request { .. } => {}
     }
     Ok(())
 }

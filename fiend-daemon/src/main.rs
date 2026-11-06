@@ -73,6 +73,48 @@ struct RunArgs {
     /// Run as a Windows service.
     #[arg(long, hide = true)]
     service: bool,
+    /// Router mode: take the listed traffic that comes in on this LAN
+    /// interface. Can repeat.
+    #[cfg(target_os = "linux")]
+    #[arg(long = "lan", value_name = "INTERFACE")]
+    lan: Vec<String>,
+    /// Router mode: the address of the DNS server for dnsmasq.
+    #[cfg(target_os = "linux")]
+    #[arg(long, default_value = "127.0.0.1:5359")]
+    dns: std::net::SocketAddr,
+    /// Router mode: send the DNS queries of the LAN to the router, also when
+    /// a device uses a different server.
+    #[cfg(target_os = "linux")]
+    #[arg(long)]
+    dns_redirect: bool,
+}
+
+#[cfg(target_os = "linux")]
+const RUN_DIR: &str = "/var/run/fiend";
+
+impl RunArgs {
+    #[cfg(target_os = "linux")]
+    fn gateway(&self) -> Option<fiend_daemon::platform::linux::Gateway> {
+        (!self.lan.is_empty()).then(|| fiend_daemon::platform::linux::Gateway {
+            interfaces: self.lan.clone(),
+            dns: self.dns,
+            dns_redirect: self.dns_redirect,
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn gateway(&self) -> Option<()> {
+        None
+    }
+
+    fn platform(&self) -> fiend_daemon::platform::Native {
+        #[cfg(target_os = "linux")]
+        if let Some(gateway) = self.gateway() {
+            return fiend_daemon::platform::native(std::path::Path::new(RUN_DIR))
+                .with_gateway(gateway);
+        }
+        fiend_daemon::platform::native(&store_dir_for(self))
+    }
 }
 
 impl RunArgs {
@@ -168,10 +210,7 @@ fn main() {
     let result = if args.no_network {
         runtime.block_on(run_foreground(NullPlatform, args))
     } else {
-        runtime.block_on(run_foreground(
-            fiend_daemon::platform::native(&store_dir_for(&args)),
-            args,
-        ))
+        runtime.block_on(run_foreground(args.platform(), args))
     };
     if let Err(error) = result {
         fail(error);
@@ -206,10 +245,23 @@ where
     F: FnOnce(),
 {
     let logs = install_logging();
-    let socket = args.socket.unwrap_or_else(fiend_ipc::path::default_socket);
-    let store_dir = args.store.unwrap_or_else(default_store);
-    let store = Store::open(&store_dir)
+    let gateway = args.gateway().is_some();
+    let socket = args
+        .socket
+        .clone()
+        .unwrap_or_else(fiend_ipc::path::default_socket);
+    let store_dir = args.store.clone().unwrap_or_else(default_store);
+    let fresh = !store_dir.join("settings.json").exists();
+    let mut store = Store::open(&store_dir)
         .map_err(|error| format!("cannot open {}: {error}", store_dir.display()))?;
+    if gateway && fresh {
+        store
+            .update_settings(|settings| {
+                settings.default_route = fiend_ipc::DefaultRoute::Direct;
+                settings.connect_at_startup = true;
+            })
+            .map_err(|error| format!("cannot save the settings: {error}"))?;
+    }
     let mut policy = PeerPolicy::system_default();
     policy.uids.extend(args.allow_uid);
     if args.foreground
@@ -288,6 +340,12 @@ mod tests {
             allow_uid: vec![uid],
             no_network: false,
             service: false,
+            #[cfg(target_os = "linux")]
+            lan: Vec::new(),
+            #[cfg(target_os = "linux")]
+            dns: "127.0.0.1:5359".parse().unwrap(),
+            #[cfg(target_os = "linux")]
+            dns_redirect: false,
         };
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();

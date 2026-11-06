@@ -23,6 +23,7 @@ use crate::store::Store;
 type Result<T> = std::result::Result<T, IpcError>;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+const STALE_CHECK: Duration = Duration::from_secs(60 * 60);
 pub const MAX_PROFILES: usize = 256;
 pub const MAX_SUBSCRIPTIONS: usize = 32;
 
@@ -314,6 +315,10 @@ impl<P: Platform> Inner<P> {
                 let tun = tun.clone();
                 Arc::new(move |query: &[u8]| tun.answer_dns(query))
             },
+            rules: tun.rules(),
+            resolver: (!engine.direct_resolver.trim().is_empty())
+                .then(|| fiend_tun::parse_resolver(&engine.direct_resolver).ok())
+                .flatten(),
         };
         let opened = {
             let platform = self.platform.clone();
@@ -528,6 +533,15 @@ impl<P: Platform> Daemon<P> {
             }
         }
         self.spawn_refresh_stale();
+        let daemon = self.clone();
+        tokio::spawn(async move {
+            let mut check = tokio::time::interval(STALE_CHECK);
+            check.tick().await;
+            loop {
+                check.tick().await;
+                daemon.spawn_refresh_stale();
+            }
+        });
     }
 
     pub async fn shutdown(&self) {
@@ -912,6 +926,17 @@ impl<P: Platform> Daemon<P> {
         {
             check_subscription_host(&url)
                 .map_err(|reason| error(ErrorCode::InvalidRules, reason))?;
+        }
+        if lock(&self.inner.store)
+            .settings()
+            .subscriptions
+            .iter()
+            .any(|item| item.url == url)
+        {
+            return Err(error(
+                ErrorCode::InvalidRequest,
+                "This list is already added",
+            ));
         }
         if lock(&self.inner.store).settings().subscriptions.len() >= MAX_SUBSCRIPTIONS {
             return Err(error(

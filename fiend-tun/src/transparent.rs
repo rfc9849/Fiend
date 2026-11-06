@@ -39,6 +39,7 @@ use crate::dns::valid_domain;
 use crate::engine::{
     Context, FlowCount, Plan, Running, TunEngine, UdpReply, protected_udp, udp_flow,
 };
+use crate::gateway::{self, GatewayDns};
 use crate::packet::FlowKey;
 use crate::rules::{Host, Route, is_blocked_udp_port};
 use crate::sniff;
@@ -50,9 +51,9 @@ const DNS_PORT: u16 = 53;
 const TUNNEL_RESOLVER: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), DNS_PORT);
 const DNS_WAIT: Duration = Duration::from_secs(5);
-const DNS_TCP_IDLE: Duration = Duration::from_secs(10);
-const MAX_DNS_MESSAGE: usize = 4096;
-const MAX_DNS_QUERIES: usize = 256;
+pub(crate) const DNS_TCP_IDLE: Duration = Duration::from_secs(10);
+pub(crate) const MAX_DNS_MESSAGE: usize = 4096;
+pub(crate) const MAX_DNS_QUERIES: usize = 256;
 const NAMES: usize = 8192;
 
 /// Opens UDP sockets bound to a foreign address, so that replies come from
@@ -65,6 +66,7 @@ pub struct TransparentSockets {
     pub tcp: Vec<std::net::TcpListener>,
     pub udp: Vec<std::net::UdpSocket>,
     pub replies: Arc<dyn ReplySockets>,
+    pub dns: Option<GatewayDns>,
 }
 
 enum Event {
@@ -84,7 +86,7 @@ enum Done {
 }
 
 /// The site names of the addresses in recent DNS answers.
-struct Names(std::sync::Mutex<LruCache<IpAddr, String>>);
+pub(crate) struct Names(std::sync::Mutex<LruCache<IpAddr, String>>);
 
 impl Names {
     fn new() -> Self {
@@ -97,7 +99,7 @@ impl Names {
         self.lock().get(&ip).cloned()
     }
 
-    fn remember(&self, name: &str, answer: &[u8]) {
+    pub(crate) fn remember(&self, name: &str, answer: &[u8]) {
         let Ok(message) = Message::from_vec(answer) else {
             return;
         };
@@ -162,6 +164,21 @@ async fn serve(context: Arc<Context>, sockets: TransparentSockets) -> io::Result
         limit: context.options.max_udp_flows,
     });
     let names = Arc::new(Names::new());
+    if let Some(gateway) = sockets.dns {
+        let server = gateway::Server::new(context.clone(), names.clone(), &gateway);
+        for socket in gateway.udp {
+            socket.set_nonblocking(true)?;
+            let socket = UdpSocket::from_std(socket)?;
+            let server = server.clone();
+            tasks.spawn(async move { (Done::Infrastructure, server.serve_udp(socket).await) });
+        }
+        for listener in gateway.tcp {
+            listener.set_nonblocking(true)?;
+            let listener = TcpListener::from_std(listener)?;
+            let server = server.clone();
+            tasks.spawn(async move { (Done::Infrastructure, server.serve_tcp(listener).await) });
+        }
+    }
     let mut tcp = 0usize;
     let mut dns = 0usize;
     let mut udp: HashMap<FlowKey, (u64, mpsc::Sender<Vec<u8>>)> = HashMap::new();
@@ -600,7 +617,7 @@ async fn dns_stream(
     }
 }
 
-fn invalid_dns() -> io::Error {
+pub(crate) fn invalid_dns() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "DNS query is not valid")
 }
 
@@ -645,7 +662,7 @@ fn answers(answer: &[u8], id: u16) -> bool {
     answer.len() >= 12 && u16::from_be_bytes([answer[0], answer[1]]) == id && answer[2] & 0x80 != 0
 }
 
-async fn exchange_direct(
+pub(crate) async fn exchange_direct(
     context: &Context,
     server: SocketAddr,
     query: &[u8],
@@ -666,7 +683,11 @@ async fn exchange_direct(
     .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "DNS timed out")))
 }
 
-async fn exchange_tunnel(context: &Context, query: &[u8], id: u16) -> io::Result<Vec<u8>> {
+pub(crate) async fn exchange_tunnel(
+    context: &Context,
+    query: &[u8],
+    id: u16,
+) -> io::Result<Vec<u8>> {
     let flow = context
         .client
         .open_udp(&Address::Ip(TUNNEL_RESOLVER))

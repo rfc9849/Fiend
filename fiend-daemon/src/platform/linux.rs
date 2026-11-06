@@ -17,9 +17,14 @@ use fiend_core::net::ProtectSocket;
 use fiend_ipc::ConnectStep;
 use tun_rs::{AsyncDevice, DeviceBuilder};
 
+use fiend_root::gateway::{self, DNS_SET_TIMEOUT_SECONDS, DNS_SET_V4, DNS_SET_V6, NFT_TABLE};
 use fiend_root::rules::{self as tproxy, Desktop};
+use fiend_tun::rules::{DefaultRoute, RuleKind};
 
-use super::commands::{Runner, Step, SystemRunner, apply_steps, dns_steps, route_steps, undo_all};
+use super::commands::{
+    DNSMASQ, DNSMASQ_CONFIG, Runner, Step, SystemRunner, apply_steps, dns_steps, route_steps,
+    undo_all,
+};
 use super::{NetworkRequest, Platform};
 use crate::journal::{Journal, JournalFile};
 
@@ -121,18 +126,140 @@ fn monitor(
         })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gateway {
+    pub interfaces: Vec<String>,
+    pub dns: SocketAddr,
+    pub dns_redirect: bool,
+}
+
 pub struct LinuxPlatform {
+    dir: PathBuf,
     journal: JournalFile,
     backup: PathBuf,
+    gateway: Option<Gateway>,
 }
 
 impl LinuxPlatform {
     pub fn new(state_dir: &Path) -> Self {
         Self {
+            dir: state_dir.to_owned(),
             journal: JournalFile::new(state_dir.join("network-journal.json")),
             backup: state_dir.join("resolv.conf.backup"),
+            gateway: None,
         }
     }
+
+    pub fn with_gateway(mut self, gateway: Gateway) -> Self {
+        self.gateway = Some(gateway);
+        self
+    }
+}
+
+struct NftCapture {
+    writer: fiend_root::nft::SetWriter,
+    ipv6: bool,
+}
+
+impl fiend_tun::CaptureSet for NftCapture {
+    fn add(&self, addresses: &[std::net::IpAddr]) -> io::Result<()> {
+        let (v4, v6): (Vec<_>, Vec<_>) = addresses.iter().partition(|ip| ip.is_ipv4());
+        let v6 = if self.ipv6 { v6 } else { Vec::new() };
+        self.writer.add(
+            &[
+                fiend_root::nft::Update {
+                    set: DNS_SET_V4,
+                    addresses: &v4,
+                },
+                fiend_root::nft::Update {
+                    set: DNS_SET_V6,
+                    addresses: &v6,
+                },
+            ],
+            Duration::from_secs(DNS_SET_TIMEOUT_SECONDS.into()),
+        )
+    }
+}
+
+const DEFAULT_UPSTREAM: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53);
+const UPSTREAM_CHECK: Duration = Duration::from_secs(10);
+
+fn server_address(value: &str) -> Option<SocketAddr> {
+    let (ip, port) = match value.split_once('#') {
+        Some((ip, port)) => (ip, port.parse().ok()?),
+        None => (value, 53),
+    };
+    let ip: std::net::IpAddr = ip.trim().parse().ok()?;
+    (!ip.is_loopback() || port != 53).then_some(SocketAddr::new(ip, port))
+}
+
+pub fn dnsmasq_upstream(config: &Path, own: SocketAddr) -> Option<SocketAddr> {
+    let mut resolv_files = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(config).ok()?.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("dnsmasq.conf")
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in text.lines().map(str::trim) {
+            if let Some(value) = line.strip_prefix("server=")
+                && !value.contains('/')
+                && let Some(address) = server_address(value)
+                && address != own
+            {
+                return Some(address);
+            }
+            if let Some(path) = line.strip_prefix("resolv-file=") {
+                resolv_files.push(PathBuf::from(path));
+            }
+        }
+    }
+    resolv_files.iter().find_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let address = line.trim().strip_prefix("nameserver")?.trim();
+                let ip: std::net::IpAddr = address.split('%').next()?.parse().ok()?;
+                (!ip.is_loopback()).then_some(SocketAddr::new(ip, 53))
+            })
+    })
+}
+
+fn upstream(resolver: Option<SocketAddr>, own: SocketAddr) -> fiend_tun::Upstream {
+    if let Some(resolver) = resolver {
+        return Arc::new(move || resolver);
+    }
+    let cache: Mutex<Option<(std::time::Instant, SocketAddr)>> = Mutex::new(None);
+    Arc::new(move || {
+        let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((checked, address)) = *cache
+            && checked.elapsed() < UPSTREAM_CHECK
+        {
+            return address;
+        }
+        let address = dnsmasq_upstream(Path::new(DNSMASQ_CONFIG), own).unwrap_or(DEFAULT_UPSTREAM);
+        *cache = Some((std::time::Instant::now(), address));
+        address
+    })
+}
+
+fn ranges(
+    rules: &fiend_tun::rules::Rules,
+    kinds: &[RuleKind],
+) -> Vec<(std::net::IpAddr, std::net::IpAddr)> {
+    kinds
+        .iter()
+        .flat_map(|kind| rules.networks(*kind).ranges())
+        .collect()
 }
 
 fn resolved_available() -> bool {
@@ -155,6 +282,141 @@ fn current_default() -> Option<String> {
     std::fs::read_to_string("/proc/net/route")
         .ok()
         .and_then(|text| default_route(&text))
+}
+
+type Listeners = (Vec<socket2::Socket>, Vec<socket2::Socket>);
+
+fn transparent_listeners(ipv6: bool) -> io::Result<(u16, Listeners)> {
+    let mut last = io::Error::other("no free port");
+    for _ in 0..PORT_ATTEMPTS {
+        let port = fiend_root::sockets::random_port();
+        match fiend_root::sockets::listeners(port, ipv6, Some(MARK)) {
+            Ok(sockets) => return Ok((port, sockets)),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => last = error,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last)
+}
+
+impl LinuxPlatform {
+    fn open_gateway(
+        &self,
+        gateway: &Gateway,
+        request: &NetworkRequest,
+        progress: &dyn Fn(ConnectStep),
+        network_changed: Arc<dyn Fn() + Send + Sync>,
+    ) -> io::Result<(fiend_tun::TransparentSockets, LinuxGuard)> {
+        self.recover()?;
+        let mut runner = SystemRunner;
+        let delete = vec![
+            "nft".to_owned(),
+            "delete".into(),
+            "table".into(),
+            "inet".into(),
+            NFT_TABLE.into(),
+        ];
+        let _ = runner.run(&delete);
+        let (port, (tcp, udp)) = transparent_listeners(request.ipv6)?;
+        let dns_udp = std::net::UdpSocket::bind(gateway.dns)?;
+        let dns_tcp = std::net::TcpListener::bind(gateway.dns)?;
+        let rules = &request.rules;
+        let capture_all = rules.default_route() == DefaultRoute::Tunnel;
+        let config = gateway::Gateway {
+            interfaces: gateway.interfaces.clone(),
+            port,
+            ipv6: request.ipv6,
+            capture_all,
+            capture: ranges(rules, &[RuleKind::Proxy, RuleKind::Dpi, RuleKind::Block]),
+            bypass: ranges(rules, &[RuleKind::Direct]),
+            dns_redirect: gateway.dns_redirect,
+        };
+        std::fs::create_dir_all(&self.dir)?;
+        let file = self.dir.join("gateway.nft");
+        std::fs::write(&file, gateway::ruleset(&config))?;
+        let mut steps = vec![Step {
+            apply: vec![
+                "nft".into(),
+                "-f".into(),
+                file.to_string_lossy().into_owned(),
+            ],
+            undo: Some(delete),
+        }];
+        steps.extend(
+            gateway::routes(request.ipv6)
+                .into_iter()
+                .map(|(apply, undo)| Step {
+                    apply,
+                    undo: Some(undo),
+                }),
+        );
+        let dns_steps = vec![Step {
+            apply: vec![
+                DNSMASQ.into(),
+                format!("{}#{}", gateway.dns.ip(), gateway.dns.port()),
+            ],
+            undo: Some(vec![DNSMASQ.into()]),
+        }];
+        let writer = fiend_root::nft::SetWriter::open(NFT_TABLE)?;
+        let state = Arc::new(Mutex::new(Journal::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut guard = LinuxGuard {
+            file: self.journal.clone(),
+            state: state.clone(),
+            stop: stop.clone(),
+            monitor: None,
+        };
+        progress(ConnectStep::Routes);
+        {
+            let mut journal = state.lock().unwrap_or_else(|error| error.into_inner());
+            apply_steps(&steps, &mut journal, &self.journal, &mut runner)?;
+        }
+        progress(ConnectStep::Dns);
+        {
+            let mut journal = state.lock().unwrap_or_else(|error| error.into_inner());
+            apply_steps(&dns_steps, &mut journal, &self.journal, &mut runner)?;
+        }
+        tracing::info!(
+            port,
+            capture_all,
+            networks = config.capture.len(),
+            "router mode: listed traffic goes through TPROXY"
+        );
+        steps.extend(dns_steps);
+        guard.monitor = Some(monitor(
+            stop,
+            network_changed,
+            Some(WatchedRules {
+                steps,
+                check: vec![vec![
+                    "nft".into(),
+                    "list".into(),
+                    "chain".into(),
+                    "inet".into(),
+                    NFT_TABLE.into(),
+                    "prerouting".into(),
+                ]],
+                state,
+                file: self.journal.clone(),
+            }),
+        )?);
+        let sockets = fiend_tun::TransparentSockets {
+            tcp: tcp.into_iter().map(Into::into).collect(),
+            udp: udp.into_iter().map(Into::into).collect(),
+            replies: Arc::new(LocalReplies),
+            dns: Some(fiend_tun::GatewayDns {
+                udp: vec![dns_udp],
+                tcp: vec![dns_tcp],
+                upstream: upstream(request.resolver, gateway.dns),
+                capture: Arc::new(NftCapture {
+                    writer,
+                    ipv6: request.ipv6,
+                }),
+                capture_all,
+            }),
+        };
+        Ok((sockets, guard))
+    }
 }
 
 pub struct LinuxGuard {
@@ -217,6 +479,11 @@ impl Platform for LinuxPlatform {
         progress: &dyn Fn(ConnectStep),
         network_changed: Arc<dyn Fn() + Send + Sync>,
     ) -> io::Result<Option<(fiend_tun::TransparentSockets, LinuxGuard)>> {
+        if let Some(gateway) = &self.gateway {
+            return self
+                .open_gateway(gateway, request, progress, network_changed)
+                .map(Some);
+        }
         if std::env::var(MODE).is_ok_and(|mode| mode == "tun") {
             tracing::info!("{MODE}=tun is set, using the TUN device");
             return Ok(None);
@@ -226,22 +493,7 @@ impl Platform for LinuxPlatform {
             tracing::info!(%error, "TPROXY is not available, using the TUN device");
             return Ok(None);
         }
-        let mut last = io::Error::other("no free port");
-        let mut found = None;
-        for _ in 0..PORT_ATTEMPTS {
-            let port = fiend_root::sockets::random_port();
-            match fiend_root::sockets::listeners(port, request.ipv6, Some(MARK)) {
-                Ok(sockets) => {
-                    found = Some((port, sockets));
-                    break;
-                }
-                Err(error) if error.kind() == io::ErrorKind::AddrInUse => last = error,
-                Err(error) => return Err(error),
-            }
-        }
-        let Some((port, (tcp, udp))) = found else {
-            return Err(last);
-        };
+        let (port, (tcp, udp)) = transparent_listeners(request.ipv6)?;
         let config = Desktop {
             ipv6: request.ipv6,
             bypass_lan: request.bypass_lan,
@@ -289,6 +541,7 @@ impl Platform for LinuxPlatform {
             tcp: tcp.into_iter().map(Into::into).collect(),
             udp: udp.into_iter().map(Into::into).collect(),
             replies: Arc::new(LocalReplies),
+            dns: None,
         };
         Ok(Some((sockets, guard)))
     }
@@ -299,6 +552,12 @@ impl Platform for LinuxPlatform {
         progress: &dyn Fn(ConnectStep),
         network_changed: Arc<dyn Fn() + Send + Sync>,
     ) -> io::Result<(AsyncDevice, LinuxGuard)> {
+        if self.gateway.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the router mode needs TPROXY",
+            ));
+        }
         self.recover()?;
         let device = DeviceBuilder::new()
             .name(IFACE)
@@ -356,6 +615,52 @@ impl Platform for LinuxPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_upstream_is_the_server_that_dnsmasq_used() {
+        let dir = std::env::temp_dir().join(format!("fiend-upstream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let own: SocketAddr = "127.0.0.1:5359".parse().unwrap();
+        let resolv = dir.join("resolv.conf.auto");
+        std::fs::write(
+            &resolv,
+            "# Interface wan\nnameserver 127.0.0.1\nnameserver 192.0.2.53\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("dnsmasq.conf.cfg01"),
+            format!(
+                "server=/lan/\nserver=127.0.0.1#5359\nresolv-file={}\n",
+                resolv.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            dnsmasq_upstream(&dir, own),
+            Some("192.0.2.53:53".parse().unwrap())
+        );
+        std::fs::write(dir.join("dnsmasq.conf.cfg02"), "server=127.0.0.1#5053\n").unwrap();
+        assert_eq!(
+            dnsmasq_upstream(&dir, own),
+            Some("127.0.0.1:5053".parse().unwrap())
+        );
+        assert_eq!(dnsmasq_upstream(&dir.join("none"), own), None);
+        assert_eq!(
+            super::super::commands::dnsmasq_dirs(&dir),
+            Vec::<PathBuf>::new()
+        );
+        std::fs::write(
+            dir.join("dnsmasq.conf.cfg03"),
+            "conf-dir=/tmp/dnsmasq.cfg03.d\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::commands::dnsmasq_dirs(&dir),
+            [PathBuf::from("/tmp/dnsmasq.cfg03.d")]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn the_default_route_is_read_from_the_route_table() {

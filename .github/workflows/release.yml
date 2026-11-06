@@ -186,6 +186,34 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  openwrt:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: openwrt
+      - name: Install the Rust tools
+        run: |
+          rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl armv7-unknown-linux-musleabihf
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install ziglang==0.17.1 cargo-zigbuild==0.24.1
+          echo "$RUNNER_TEMP/zig/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: |
+          sh tools/package/openwrt.sh \
+            aarch64_generic aarch64_cortex-a53 aarch64_cortex-a72 aarch64_cortex-a76 \
+            arm_cortex-a7_neon-vfpv4 arm_cortex-a9_vfpv3-d16 arm_cortex-a15_neon-vfpv4 \
+            x86_64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openwrt
+          path: target/openwrt/*.ipk
+          if-no-files-found: error
+
   macos:
     needs: version
     runs-on: macos-15
@@ -279,7 +307,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version, test, android, linux, macos, windows, docker]
+    needs: [version, test, android, linux, openwrt, macos, windows, docker]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

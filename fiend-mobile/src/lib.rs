@@ -321,6 +321,7 @@ impl Tunnel {
                     tcp: started.tcp,
                     udp: started.udp,
                     replies: helper.clone(),
+                    dns: None,
                 }
             };
             let runner = engine.clone();

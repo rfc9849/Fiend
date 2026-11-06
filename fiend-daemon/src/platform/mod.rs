@@ -26,6 +26,8 @@ pub struct NetworkRequest {
     pub ipv6: bool,
     pub bypass_lan: bool,
     pub dns: DnsAnswer,
+    pub rules: Arc<fiend_tun::rules::Rules>,
+    pub resolver: Option<SocketAddr>,
 }
 
 pub trait Platform: Send + Sync + 'static {
