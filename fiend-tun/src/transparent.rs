@@ -651,8 +651,8 @@ async fn resolve(
             response.add_query(question.clone());
             return response.to_vec().map_err(|_| invalid_dns());
         }
-        Route::Direct | Route::Dpi => exchange_direct(context, server, query, id).await?,
-        Route::Proxy => exchange_tunnel(context, query, id).await?,
+        Route::Direct => exchange_direct(context, server, query, id).await?,
+        Route::Proxy | Route::Dpi => exchange_tunnel(context, query, id).await?,
     };
     names.remember(&name, &answer);
     Ok(answer)

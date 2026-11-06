@@ -143,7 +143,7 @@ impl Server {
             return response.to_vec().map_err(|_| invalid_dns());
         }
         let answer = match route {
-            Route::Proxy => exchange_tunnel(&self.context, query, id).await?,
+            Route::Proxy | Route::Dpi => exchange_tunnel(&self.context, query, id).await?,
             _ => exchange_direct(&self.context, (self.upstream)(), query, id).await?,
         };
         self.names.remember(&name, &answer);
