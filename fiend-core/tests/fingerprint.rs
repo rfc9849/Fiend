@@ -78,7 +78,9 @@ fn dynamic_ranges(template: &Template) -> Vec<std::ops::Range<usize>> {
 fn build_regenerates_dynamic_fields_and_keeps_static_bytes() {
     let template = sample();
     let ranges = dynamic_ranges(&template);
-    let built = template.build(&[7u8; 32]).expect("build ClientHello");
+    let built = template
+        .build_in_capture_order(&[7u8; 32])
+        .expect("build ClientHello");
     let reparsed = parse_client_hello(&built.record).expect("built ClientHello parses");
     assert_eq!(reparsed.domain, template.domain);
 
@@ -141,7 +143,9 @@ fn grease_values_follow_slot_rules() {
     let mut cipher_values = std::collections::HashSet::new();
     let mut cipher_matches_group = 0;
     for _ in 0..128 {
-        let built = template.build(&[1u8; 32]).expect("build with GREASE");
+        let built = template
+            .build_in_capture_order(&[1u8; 32])
+            .expect("build with GREASE");
         for field in &template.grease {
             let value = grease_value(&template, &built.record, field.value_offset);
             assert_eq!(value & 0x0f0f, 0x0a0a);
@@ -169,7 +173,9 @@ fn grease_values_follow_slot_rules() {
 fn grease_data_stays_static() {
     let template = sample();
     for _ in 0..16 {
-        let built = template.build(&[5u8; 32]).expect("build GREASE data");
+        let built = template
+            .build_in_capture_order(&[5u8; 32])
+            .expect("build GREASE data");
         for field in &template.grease {
             if let (Some(offset), Some(size)) = (field.data_offset, field.data_size) {
                 let shift = if offset > template.ech.expect("ECH").payload.offset {
@@ -193,7 +199,9 @@ fn ech_grease_is_fresh_and_varies_in_size() {
     let mut sizes = std::collections::HashSet::new();
     let mut encs = std::collections::HashSet::new();
     for _ in 0..64 {
-        let built = template.build(&[6u8; 32]).expect("build ECH");
+        let built = template
+            .build_in_capture_order(&[6u8; 32])
+            .expect("build ECH");
         let parsed = parse_client_hello(&built.record).expect("parse built ClientHello");
         let built_ech = parsed.ech.expect("ECH survives build");
         assert_eq!(built_ech.config_id, ech.config_id);
@@ -209,6 +217,62 @@ fn ech_grease_is_fresh_and_varies_in_size() {
     }
     assert_eq!(encs.len(), 64);
     assert_eq!(sizes.len(), 4);
+}
+
+fn extension_kinds(template: &Template) -> Vec<u16> {
+    template
+        .extension_blocks()
+        .iter()
+        .map(|(kind, _)| *kind)
+        .collect()
+}
+
+#[test]
+fn chrome_templates_permute_extensions_like_chrome() {
+    let template = sample();
+    assert!(template.permutes_extensions());
+    let original = extension_kinds(&template);
+    let grease = |kind: &u16| kind & 0x0f0f == 0x0a0a;
+    let mut orders = std::collections::HashSet::new();
+    for _ in 0..32 {
+        let built = template.build(&[8u8; 32]).expect("build permuted");
+        let parsed = parse_client_hello(&built.record).expect("permuted ClientHello parses");
+        let kinds = extension_kinds(&parsed);
+        assert_eq!(kinds.len(), original.len());
+        for (index, kind) in original.iter().enumerate() {
+            if grease(kind) || *kind == 0x0029 || *kind == 0x0015 {
+                assert!(
+                    grease(&kinds[index]) == grease(kind),
+                    "slot {index} stays in place"
+                );
+            }
+        }
+        let mut sorted: Vec<u16> = kinds.iter().copied().filter(|kind| !grease(kind)).collect();
+        let mut expected: Vec<u16> = original
+            .iter()
+            .copied()
+            .filter(|kind| !grease(kind))
+            .collect();
+        sorted.sort();
+        expected.sort();
+        assert_eq!(sorted, expected);
+        for (spec, share) in parsed.key_shares.iter().zip(&built.key_shares.shares) {
+            assert_eq!(
+                &built.record[spec.offset..spec.offset + spec.size],
+                share.public.as_slice()
+            );
+        }
+        parsed
+            .verify(&built.record)
+            .expect("permuted ClientHello is consistent");
+        orders.insert(
+            kinds
+                .into_iter()
+                .filter(|kind| !grease(kind))
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert!(orders.len() > 16, "the order changes between handshakes");
 }
 
 #[test]

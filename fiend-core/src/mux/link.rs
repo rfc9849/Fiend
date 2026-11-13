@@ -16,7 +16,22 @@ use super::config::Config;
 use super::error::{Error, Result};
 use super::lane::{H2Lane, LANE_HEADER, LaneKind, LaneOptions};
 use crate::addr::Address;
+use crate::net::AckProbe;
 use crate::transport::Session;
+
+pub trait LinkIo {
+    fn ack_probe(&self) -> Option<AckProbe> {
+        None
+    }
+}
+
+impl LinkIo for tokio::net::TcpStream {
+    fn ack_probe(&self) -> Option<AckProbe> {
+        crate::net::ack_probe(self)
+    }
+}
+
+impl LinkIo for tokio::io::DuplexStream {}
 
 pub(crate) const LOAD_INTERVAL: Duration = Duration::from_millis(250);
 const LOAD_COOLDOWN: Duration = Duration::from_secs(1);
@@ -385,9 +400,10 @@ impl ClientLink {
         wake: Arc<Notify>,
     ) -> Result<Self>
     where
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        S: AsyncRead + AsyncWrite + LinkIo + Unpin + Send + 'static,
     {
         let deadline = Instant::now() + config.settings_timeout;
+        let acks = session.get_ref().ack_probe();
         let mut builder = h2::client::Builder::new();
         builder
             .initial_window_size(config.stream_window)
@@ -431,7 +447,7 @@ impl ClientLink {
             let shared = shared.clone();
             let timing = Timing::new(config);
             tokio::spawn(async move {
-                keepalive_loop(shared, ping_pong, timing, driver_abort).await;
+                keepalive_loop(shared, ping_pong, timing, acks, driver_abort).await;
             })
         });
 
@@ -594,7 +610,7 @@ impl Drop for LaneReservation {
 struct Timing {
     tick: Duration,
     interval: Duration,
-    probe: Duration,
+    probe: Option<Duration>,
     measure: bool,
 }
 
@@ -606,6 +622,10 @@ impl Timing {
             probe: config.probe_timeout,
             measure: config.rtt_interval.is_some(),
         }
+    }
+
+    fn probe(&self, srtt: Option<Duration>) -> Duration {
+        super::config::probe_timeout(self.probe, srtt)
     }
 
     fn next_idle(&self) -> Duration {
@@ -623,6 +643,7 @@ async fn keepalive_loop(
     shared: Arc<LinkShared>,
     mut ping_pong: PingPong,
     timing: Timing,
+    acks: Option<AckProbe>,
     driver: AbortHandle,
 ) {
     let mut first = timing.measure;
@@ -671,21 +692,32 @@ async fn keepalive_loop(
         let started = Instant::now();
         let ping = ping_pong.ping(Ping::opaque());
         tokio::pin!(ping);
-        let suspect_after = shared.suspect_after(timing.probe);
+        let probe = timing.probe(shared.srtt());
+        let suspect_after = shared.suspect_after(probe);
+        let read_acked = || acks.as_ref().and_then(|read| read());
+        let mut acked = read_acked();
         let mut step = suspect_after;
+        let mut suspected = false;
         let answered = loop {
-            match timeout(step, &mut ping).await {
-                Ok(result) => break result.is_ok(),
-                Err(_) if shared.idle_for() < step => {}
-                Err(_) if !shared.is_suspect() && step == suspect_after => {
-                    tracing::debug!("mux link suspect: no reply to the quiet probe");
-                    shared.set_suspect(true);
-                    step = timing
-                        .probe
-                        .saturating_sub(suspect_after)
-                        .max(SUSPECT_FLOOR);
+            if let Ok(result) = timeout(step, &mut ping).await {
+                break result.is_ok();
+            }
+            let now = read_acked();
+            let acking = now.zip(acked).is_some_and(|(now, before)| now > before);
+            acked = now;
+            if shared.idle_for() < step || acking {
+                if suspected {
+                    shared.set_suspect(false);
+                    suspected = false;
+                    step = suspect_after;
                 }
-                Err(_) => break false,
+            } else if !suspected && !shared.is_suspect() {
+                tracing::debug!("mux link suspect: no reply to the quiet probe");
+                shared.set_suspect(true);
+                suspected = true;
+                step = probe;
+            } else {
+                break false;
             }
         };
         if !answered {
@@ -764,7 +796,7 @@ mod tests {
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
-        run_for(config.probe_timeout + Duration::from_millis(1)).await;
+        run_for(SUSPECT_FLOOR + Timing::new(&config).probe(None) + Duration::from_millis(1)).await;
         assert!(link.is_closed());
         held.abort();
     }
@@ -819,8 +851,92 @@ mod tests {
         run_for(Duration::from_millis(200) + SUSPECT_FLOOR + Duration::from_millis(200)).await;
         assert!(link.shared().is_suspect(), "no reply to the quiet probe");
         assert!(!link.is_closed());
-        run_for(config.probe_timeout).await;
+        run_for(Timing::new(&config).probe(None)).await;
         assert!(link.is_closed(), "closed within the probe timeout");
+        held.abort();
+    }
+
+    struct AckedStream {
+        inner: tokio::io::DuplexStream,
+        acked: Arc<AtomicU64>,
+    }
+
+    impl LinkIo for AckedStream {
+        fn ack_probe(&self) -> Option<AckProbe> {
+            let acked = self.acked.clone();
+            Some(Box::new(move || Some(acked.load(Ordering::Relaxed))))
+        }
+    }
+
+    impl AsyncRead for AckedStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for AckedStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_link_stays_open_while_the_peer_acknowledges_the_upload() {
+        use crate::mux::ServerConnection;
+        use std::future::pending;
+
+        let (client, server) = tokio::io::duplex(64 << 10);
+        let acked = Arc::new(AtomicU64::new(0));
+        let client = AckedStream {
+            inner: client,
+            acked: acked.clone(),
+        };
+        let config = Config::default();
+        let server_config = config.clone();
+        let held = tokio::spawn(async move {
+            let connection = ServerConnection::handshake(test_session(server), &server_config)
+                .await
+                .expect("server handshake");
+            pending::<()>().await;
+            drop(connection);
+        });
+        let link = ClientLink::connect(test_session(client), &config, 1, Arc::new(Notify::new()))
+            .await
+            .expect("client handshake");
+        link.shared().reserve_lane(LaneKind::Tcp);
+        link.shared().lane_opened();
+        link.shared().note_io(64 << 10, false);
+        for _ in 0..300 {
+            acked.fetch_add(16 << 10, Ordering::Relaxed);
+            run_for(Duration::from_millis(100)).await;
+        }
+        assert!(!link.is_closed(), "the peer acknowledged data for 30 s");
+        assert!(!link.shared().is_suspect());
+        let probe = Timing::new(&config).probe(None);
+        run_for(QUIET_PROBE + SUSPECT_FLOOR + probe + Duration::from_millis(300)).await;
+        assert!(link.is_closed(), "closed once the acknowledgements stopped");
         held.abort();
     }
 

@@ -43,6 +43,18 @@ docker compose exec panel sed -i 's/^listen = .*/listen = "127.0.0.1:38029"/' /e
 docker compose restart panel
 ```
 
+## BBR
+
+Turn on BBR congestion control on the host. The node runs with `network_mode: host`, so the host settings apply to it:
+
+```sh
+printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' | sudo tee /etc/sysctl.d/90-bbr.conf
+sudo sysctl --system
+sysctl net.ipv4.tcp_congestion_control
+```
+
+The last command prints `net.ipv4.tcp_congestion_control = bbr`.
+
 ## Disguise
 
 Use a TLS service that really runs on the same server, if you can. If the disguise site has a different IP address, scanners record its certificate on your IP address, and a database search finds your server. The panel shows a warning for this.

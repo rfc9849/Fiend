@@ -480,9 +480,13 @@ async fn tcp_flow(
                 .map_err(io::Error::other)
                 .inspect_err(|_| reset(&stream.inner))?;
             if !first.is_empty() {
-                lane.write_all(&first).await?;
+                lane.write_all(&first)
+                    .await
+                    .inspect_err(|_| reset(&stream.inner))?;
             }
-            copy_bidirectional(&mut stream, &mut lane).await?;
+            copy_bidirectional(&mut stream, &mut lane)
+                .await
+                .inspect_err(|_| reset(&stream.inner))?;
             Ok(())
         }
     }

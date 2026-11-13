@@ -14,6 +14,7 @@ use crate::fingerprint::DEFAULT_RECORD_MAX;
 const RECORD_HEADER_SIZE: usize = 5;
 const AEAD_TAG_SIZE: usize = 16;
 const INNER_CONTENT_TYPE: u8 = 0x17;
+const INNER_HANDSHAKE: u8 = 0x16;
 const RECORD_TYPE_APPDATA: u8 = 0x17;
 const MIN_RECORD_BODY: usize = 1 + AEAD_TAG_SIZE;
 const MAX_RECORD_BODY: usize = DEFAULT_RECORD_MAX + 1 + AEAD_TAG_SIZE;
@@ -128,6 +129,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         AsyncWriteExt::flush(self).await
     }
 
+    pub async fn write_handshake_records(&mut self, sizes: &[usize]) -> io::Result<()> {
+        for &size in sizes {
+            let body = size
+                .saturating_sub(RECORD_HEADER_SIZE)
+                .clamp(MIN_RECORD_BODY, MAX_RECORD_BODY);
+            let mut plain = vec![0u8; body - AEAD_TAG_SIZE];
+            plain[0] = INNER_HANDSHAKE;
+            plain.reverse();
+            let mut record = vec![RECORD_TYPE_APPDATA, 0x03, 0x03];
+            record.extend_from_slice(&(body as u16).to_be_bytes());
+            self.write_cipher
+                .seal_into(&plain, &mut record)
+                .map_err(crypto_error)?;
+            self.sealed.push_back(record);
+        }
+        self.flush().await
+    }
+
     pub async fn shutdown(&mut self) -> io::Result<()> {
         use tokio::io::AsyncWriteExt;
         AsyncWriteExt::shutdown(self).await
@@ -177,13 +196,21 @@ impl<S: AsyncRead + Unpin> AsyncRead for Session<S> {
                 this.read_cipher
                     .open_in_place(&mut this.read_body)
                     .map_err(crypto_error)?;
-                if this.read_body.last() != Some(&INNER_CONTENT_TYPE) {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "unexpected inner TLS content type",
-                    )));
+                match this.read_body.pop() {
+                    Some(INNER_CONTENT_TYPE) => {}
+                    Some(INNER_HANDSHAKE) => {
+                        this.read_body.clear();
+                        this.read_body_pos = 0;
+                        this.read_body_len = 0;
+                        continue;
+                    }
+                    _ => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "unexpected inner TLS content type",
+                        )));
+                    }
                 }
-                this.read_body.pop();
                 std::mem::swap(&mut this.read_body, &mut this.read_plain);
                 this.read_plain_pos = 0;
                 this.read_body_pos = 0;
@@ -339,6 +366,34 @@ mod tests {
 
     use crate::crypto::RecordCipher;
     use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn handshake_records_have_the_given_sizes_and_are_skipped() {
+        let (client, mut wire) = tokio::io::duplex(1 << 16);
+        let cipher = || RecordCipher::new(&[4; 32], [5; 12]);
+        let mut server = Session::new(client, cipher(), cipher(), DEFAULT_RECORD_MAX);
+        server
+            .write_handshake_records(&[255, 265])
+            .await
+            .expect("tickets");
+        server.write_all(b"h2").await.expect("data");
+        let mut raw = vec![0u8; 255 + 265];
+        wire.read_exact(&mut raw).await.expect("ticket bytes");
+        assert_eq!(&raw[..5], &[0x17, 0x03, 0x03, 0x00, 250]);
+        assert_eq!(&raw[255..260], &[0x17, 0x03, 0x03, 0x01, 4]);
+        let mut rest = vec![0u8; 5 + 2 + 1 + AEAD_TAG_SIZE];
+        wire.read_exact(&mut rest).await.expect("data bytes");
+        raw.extend_from_slice(&rest);
+        let (reader, mut feed) = tokio::io::duplex(1 << 16);
+        feed.write_all(&raw).await.expect("feed");
+        let mut client = Session::new(reader, cipher(), cipher(), DEFAULT_RECORD_MAX);
+        let mut data = [0u8; 2];
+        client
+            .read_exact(&mut data)
+            .await
+            .expect("data after tickets");
+        assert_eq!(&data, b"h2");
+    }
 
     fn session<S>(stream: S, record_max: usize) -> Session<S> {
         Session::new(

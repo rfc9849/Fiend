@@ -21,6 +21,7 @@ pub struct ServerConfig {
     pub origin_port: u16,
     pub origin: OriginProfile,
     pub replay_ttl: Duration,
+    pub replay_capacity: usize,
     pub mux: mux::Config,
     pub udp_idle: Duration,
     pub max_connections: usize,
@@ -30,6 +31,7 @@ pub struct ServerConfig {
     pub target: TargetPolicy,
     pub tcp_notsent_lowat: u32,
     pub proxy_protocol: bool,
+    pub post_handshake_records: bool,
 }
 
 impl ServerConfig {
@@ -39,6 +41,7 @@ impl ServerConfig {
             origin_port,
             origin: OriginProfile::default(),
             replay_ttl: transport::AUTH_WINDOW + Duration::from_secs(300),
+            replay_capacity: transport::DEFAULT_REPLAY_CAPACITY,
             mux: mux::Config::default(),
             udp_idle: Duration::from_secs(60),
             max_connections: 1024,
@@ -46,8 +49,9 @@ impl ServerConfig {
             max_user_lanes: 1024,
             tcp_idle: DEFAULT_TCP_IDLE,
             target: TargetPolicy::default(),
-            tcp_notsent_lowat: 0,
+            tcp_notsent_lowat: crate::net::DEFAULT_TCP_NOTSENT_LOWAT,
             proxy_protocol: false,
+            post_handshake_records: false,
         }
     }
 }
@@ -66,7 +70,10 @@ struct ServerInner {
 
 impl Server {
     pub fn managed(config: ServerConfig, node: crate::node::Node) -> Self {
-        let replay = FreshnessCheck::new(config.replay_ttl.max(transport::AUTH_WINDOW));
+        let replay = FreshnessCheck::with_limit(
+            config.replay_ttl.max(transport::AUTH_WINDOW),
+            config.replay_capacity,
+        );
         let connections = Arc::new(Semaphore::new(config.max_connections.max(1)));
         Self {
             inner: Arc::new(ServerInner {
@@ -89,9 +96,6 @@ impl Server {
                 .await
                 .map_err(|_| io::Error::other("connection limit closed"))?;
             let (stream, peer) = crate::net::accept(&listener).await;
-            if let Err(error) = crate::net::set_link_buffers(&stream) {
-                tracing::debug!(%error, "cannot set link buffers");
-            }
             if let Err(error) = stream.set_nodelay(true) {
                 tracing::debug!(%error, "cannot set TCP_NODELAY");
             }
@@ -156,16 +160,26 @@ impl Server {
             )
         });
         let mut principal = None;
-        let outcome =
-            transport::accept_with(stream, &self.inner.replay, &config.origin, |body, time| {
-                let (secret, identity) = node.authenticate(body, time)?;
+        let outcome = transport::accept_with(
+            stream,
+            &self.inner.replay,
+            |template| {
+                let mut origin = node.origin_for(template);
+                if !config.post_handshake_records {
+                    origin.post_handshake_sizes.clear();
+                }
+                origin
+            },
+            async |body: &[u8], time| {
+                let (secret, identity) = node.authenticate_off_runtime(body, time).await?;
                 if let Some(early) = &early {
                     early.cancel();
                 }
                 principal = Some(identity);
                 Some(secret)
-            })
-            .await?;
+            },
+        )
+        .await?;
         match outcome {
             AcceptOutcome::Passthrough {
                 stream,

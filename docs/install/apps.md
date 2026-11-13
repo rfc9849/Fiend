@@ -36,7 +36,7 @@ sudo dnf install ./fiend-0.1.7-1.x86_64.rpm
 
 Log out and back in once after the install.
 
-On Linux, Fiend uses TPROXY: the kernel gives the traffic of the system and of its containers to Fiend, and no VPN interface is made. When the kernel or iptables cannot do TPROXY, Fiend uses a TUN device. To always use the TUN device:
+On Linux, Fiend uses TPROXY: the kernel gives the traffic of the system and of its containers to Fiend, and no VPN interface is made. When the kernel or iptables cannot do TPROXY, Fiend uses a TUN device. TPROXY takes TCP and UDP only, so `ping` goes past the tunnel straight to the destination. With the TUN device, `ping` goes through the tunnel and the server answers. To always use the TUN device:
 
 ```sh
 sudo systemctl edit fiend

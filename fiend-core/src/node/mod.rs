@@ -28,6 +28,15 @@ use crate::transport::{Fallback, OriginProfile, OriginTarget};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_STATE_BYTES: usize = 1024 * 1024;
+const INLINE_AUTH_USERS: usize = 64;
+const TEMPLATE_PROFILES: usize = 64;
+const TEMPLATE_PROBE_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
+
+struct TemplateProfile {
+    version: u64,
+    measured: Option<OriginProfile>,
+    tried: Instant,
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -234,6 +243,7 @@ struct Inner {
     metrics: Mutex<metrics::Sampler>,
     restart: tokio::sync::Notify,
     origin_cache: Mutex<Option<(u64, OriginProfile)>>,
+    template_profiles: Mutex<HashMap<u64, TemplateProfile>>,
     warp: warp::Manager,
     resolver: Mutex<Option<outbound::Resolver>>,
     listen_port: AtomicU64,
@@ -339,6 +349,7 @@ impl Node {
                 metrics: Mutex::new(metrics::Sampler::default()),
                 restart: tokio::sync::Notify::new(),
                 origin_cache: Mutex::new(None),
+                template_profiles: Mutex::new(HashMap::new()),
                 warp: warp::Manager::new(
                     path.parent()
                         .filter(|parent| !parent.as_os_str().is_empty())
@@ -460,6 +471,75 @@ impl Node {
         }
     }
 
+    pub fn origin_for(&self, template: &crate::fingerprint::Template) -> OriginProfile {
+        let (host, port, base) = self.origin();
+        let version = self.snapshot().state.version;
+        let key = template.shape_key();
+        let mut profiles = self
+            .inner
+            .template_profiles
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(entry) = profiles.get(&key).filter(|entry| entry.version == version) {
+            if let Some(measured) = &entry.measured {
+                return merge_profile(base, measured);
+            }
+            if entry.tried.elapsed() < TEMPLATE_PROBE_RETRY {
+                return base;
+            }
+        }
+        if profiles.len() >= TEMPLATE_PROFILES
+            && !profiles.contains_key(&key)
+            && let Some(oldest) = profiles
+                .iter()
+                .min_by_key(|(_, entry)| entry.tried)
+                .map(|(key, _)| *key)
+        {
+            profiles.remove(&oldest);
+        }
+        profiles.insert(
+            key,
+            TemplateProfile {
+                version,
+                measured: None,
+                tried: Instant::now(),
+            },
+        );
+        drop(profiles);
+        let node = self.clone();
+        let template = template.clone();
+        tokio::spawn(async move {
+            let mut secret = [0u8; 32];
+            rand::fill(&mut secret);
+            let hello = match template.build(&secret) {
+                Ok(hello) => hello,
+                Err(error) => {
+                    tracing::debug!(%error, "cannot build an origin probe from the client template");
+                    return;
+                }
+            };
+            let target = node.origin_target(&host, port);
+            match crate::transport::probe_origin_handshake(&target, hello).await {
+                Ok(measured) => {
+                    let mut profiles = node
+                        .inner
+                        .template_profiles
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if let Some(entry) = profiles.get_mut(&key)
+                        && entry.version == version
+                    {
+                        entry.measured = Some(measured);
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "origin probe with the client template failed")
+                }
+            }
+        });
+        base
+    }
+
     pub fn desired_state(&self) -> DesiredState {
         self.snapshot().state.clone()
     }
@@ -526,6 +606,22 @@ impl Node {
             }
         }
         None
+    }
+
+    pub async fn authenticate_off_runtime(
+        &self,
+        body: &[u8],
+        time: i64,
+    ) -> Option<(Vec<u8>, Principal)> {
+        if self.snapshot().users.len() <= INLINE_AUTH_USERS {
+            return self.authenticate(body, time);
+        }
+        let node = self.clone();
+        let body = body.to_vec();
+        tokio::task::spawn_blocking(move || node.authenticate(&body, time))
+            .await
+            .ok()
+            .flatten()
     }
 
     pub async fn apply(&self, state: DesiredState) -> io::Result<u64> {
@@ -914,6 +1010,23 @@ pub fn unix_time() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn merge_profile(mut profile: OriginProfile, measured: &OriginProfile) -> OriginProfile {
+    if measured.cipher_suite != 0 {
+        profile.cipher_suite = measured.cipher_suite;
+    }
+    if measured.key_share_group != 0 {
+        profile.key_share_group = measured.key_share_group;
+    }
+    if !measured.extension_order.is_empty() {
+        profile.extension_order = measured.extension_order.clone();
+    }
+    if measured.record_sizes.len() >= 2 {
+        profile.record_sizes = measured.record_sizes.clone();
+    }
+    profile.post_handshake_sizes = measured.post_handshake_sizes.clone();
+    profile
 }
 
 fn invalid(message: &str) -> io::Error {

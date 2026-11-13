@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::desync;
 use crate::dns::FakeDns;
 use crate::icmp::{self, Echo};
-use crate::packet::{FlowKey, Packet, Reassembly, Transport, udp_packets};
+use crate::packet::{FlowKey, Packet, Reassembly, Transport, abort_fin, udp_packets};
 use crate::resolve::{Resolver, parse_server};
 use crate::rules::{Route, RuleFile, Rules, is_blocked_udp_port, is_null_network};
 
@@ -140,7 +140,10 @@ pub(crate) struct Context {
     resolver: Resolver,
     dns: Arc<Mutex<FakeDns>>,
     pub(crate) counters: Counters,
+    aborted: Mutex<HashMap<FlowKey, Instant>>,
 }
+
+const ABORT_TTL: Duration = Duration::from_secs(30);
 
 impl TunEngine {
     pub fn new(client: Client, options: TunOptions) -> io::Result<Self> {
@@ -296,10 +299,19 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
         (Completed::Infrastructure, result)
     });
     let stack_writer = output.clone();
+    let stack_context = context.clone();
     tasks.spawn(async move {
         let result = async {
             while let Some(packet) = stack_output.next().await {
-                stack_writer.send(packet?).await.map_err(io::Error::other)?;
+                let packet = packet?;
+                match stack_context.reset_instead_of_fin(&packet) {
+                    Some(packets) => {
+                        for packet in packets {
+                            stack_writer.send(packet).await.map_err(io::Error::other)?;
+                        }
+                    }
+                    None => stack_writer.send(packet).await.map_err(io::Error::other)?,
+                }
             }
             Ok(())
         }
@@ -364,7 +376,7 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                             if !tcp.contains(&packet.key) && let Ok(reset) = packet.reset() { let _ = output.try_send(reset); }
                             continue;
                         }
-                        if *syn { tcp.insert(packet.key); }
+                        if *syn { tcp.insert(packet.key); context.forget_abort(&packet.key); }
                         if tcp.contains(&packet.key) || *rst { stack_input.send(raw).await?; }
                         else { context.drop_packet(); if let Ok(reset) = packet.reset() { let _ = output.try_send(reset); } }
                     }
@@ -402,7 +414,7 @@ async fn run_generation<D: PacketIo>(device: Arc<D>, context: Arc<Context>) -> i
                 let key = FlowKey { source, destination };
                 let flow_context = context.clone();
                 let count = FlowCount::new(context.clone());
-                tasks.spawn(async move { let _count = count; let result = tcp_flow(flow_context, stream, destination).await; (Completed::Tcp(key), result) });
+                tasks.spawn(async move { let _count = count; let result = tcp_flow(flow_context, stream, key).await; (Completed::Tcp(key), result) });
             }
             result = tasks.join_next() => {
                 let Some(result) = result else { return Err(io::Error::other("TUN tasks are closed")); };
@@ -478,7 +490,32 @@ impl Context {
             resolver,
             dns,
             counters: Counters::default(),
+            aborted: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn abort_tcp(&self, key: FlowKey) {
+        let now = Instant::now();
+        let mut aborted = self.aborted.lock().unwrap_or_else(|e| e.into_inner());
+        aborted.retain(|_, since| now.duration_since(*since) < ABORT_TTL);
+        aborted.insert(key, now);
+    }
+
+    fn forget_abort(&self, key: &FlowKey) {
+        let mut aborted = self.aborted.lock().unwrap_or_else(|e| e.into_inner());
+        if !aborted.is_empty() {
+            aborted.remove(key);
+        }
+    }
+
+    fn reset_instead_of_fin(&self, packet: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let mut aborted = self.aborted.lock().unwrap_or_else(|e| e.into_inner());
+        if aborted.is_empty() {
+            return None;
+        }
+        let (key, packets) = abort_fin(packet)?;
+        aborted.remove(&key)?;
+        Some(packets)
     }
 
     fn destination(&self, address: SocketAddr) -> io::Result<Address> {
@@ -571,8 +608,9 @@ impl Context {
 async fn tcp_flow(
     context: Arc<Context>,
     mut stream: netstack_smoltcp::TcpStream,
-    target: SocketAddr,
+    key: FlowKey,
 ) -> io::Result<()> {
+    let target = key.destination;
     if target.port() == 53 {
         loop {
             let length = timeout(Duration::from_secs(10), stream.read_u16()).await??;
@@ -635,12 +673,19 @@ async fn tcp_flow(
             copy_bidirectional(&mut stream, &mut direct).await?;
         }
         Plan::Proxy => {
-            let mut lane = context
-                .client
-                .open_tcp(&destination)
-                .await
-                .map_err(io::Error::other)?;
-            copy_bidirectional(&mut stream, &mut lane).await?;
+            let result = async {
+                let mut lane = context
+                    .client
+                    .open_tcp(&destination)
+                    .await
+                    .map_err(io::Error::other)?;
+                copy_bidirectional(&mut stream, &mut lane).await
+            }
+            .await;
+            if result.is_err() {
+                context.abort_tcp(key);
+            }
+            result?;
         }
     }
     Ok(())

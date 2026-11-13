@@ -8,14 +8,18 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 use super::error::{Error, Result};
 use super::passthrough::OriginTarget;
 use super::serverhello::{
-    REC_APPDATA, REC_HANDSHAKE, parse_server_hello, server_hello_extension_order,
+    REC_APPDATA, REC_HANDSHAKE, client_shared_secret, parse_server_hello,
+    server_hello_extension_order,
 };
-use crate::fingerprint::DEFAULT_RECORD_MAX;
+use super::tls13::{ClientHandshake, Step};
+use crate::fingerprint::{BuiltClientHello, DEFAULT_RECORD_MAX, KeyShares};
+use zeroize::Zeroizing;
 
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_RECORD_TIMEOUT: Duration = Duration::from_millis(150);
 const PROBE_RECORDS: usize = 8;
+const PROBE_HANDSHAKE_RECORDS: usize = 32;
 const MAX_PROBE_RECORD: usize = DEFAULT_RECORD_MAX + 16 + 256;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -25,6 +29,8 @@ pub struct OriginProfile {
     pub key_share_group: u16,
     pub extension_order: Vec<u16>,
     pub record_sizes: Vec<usize>,
+    #[serde(skip)]
+    pub post_handshake_sizes: Vec<usize>,
 }
 
 pub fn build_probe_hello(domain: &str) -> Vec<u8> {
@@ -118,6 +124,22 @@ pub async fn probe_origin_at(
 }
 
 pub async fn probe_origin(target: &OriginTarget, client_hello: &[u8]) -> Result<OriginProfile> {
+    probe(target, client_hello, None).await
+}
+
+pub async fn probe_origin_handshake(
+    target: &OriginTarget,
+    hello: BuiltClientHello,
+) -> Result<OriginProfile> {
+    let (record, keys) = hello.into_parts();
+    probe(target, &record, Some(keys)).await
+}
+
+async fn probe(
+    target: &OriginTarget,
+    client_hello: &[u8],
+    keys: Option<KeyShares>,
+) -> Result<OriginProfile> {
     let mut origin = tokio::time::timeout(PROBE_CONNECT_TIMEOUT, target.connect(None))
         .await
         .map_err(|_| Error::Timeout)??;
@@ -148,12 +170,33 @@ pub async fn probe_origin(target: &OriginTarget, client_hello: &[u8]) -> Result<
         cipher_suite: parsed.cipher_suite,
         key_share_group: parsed.group,
         extension_order: server_hello_extension_order(&server_hello).unwrap_or_default(),
-        record_sizes: Vec::new(),
+        ..OriginProfile::default()
     };
+    let mut handshake = keys.and_then(|keys| {
+        let share = keys
+            .shares
+            .into_iter()
+            .find(|share| share.group == parsed.group)?;
+        let shared = Zeroizing::new(client_shared_secret(share, &parsed.key_share).ok()?);
+        ClientHandshake::new(
+            parsed.cipher_suite,
+            client_hello.get(5..)?,
+            &server_hello[5..],
+            &shared,
+        )
+    });
+    let mut finished = false;
 
-    for _ in 0..PROBE_RECORDS {
+    let mut records = 0;
+    while records < PROBE_RECORDS || handshake.is_some() && records < PROBE_HANDSHAKE_RECORDS {
+        records += 1;
+        let wait = if handshake.is_some() && profile.post_handshake_sizes.is_empty() {
+            PROBE_READ_TIMEOUT
+        } else {
+            PROBE_RECORD_TIMEOUT
+        };
         let mut record_header = [0u8; 5];
-        if read_exact_with_timeout(&mut origin, &mut record_header, PROBE_RECORD_TIMEOUT)
+        if read_exact_with_timeout(&mut origin, &mut record_header, wait)
             .await
             .is_err()
         {
@@ -164,14 +207,32 @@ pub async fn probe_origin(target: &OriginTarget, client_hello: &[u8]) -> Result<
             break;
         }
         let mut body = vec![0u8; length];
-        if read_exact_with_timeout(&mut origin, &mut body, PROBE_RECORD_TIMEOUT)
+        if read_exact_with_timeout(&mut origin, &mut body, wait)
             .await
             .is_err()
         {
             break;
         }
-        if record_header[0] == REC_APPDATA {
-            profile.record_sizes.push(5 + length);
+        if record_header[0] != REC_APPDATA {
+            continue;
+        }
+        if finished {
+            profile.post_handshake_sizes.push(5 + length);
+            continue;
+        }
+        profile.record_sizes.push(5 + length);
+        let Some(client) = handshake.as_mut() else {
+            continue;
+        };
+        match client.server_record(&record_header, &body) {
+            Some(Step::More) => {}
+            Some(Step::Finished(flight)) => {
+                tokio::time::timeout(PROBE_READ_TIMEOUT, origin.write_all(&flight))
+                    .await
+                    .map_err(|_| Error::Timeout)??;
+                finished = true;
+            }
+            None => handshake = None,
         }
     }
 
@@ -205,6 +266,89 @@ mod tests {
         assert_eq!(template.key_shares[0].size, 32);
         assert!(!template.early_data);
         assert!(template.psk_identity.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_probe_finishes_the_handshake_and_records_post_handshake_sizes() {
+        use super::super::serverhello::{build_server_hello, generate_server_share};
+        use super::super::tls13::tests::Server;
+        use crate::fingerprint::{Template, X25519};
+
+        let template =
+            Template::from_json(include_str!("../../testdata/template.json")).expect("template");
+        let hello = template.build(&[0x11; 32]).expect("hello");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let origin = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.expect("hello header");
+            let mut client_hello = header.to_vec();
+            client_hello.resize(
+                5 + usize::from(u16::from_be_bytes([header[3], header[4]])),
+                0,
+            );
+            stream
+                .read_exact(&mut client_hello[5..])
+                .await
+                .expect("hello body");
+            let parsed = parse_client_hello(&client_hello).expect("parse hello");
+            let spec = parsed
+                .key_shares
+                .iter()
+                .find(|spec| spec.group == X25519)
+                .expect("X25519 share");
+            let share = generate_server_share(spec).expect("server share");
+            let server_hello = build_server_hello(
+                [5u8; 32],
+                &client_hello[44..76],
+                0x1301,
+                X25519,
+                &share.public,
+                &[0x002b, 0x0033],
+            )
+            .expect("ServerHello");
+            let mut server = Server::new(
+                0x1301,
+                &client_hello[5..],
+                &server_hello[5..],
+                &share.shared,
+            );
+            let mut flight = server_hello.clone();
+            flight.extend_from_slice(&server.flight(3000));
+            stream.write_all(&flight).await.expect("server flight");
+            let mut change = [0u8; 6];
+            stream.read_exact(&mut change).await.expect("CCS");
+            assert_eq!(change, [0x14, 0x03, 0x03, 0x00, 0x01, 0x01]);
+            let mut header = [0u8; 5];
+            stream
+                .read_exact(&mut header)
+                .await
+                .expect("Finished header");
+            let mut body = vec![0u8; usize::from(u16::from_be_bytes([header[3], header[4]]))];
+            stream.read_exact(&mut body).await.expect("Finished body");
+            assert!(
+                server.check_client_finished(&header, &body),
+                "client Finished verifies"
+            );
+            for size in [250u16, 260] {
+                let mut record = vec![REC_APPDATA, 0x03, 0x03];
+                record.extend_from_slice(&size.to_be_bytes());
+                record.resize(5 + usize::from(size), 0x33);
+                stream.write_all(&record).await.expect("ticket");
+            }
+            let mut rest = Vec::new();
+            let _ = stream.read_to_end(&mut rest).await;
+        });
+        let profile = probe_origin_handshake(&OriginTarget::direct("127.0.0.1", port), hello)
+            .await
+            .expect("probe");
+        assert_eq!(profile.key_share_group, X25519);
+        assert_eq!(profile.record_sizes.len(), 3);
+        assert_eq!(profile.post_handshake_sizes, [255, 265]);
+        origin.await.expect("origin");
     }
 
     #[test]

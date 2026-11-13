@@ -102,6 +102,9 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     let mut config = ServerConfig::new(origin_host, origin_port);
     config.origin = file.origin.into_profile()?;
     config.replay_ttl = replay_ttl;
+    if let Some(capacity) = file.replay_capacity {
+        config.replay_capacity = capacity;
+    }
     config.mux = mux;
     config.udp_idle = udp_idle;
     config.max_connections = max_connections;
@@ -113,8 +116,16 @@ pub fn load_server(path: impl AsRef<Path>) -> Result<ServerSettings, ConfigError
     }
     config.tcp_idle = tcp_idle;
     config.target = file.target.into_policy();
-    config.tcp_notsent_lowat = socket_size(file.tcp_notsent_lowat, "server", "tcp_notsent_lowat")?;
+    config.tcp_notsent_lowat = socket_size(
+        Some(
+            file.tcp_notsent_lowat
+                .unwrap_or(crate::net::DEFAULT_TCP_NOTSENT_LOWAT),
+        ),
+        "server",
+        "tcp_notsent_lowat",
+    )?;
     config.proxy_protocol = file.proxy_protocol.unwrap_or(false);
+    config.post_handshake_records = file.post_handshake_records.unwrap_or(false);
 
     let mut node = file.node;
     let node_base = std::fs::canonicalize(if base.as_os_str().is_empty() {
@@ -241,6 +252,9 @@ pub fn build_server(mut config: ServerConfig) -> Result<ServerConfig, ConfigErro
             AUTH_WINDOW.as_millis()
         )));
     }
+    if config.replay_capacity == 0 {
+        return Err(invalid("server replay_capacity must be greater than zero"));
+    }
     validate_duration(config.udp_idle, "server udp idle_ms")?;
     validate_mux(&config.mux, "server")?;
     if config.max_connections == 0 {
@@ -290,9 +304,11 @@ struct ServerFile {
     listen: Option<String>,
     public_port: Option<u16>,
     proxy_protocol: Option<bool>,
+    post_handshake_records: Option<bool>,
     origin_host: Option<String>,
     origin_port: Option<u16>,
     replay_ttl_ms: Option<u64>,
+    replay_capacity: Option<usize>,
     max_connections: Option<usize>,
     max_user_sessions: Option<usize>,
     max_user_lanes: Option<usize>,
@@ -365,6 +381,7 @@ impl OriginFile {
             key_share_group: self.key_share_group.unwrap_or(default.key_share_group),
             extension_order: self.extension_order.unwrap_or(default.extension_order),
             record_sizes,
+            ..OriginProfile::default()
         })
     }
 }
@@ -414,7 +431,7 @@ impl MuxFile {
             config.ping_interval = Duration::from_millis(value);
         }
         if let Some(value) = self.probe_timeout_ms {
-            config.probe_timeout = Duration::from_millis(value);
+            config.probe_timeout = Some(Duration::from_millis(value));
         }
         if let Some(value) = self.rtt_interval_ms {
             config.rtt_interval = Some(Duration::from_millis(value));
@@ -490,7 +507,10 @@ fn validate_mux(config: &mux::Config, role: &str) -> Result<(), ConfigError> {
         ("settings_timeout_ms", config.settings_timeout),
         ("target_timeout_ms", config.target_timeout),
         ("ping_interval_ms", config.ping_interval),
-        ("probe_timeout_ms", config.probe_timeout),
+        (
+            "probe_timeout_ms",
+            config.probe_timeout.unwrap_or(config.ping_interval),
+        ),
         ("surplus_idle_ms", config.surplus_idle),
         (
             "rtt_interval_ms",

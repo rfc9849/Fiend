@@ -24,3 +24,5 @@ On Android, capture with [PCAPdroid](https://github.com/emanuele-f/PCAPdroid) in
 In the panel, open **Disguises**, click **Add disguise**, select **Import a file** and choose `hello.bin`. Then select the disguise on the node page.
 
 If the panel does not accept the file, make sure that you exported the **Record Layer** line. If it still fails, the app does not fit. Try a different app.
+
+Chrome and other Chromium browsers put the ClientHello extensions in a new random order on every connection. For a capture from such a browser, Fiend does the same, so captures with different extension orders give the same disguise.

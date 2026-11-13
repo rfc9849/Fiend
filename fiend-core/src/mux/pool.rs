@@ -13,7 +13,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout, timeout_at};
 use super::config::Config;
 use super::error::{Error, Result};
 use super::lane::{H2Lane, LaneKind};
-use super::link::{ClientLink, LOAD_INTERVAL, LaneReservation};
+use super::link::{ClientLink, LOAD_INTERVAL, LaneReservation, LinkIo};
 use crate::transport::{self, Session};
 
 pub type DialFuture<S> =
@@ -174,7 +174,7 @@ pub struct PoolStats {
 
 impl<S> LinkPool<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + LinkIo + Unpin + Send + 'static,
 {
     pub fn new<F, Fut>(config: Config, dial: F) -> Self
     where
@@ -427,7 +427,7 @@ impl<S> Drop for Demand<'_, S> {
 
 impl<S> PoolInner<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + LinkIo + Unpin + Send + 'static,
 {
     fn start_worker(self: &Arc<Self>) {
         let runtime = match Handle::try_current() {
@@ -459,6 +459,7 @@ where
         };
         self.wake.notify_one();
         let mut spread_until: Option<Instant> = None;
+        let mut last_pass = false;
         loop {
             let ready = self.ready.notified();
             tokio::pin!(ready);
@@ -481,7 +482,10 @@ where
                         .iter()
                         .any(|link| !link.is_closed() && link.has_capacity())
                     && !state.links.iter().any(|link| healthy(link, bar));
-                let spread = (loaded || doubtful)
+                let lone_bulk = state.links.len() == 1
+                    && state.links.len() < self.config.max_links
+                    && state.links[0].is_bulk();
+                let spread = (loaded || doubtful || lone_bulk)
                     && state.backoff.delay.is_zero()
                     && spread_until.is_none_or(|until| now < until);
                 if spread {
@@ -519,7 +523,10 @@ where
                 .filter(|until| now < *until)
                 .map_or(deadline, |until| until.min(deadline));
             if timeout_at(wake_at, ready).await.is_err() && Instant::now() >= deadline {
-                return Err(Error::Timeout);
+                if last_pass || spread_until.is_none() {
+                    return Err(Error::Timeout);
+                }
+                last_pass = true;
             }
         }
     }

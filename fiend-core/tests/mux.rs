@@ -642,7 +642,7 @@ async fn interactive_latency_stays_low_under_bulk() {
 async fn idle_link_survives_keepalive() {
     let config = Config {
         ping_interval: Duration::from_millis(30),
-        probe_timeout: Duration::from_millis(200),
+        probe_timeout: Some(Duration::from_millis(200)),
         ..Config::default()
     };
     let pool = test_pool_with_config(config, echo_handler());

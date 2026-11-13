@@ -33,7 +33,7 @@ impl ClientConfig {
             template,
             mux: mux::Config::default(),
             handshake_timeout: Duration::from_secs(10),
-            tcp_notsent_lowat: 0,
+            tcp_notsent_lowat: crate::net::DEFAULT_TCP_NOTSENT_LOWAT,
             protect_socket: Arc::new(|_| Ok(())),
         }
     }

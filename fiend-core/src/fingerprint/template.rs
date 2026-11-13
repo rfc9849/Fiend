@@ -170,8 +170,21 @@ impl Template {
         self.build_with(secret, unix_time, true)
     }
 
+    #[doc(hidden)]
+    pub fn build_in_capture_order(&self, secret: &[u8]) -> Result<BuiltClientHello> {
+        self.validate()?;
+        self.fill(secret, now_unix_seconds(), true)
+    }
+
     fn build_with(&self, secret: &[u8], unix_time: i64, vary: bool) -> Result<BuiltClientHello> {
         self.validate()?;
+        if vary && self.permutes_extensions() {
+            return self.permuted().fill(secret, unix_time, vary);
+        }
+        self.fill(secret, unix_time, vary)
+    }
+
+    fn fill(&self, secret: &[u8], unix_time: i64, vary: bool) -> Result<BuiltClientHello> {
         let mut record = self.raw.clone();
 
         rand::fill(&mut record[self.tls_random.offset..self.tls_random.offset + 32]);
@@ -236,6 +249,128 @@ impl Template {
             record,
             key_shares: KeyShares { shares: generated },
         })
+    }
+
+    pub fn extension_blocks(&self) -> Vec<(u16, std::ops::Range<usize>)> {
+        let mut blocks = Vec::new();
+        let Some(length) = self
+            .raw
+            .get(self.extensions_offset..self.extensions_offset + 2)
+        else {
+            return blocks;
+        };
+        let end =
+            (self.extensions_offset + 2 + usize::from(u16::from_be_bytes([length[0], length[1]])))
+                .min(self.raw.len());
+        let mut position = self.extensions_offset + 2;
+        while position + 4 <= end {
+            let kind = u16::from_be_bytes([self.raw[position], self.raw[position + 1]]);
+            let size = usize::from(u16::from_be_bytes([
+                self.raw[position + 2],
+                self.raw[position + 3],
+            ]));
+            let next = position + 4 + size;
+            if next > end {
+                break;
+            }
+            blocks.push((kind, position..next));
+            position = next;
+        }
+        blocks
+    }
+
+    pub fn shape_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        self.domain.to_ascii_lowercase().hash(&mut hasher);
+        for suite in self
+            .cipher_suites
+            .iter()
+            .filter(|suite| !is_grease(**suite))
+        {
+            suite.hash(&mut hasher);
+        }
+        for spec in self.key_shares.iter().filter(|spec| !is_grease(spec.group)) {
+            spec.group.hash(&mut hasher);
+        }
+        let mut kinds: Vec<u16> = self
+            .extension_blocks()
+            .into_iter()
+            .map(|(kind, _)| kind)
+            .filter(|kind| !is_grease(*kind))
+            .collect();
+        kinds.sort_unstable();
+        kinds.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn permutes_extensions(&self) -> bool {
+        self.extension_blocks()
+            .iter()
+            .any(|(kind, _)| matches!(*kind, EXT_ALPS_OLD | EXT_ALPS))
+    }
+
+    fn permuted(&self) -> Template {
+        let blocks = self.extension_blocks();
+        let movable: Vec<usize> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, (kind, _))| !is_grease(*kind) && !matches!(*kind, EXT_PADDING | EXT_PSK))
+            .map(|(index, _)| index)
+            .collect();
+        let mut order: Vec<usize> = (0..blocks.len()).collect();
+        let mut shuffled = movable.clone();
+        for index in (1..shuffled.len()).rev() {
+            let mut byte = [0u8; 4];
+            rand::fill(&mut byte);
+            let pick = u32::from_be_bytes(byte) as usize % (index + 1);
+            shuffled.swap(index, pick);
+        }
+        for (slot, block) in movable.iter().zip(&shuffled) {
+            order[*slot] = *block;
+        }
+        let Some(start) = blocks.first().map(|(_, range)| range.start) else {
+            return self.clone();
+        };
+        let end = blocks.last().map_or(start, |(_, range)| range.end);
+        let mut raw = self.raw[..start].to_vec();
+        let mut moved = Vec::with_capacity(blocks.len());
+        for index in order {
+            let range = &blocks[index].1;
+            moved.push((range.clone(), raw.len()));
+            raw.extend_from_slice(&self.raw[range.clone()]);
+        }
+        raw.extend_from_slice(&self.raw[end..]);
+        let map = |offset: usize| {
+            moved
+                .iter()
+                .find(|(range, _)| range.contains(&offset))
+                .map_or(offset, |(range, at)| at + offset - range.start)
+        };
+        let field = |field: FieldOffset| FieldOffset {
+            offset: map(field.offset),
+            size: field.size,
+        };
+        let mut template = self.clone();
+        template.raw = raw;
+        template.key_share = field(self.key_share);
+        template.psk_identity = self.psk_identity.map(field);
+        template.ticket_age = self.ticket_age.map(field);
+        template.psk_binder = self.psk_binder.map(field);
+        for spec in &mut template.key_shares {
+            spec.offset = map(spec.offset);
+        }
+        for grease in &mut template.grease {
+            grease.value_offset = map(grease.value_offset);
+            grease.data_offset = grease.data_offset.map(map);
+        }
+        template.ech = self.ech.map(|ech| EchGrease {
+            extension: map(ech.extension),
+            config_id: map(ech.config_id),
+            enc: field(ech.enc),
+            payload: field(ech.payload),
+        });
+        template
     }
 
     fn resize_ech(&self, record: &mut Vec<u8>, ech: EchGrease, size: usize) {
@@ -410,6 +545,15 @@ impl Template {
         }
         Ok(())
     }
+}
+
+const EXT_PADDING: u16 = 0x0015;
+const EXT_PSK: u16 = 0x0029;
+const EXT_ALPS_OLD: u16 = 0x4469;
+const EXT_ALPS: u16 = 0x44cd;
+
+pub(crate) fn is_grease(value: u16) -> bool {
+    value & 0x0f0f == 0x0a0a && value >> 8 == value & 0xff
 }
 
 fn grease_values() -> [u16; GreaseKind::COUNT] {

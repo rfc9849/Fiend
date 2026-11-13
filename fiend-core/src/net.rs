@@ -7,34 +7,7 @@ use tokio::net::{TcpListener, TcpSocket, TcpStream, lookup_host};
 
 pub type ProtectSocket = std::sync::Arc<dyn Fn(&Socket) -> io::Result<()> + Send + Sync>;
 
-/// Per-link socket buffer. A link carries every lane of a session, so its
-/// window must cover the bandwidth delay product of a long path. The system
-/// default is smaller and limits one link to a few hundred Mbit/s.
-pub const LINK_BUFFER_BYTES: usize = 4 << 20;
-
-/// An explicit socket buffer turns off kernel autotuning, and the kernel caps
-/// it at `net.core.{r,w}mem_max`. Some systems cap that below the autotuning
-/// ceiling, for example an Android emulator with 256 KiB, so a fixed size
-/// would make the window smaller. Set the size only when the cap can hold it.
-fn buffer_target(hard_cap: Option<usize>) -> Option<usize> {
-    let hard_cap = hard_cap?;
-    (hard_cap >= LINK_BUFFER_BYTES).then_some(LINK_BUFFER_BYTES)
-}
-
-#[cfg(target_os = "linux")]
-fn hard_cap(recv: bool) -> Option<usize> {
-    let path = if recv {
-        "/proc/sys/net/core/rmem_max"
-    } else {
-        "/proc/sys/net/core/wmem_max"
-    };
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn hard_cap(_recv: bool) -> Option<usize> {
-    None
-}
+pub const DEFAULT_TCP_NOTSENT_LOWAT: u32 = 128 << 10;
 
 #[doc(hidden)]
 pub trait AsSocketRef {
@@ -53,20 +26,6 @@ impl<T: std::os::windows::io::AsSocket> AsSocketRef for T {
     fn socket_ref(&self) -> socket2::SockRef<'_> {
         socket2::SockRef::from(self)
     }
-}
-
-pub fn set_link_buffers<S>(stream: &S) -> io::Result<()>
-where
-    S: AsSocketRef,
-{
-    let socket = stream.socket_ref();
-    if let Some(size) = buffer_target(hard_cap(true)) {
-        socket.set_recv_buffer_size(size)?;
-    }
-    if let Some(size) = buffer_target(hard_cap(false)) {
-        socket.set_send_buffer_size(size)?;
-    }
-    Ok(())
 }
 
 pub const CONNECT_ATTEMPTS: usize = 3;
@@ -92,9 +51,6 @@ async fn connect_once(address: SocketAddr, protect: ProtectSocket) -> io::Result
         Some(Protocol::TCP),
     )?;
     socket.set_nonblocking(true)?;
-    if let Err(error) = set_link_buffers(&socket) {
-        tracing::debug!(%error, "cannot set link buffers");
-    }
     protect(&socket)?;
     TcpSocket::from_std_stream(socket.into())
         .connect(address)
@@ -211,6 +167,42 @@ where
     socket2::SockRef::from(stream).set_tcp_notsent_lowat(bytes)
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn ack_probe(stream: &TcpStream) -> Option<AckProbe> {
+    use std::os::fd::{AsFd, AsRawFd};
+    let fd = stream.as_fd().try_clone_to_owned().ok()?;
+    bytes_acked(fd.as_raw_fd())?;
+    Some(Box::new(move || bytes_acked(fd.as_raw_fd())))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn ack_probe(_stream: &TcpStream) -> Option<AckProbe> {
+    None
+}
+
+pub type AckProbe = Box<dyn Fn() -> Option<u64> + Send + Sync>;
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[allow(unsafe_code)]
+fn bytes_acked(fd: std::os::fd::RawFd) -> Option<u64> {
+    const BYTES_ACKED: std::ops::Range<usize> = 120..128;
+    let mut info = [0u8; 256];
+    let mut length = info.len() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_INFO,
+            info.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 || (length as usize) < BYTES_ACKED.end {
+        return None;
+    }
+    Some(u64::from_ne_bytes(info[BYTES_ACKED].try_into().ok()?))
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn set_tcp_notsent_lowat<S>(_stream: &S, bytes: u32) -> io::Result<()> {
     let _ = bytes;
@@ -220,32 +212,6 @@ pub fn set_tcp_notsent_lowat<S>(_stream: &S, bytes: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sets_link_buffers() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let address = listener.local_addr().expect("address");
-        let stream = std::net::TcpStream::connect(address).expect("connect");
-        let _peer = listener.accept().expect("accept");
-        set_link_buffers(&stream).expect("set buffers");
-        let socket = socket2::SockRef::from(&stream);
-        if buffer_target(hard_cap(true)).is_some() {
-            assert!(socket.recv_buffer_size().expect("read receive") >= LINK_BUFFER_BYTES);
-        }
-        if buffer_target(hard_cap(false)).is_some() {
-            assert!(socket.send_buffer_size().expect("read send") >= LINK_BUFFER_BYTES);
-        }
-    }
-
-    #[test]
-    fn keeps_autotuning_below_the_hard_cap() {
-        assert_eq!(buffer_target(None), None);
-        assert_eq!(buffer_target(Some(LINK_BUFFER_BYTES - 1)), None);
-        assert_eq!(
-            buffer_target(Some(LINK_BUFFER_BYTES)),
-            Some(LINK_BUFFER_BYTES)
-        );
-    }
 
     type Attempt = std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<u32>> + Send>>;
 

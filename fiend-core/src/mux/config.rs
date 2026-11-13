@@ -1,5 +1,11 @@
 use std::time::Duration;
 
+const PROBE_FLOOR: Duration = Duration::from_secs(3);
+const PROBE_CEILING: Duration = Duration::from_secs(20);
+const PROBE_UNMEASURED: Duration = Duration::from_secs(5);
+const PROBE_RTTS: u32 = 8;
+const PROBE_MARGIN: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub max_links: usize,
@@ -9,7 +15,7 @@ pub struct Config {
     pub settings_timeout: Duration,
     pub target_timeout: Duration,
     pub ping_interval: Duration,
-    pub probe_timeout: Duration,
+    pub probe_timeout: Option<Duration>,
     pub rtt_interval: Option<Duration>,
     pub surplus_idle: Duration,
     pub attempts: usize,
@@ -32,7 +38,7 @@ impl Default for Config {
             settings_timeout: Duration::from_secs(15),
             target_timeout: Duration::from_secs(15),
             ping_interval: Duration::from_secs(30),
-            probe_timeout: Duration::from_secs(5),
+            probe_timeout: None,
             rtt_interval: None,
             surplus_idle: Duration::from_secs(30),
             attempts: 3,
@@ -47,6 +53,15 @@ impl Default for Config {
     }
 }
 
+pub(crate) fn probe_timeout(fixed: Option<Duration>, srtt: Option<Duration>) -> Duration {
+    if let Some(fixed) = fixed {
+        return fixed;
+    }
+    srtt.map_or(PROBE_UNMEASURED, |srtt| {
+        (srtt.saturating_mul(PROBE_RTTS) + PROBE_MARGIN).clamp(PROBE_FLOOR, PROBE_CEILING)
+    })
+}
+
 impl Config {
     pub(crate) fn ping_tick(&self) -> Duration {
         self.rtt_interval
@@ -55,8 +70,37 @@ impl Config {
 
     pub(crate) fn rtt_max_age(&self) -> Duration {
         match self.rtt_interval {
-            Some(_) => self.ping_tick() * 2 + self.probe_timeout,
+            Some(_) => self.ping_tick() * 2 + self.probe_timeout.unwrap_or(PROBE_CEILING),
             None => Duration::MAX,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_probe_timeout_follows_the_rtt_unless_it_is_set() {
+        assert_eq!(probe_timeout(None, None), PROBE_UNMEASURED);
+        assert_eq!(
+            probe_timeout(None, Some(Duration::from_millis(20))),
+            PROBE_FLOOR
+        );
+        assert_eq!(
+            probe_timeout(None, Some(Duration::from_millis(600))),
+            Duration::from_millis(5800)
+        );
+        assert_eq!(
+            probe_timeout(None, Some(Duration::from_secs(10))),
+            PROBE_CEILING
+        );
+        assert_eq!(
+            probe_timeout(
+                Some(Duration::from_secs(7)),
+                Some(Duration::from_millis(600))
+            ),
+            Duration::from_secs(7)
+        );
     }
 }

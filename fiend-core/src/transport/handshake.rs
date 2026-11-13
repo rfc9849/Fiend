@@ -168,21 +168,25 @@ pub async fn accept<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    accept_with(stream, replay, origin, |body, time| {
-        verify_auth_token(body, secret, time).then(|| secret.to_vec())
-    })
+    accept_with(
+        stream,
+        replay,
+        |_| origin.clone(),
+        async |body: &[u8], time| verify_auth_token(body, secret, time).then(|| secret.to_vec()),
+    )
     .await
 }
 
-pub async fn accept_with<S, F>(
+pub async fn accept_with<S, O, F>(
     mut stream: S,
     replay: &FreshnessCheck,
-    origin: &OriginProfile,
+    origin: O,
     select: F,
 ) -> Result<AcceptOutcome<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    F: FnOnce(&[u8], i64) -> Option<Vec<u8>>,
+    O: FnOnce(&Template) -> OriginProfile,
+    F: AsyncFnOnce(&[u8], i64) -> Option<Vec<u8>>,
 {
     let deadline = Instant::now() + PRE_AUTH_TIMEOUT;
     let mut buffered = Vec::with_capacity(2048);
@@ -205,7 +209,7 @@ where
     if body.len() < 71 || body[0] != 0x01 || body[38] != 32 {
         return passthrough(stream, buffered, PassthroughReason::NotClientHello);
     }
-    let Some(secret) = select(body, unix_time()) else {
+    let Some(secret) = select(body, unix_time()).await else {
         return passthrough(stream, buffered, PassthroughReason::UnknownKey);
     };
     let secret = Zeroizing::new(secret);
@@ -241,6 +245,7 @@ where
         }
     }
 
+    let origin = origin(&template);
     let chosen = match choose_server_share(&template, origin.key_share_group) {
         Ok(share) => share,
         Err(_) => return passthrough(stream, buffered, PassthroughReason::KeyShare),
@@ -292,12 +297,13 @@ where
     let shared = Zeroizing::new(server_share.shared);
     let pair = crypto::derive_session_keys(secret, &tls_random, &server_random, &shared)?;
     let (write_cipher, read_cipher) = pair.for_server();
-    Ok(AcceptOutcome::Session(Box::new(Session::new(
-        stream,
-        write_cipher,
-        read_cipher,
-        template.record_max,
-    ))))
+    let mut session = Session::new(stream, write_cipher, read_cipher, template.record_max);
+    if !origin.post_handshake_sizes.is_empty() {
+        session
+            .write_handshake_records(&origin.post_handshake_sizes)
+            .await?;
+    }
+    Ok(AcceptOutcome::Session(Box::new(session)))
 }
 
 fn passthrough<S>(

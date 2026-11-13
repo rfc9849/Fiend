@@ -448,6 +448,58 @@ async fn tcp_ipv6_uses_real_lanes_and_preserves_payload() {
 }
 
 #[tokio::test]
+async fn a_broken_tunnel_stream_resets_the_app_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 2];
+        stream.read_exact(&mut request).await.unwrap();
+        stream.write_all(b"partial").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        socket2::SockRef::from(&stream)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
+    });
+    let (engine, _client, mut peer, task) = stack(TunOptions::default()).await;
+    let source: SocketAddr = "10.0.0.2:30001".parse().unwrap();
+    let next = tcp_handshake(&mut peer, source, target).await;
+    peer.send(tcp_packet(source, target, 1001, Some(next), false, b"go"))
+        .await;
+    let mut answer = Vec::new();
+    loop {
+        let raw = peer.recv().await;
+        let parsed = SlicedPacket::from_ip(&raw).unwrap();
+        let Some(TransportSlice::Tcp(tcp)) = parsed.transport else {
+            panic!("TCP required")
+        };
+        assert!(!tcp.fin(), "a broken stream must not end with FIN");
+        if tcp.rst() {
+            assert_eq!(
+                tcp.sequence_number(),
+                next.wrapping_add(answer.len() as u32)
+            );
+            break;
+        }
+        if !tcp.payload().is_empty() {
+            answer.extend_from_slice(tcp.payload());
+            peer.send(tcp_packet(
+                source,
+                target,
+                1003,
+                Some(next.wrapping_add(answer.len() as u32)),
+                false,
+                &[],
+            ))
+            .await;
+        }
+    }
+    assert_eq!(answer, b"partial");
+    engine.stop();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn tcp_dns_is_local_and_does_not_open_a_lane() {
     let (engine, client, mut peer, task) = stack(TunOptions::default()).await;
     let mut query = Message::query();

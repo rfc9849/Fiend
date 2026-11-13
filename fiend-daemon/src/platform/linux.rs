@@ -6,7 +6,7 @@
 //! a resolv.conf fallback.
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,8 @@ const TUN_V6: Ipv6Addr = Ipv6Addr::new(0xfd42, 0x6669, 0x656e, 0x6400, 0, 0, 0, 
 const DNS_ADDRESS: &str = "198.18.0.1";
 const RESOLV: &str = "/etc/resolv.conf";
 const MONITOR_PERIOD: Duration = Duration::from_secs(2);
+const EVENT_WAIT: Duration = Duration::from_millis(100);
+const EVENT_SETTLE: Duration = Duration::from_millis(300);
 const RULE_CHECK: Duration = Duration::from_secs(10);
 const PORT_ATTEMPTS: usize = 32;
 const MODE: &str = "FIEND_NETWORK_MODE";
@@ -80,18 +82,33 @@ fn monitor(
     std::thread::Builder::new()
         .name("fiend-network-monitor".into())
         .spawn(move || {
-            let mut last = current_default();
+            let events = route_events()
+                .inspect_err(|error| tracing::warn!(%error, "cannot watch netlink route events"))
+                .ok();
+            let mut last = current_network();
             let mut since_check = Duration::ZERO;
             loop {
                 let mut waited = Duration::ZERO;
-                while waited < MONITOR_PERIOD {
+                let mut changed_at = None;
+                while waited < MONITOR_PERIOD
+                    && changed_at.is_none_or(|at: Duration| waited < at + EVENT_SETTLE)
+                {
                     if stop.load(Ordering::Acquire) {
                         return;
                     }
-                    std::thread::sleep(Duration::from_millis(100));
-                    waited += Duration::from_millis(100);
+                    let event = match &events {
+                        Some(events) => route_event(events),
+                        None => {
+                            std::thread::sleep(EVENT_WAIT);
+                            false
+                        }
+                    };
+                    waited += EVENT_WAIT;
+                    if event {
+                        changed_at = Some(waited);
+                    }
                 }
-                let now = current_default();
+                let now = current_network();
                 if now != last {
                     tracing::info!("primary network changed");
                     last = now;
@@ -282,6 +299,126 @@ fn current_default() -> Option<String> {
     std::fs::read_to_string("/proc/net/route")
         .ok()
         .and_then(|text| default_route(&text))
+}
+
+pub fn default_routes_v6(table: &str) -> Vec<String> {
+    const RTF_UP: u32 = 0x0001;
+    const RTF_REJECT: u32 = 0x0200;
+    let mut routes: Vec<String> = table
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let flags = u32::from_str_radix(fields.get(8)?, 16).ok()?;
+            let default = fields[0].bytes().all(|byte| byte == b'0') && fields[1] == "00";
+            (fields.len() >= 10
+                && default
+                && flags & RTF_UP != 0
+                && flags & RTF_REJECT == 0
+                && fields[9] != "lo"
+                && fields[9] != IFACE)
+                .then(|| format!("{} {}", fields[9], fields[4]))
+        })
+        .collect();
+    routes.sort();
+    routes.dedup();
+    routes
+}
+
+fn network_state(
+    v4: Option<String>,
+    v6: Vec<String>,
+    addresses: impl IntoIterator<Item = (String, IpAddr)>,
+) -> Vec<String> {
+    let interfaces: Vec<&str> = v4
+        .iter()
+        .chain(&v6)
+        .filter_map(|route| route.split_whitespace().next())
+        .collect();
+    let mut state: Vec<String> = v4.iter().chain(&v6).cloned().collect();
+    for (interface, address) in addresses {
+        if !interfaces.contains(&interface.as_str()) {
+            continue;
+        }
+        let address = match address {
+            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => v4.to_string(),
+            IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 != 0xfe80 && !v6.is_loopback() => {
+                let segments = v6.segments();
+                format!(
+                    "{:x}:{:x}:{:x}:{:x}::/64",
+                    segments[0], segments[1], segments[2], segments[3]
+                )
+            }
+            _ => continue,
+        };
+        state.push(format!("{interface} {address}"));
+    }
+    state.sort();
+    state.dedup();
+    state
+}
+
+fn current_network() -> Vec<String> {
+    let v6 = std::fs::read_to_string("/proc/net/ipv6_route")
+        .map(|text| default_routes_v6(&text))
+        .unwrap_or_default();
+    let addresses = nix::ifaddrs::getifaddrs()
+        .map(|addresses| {
+            addresses
+                .filter_map(|entry| {
+                    let address = entry.address?;
+                    let ip = if let Some(v4) = address.as_sockaddr_in() {
+                        IpAddr::V4(v4.ip())
+                    } else {
+                        IpAddr::V6(address.as_sockaddr_in6()?.ip())
+                    };
+                    Some((entry.interface_name, ip))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    network_state(current_default(), v6, addresses)
+}
+
+fn route_events() -> io::Result<socket2::Socket> {
+    use nix::sys::socket::{
+        AddressFamily, NetlinkAddr, SockFlag, SockProtocol, SockType, bind, socket,
+    };
+    let groups = nix::libc::RTMGRP_IPV4_IFADDR
+        | nix::libc::RTMGRP_IPV4_ROUTE
+        | nix::libc::RTMGRP_IPV6_IFADDR
+        | nix::libc::RTMGRP_IPV6_ROUTE;
+    let fd = socket(
+        AddressFamily::Netlink,
+        SockType::Raw,
+        SockFlag::SOCK_CLOEXEC,
+        SockProtocol::NetlinkRoute,
+    )?;
+    bind(
+        std::os::fd::AsRawFd::as_raw_fd(&fd),
+        &NetlinkAddr::new(0, groups as u32),
+    )?;
+    let socket = socket2::Socket::from(fd);
+    socket.set_read_timeout(Some(EVENT_WAIT))?;
+    Ok(socket)
+}
+
+fn route_event(socket: &socket2::Socket) -> bool {
+    let mut buffer = [std::mem::MaybeUninit::<u8>::uninit(); 8192];
+    let mut seen = false;
+    loop {
+        match socket.recv(&mut buffer) {
+            Ok(_) => {
+                seen = true;
+                if socket.set_nonblocking(true).is_err() {
+                    break;
+                }
+            }
+            Err(error) if error.raw_os_error() == Some(nix::libc::ENOBUFS) => seen = true,
+            Err(_) => break,
+        }
+    }
+    let _ = socket.set_nonblocking(false);
+    seen
 }
 
 type Listeners = (Vec<socket2::Socket>, Vec<socket2::Socket>);
@@ -669,5 +806,43 @@ eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\n\
 eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\n";
         assert_eq!(default_route(table).as_deref(), Some("eth0 0101A8C0"));
         assert_eq!(default_route("Iface\n"), None);
+    }
+
+    #[test]
+    fn the_ipv6_default_route_skips_reject_and_tun_routes() {
+        let table = "\
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003 wlan0
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000001 00000000 00000001 fiend0
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 lo
+20010db8000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001 wlan0
+";
+        assert_eq!(
+            default_routes_v6(table),
+            ["wlan0 fe800000000000000000000000000001"]
+        );
+        assert!(default_routes_v6("").is_empty());
+    }
+
+    #[test]
+    fn a_new_address_on_the_default_interface_is_a_new_network() {
+        let route = || Some("eth0 0101A8C0".to_owned());
+        let v6 = || vec!["eth0 fe800000000000000000000000000001".to_owned()];
+        let at = |v4: &str, v6: &str| {
+            vec![
+                ("eth0".to_owned(), v4.parse().unwrap()),
+                ("eth0".to_owned(), v6.parse().unwrap()),
+                ("eth0".to_owned(), "fe80::1234".parse().unwrap()),
+                ("docker0".to_owned(), "172.17.0.1".parse().unwrap()),
+            ]
+        };
+        let before = network_state(route(), v6(), at("192.168.1.10", "2001:db8:1:2::10"));
+        let rotated = network_state(route(), v6(), at("192.168.1.10", "2001:db8:1:2::99"));
+        let renumbered = network_state(route(), v6(), at("192.168.1.11", "2001:db8:1:2::10"));
+        let moved = network_state(route(), v6(), at("192.168.1.10", "2001:db8:9:2::10"));
+        assert_eq!(before, rotated, "a new temporary address keeps the /64");
+        assert_ne!(before, renumbered);
+        assert_ne!(before, moved);
+        assert!(!before.iter().any(|entry| entry.contains("docker0")));
+        assert!(!before.iter().any(|entry| entry.contains("fe80::1234")));
     }
 }

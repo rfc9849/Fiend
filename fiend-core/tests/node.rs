@@ -420,6 +420,114 @@ fn prepared_hmac_keys_match_auth_tokens() {
 }
 
 #[tokio::test]
+async fn the_origin_is_probed_with_the_client_template() {
+    use fiend_core::fingerprint::{X25519, X25519_MLKEM768, parse_client_hello};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (offered, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            let mut hello = header.to_vec();
+            hello.resize(
+                5 + usize::from(u16::from_be_bytes([header[3], header[4]])),
+                0,
+            );
+            stream.read_exact(&mut hello[5..]).await.unwrap();
+            let groups: Vec<u16> = parse_client_hello(&hello)
+                .unwrap()
+                .key_shares
+                .iter()
+                .map(|spec| spec.group)
+                .collect();
+            let _ = offered.send(groups.clone());
+            let (group, key) = if groups.contains(&X25519_MLKEM768) {
+                (X25519_MLKEM768, vec![7u8; 1120])
+            } else {
+                (X25519, vec![7u8; 32])
+            };
+            let mut response = fiend_core::transport::build_server_hello(
+                [9u8; 32],
+                &[3u8; 32],
+                0x1301,
+                group,
+                &key,
+                &[0x002b, 0x0033],
+            )
+            .unwrap();
+            for size in [100usize, 200] {
+                response.extend_from_slice(&[0x17, 0x03, 0x03]);
+                response.extend_from_slice(&(size as u16).to_be_bytes());
+                response.resize(response.len() + size, 0x5a);
+            }
+            stream.write_all(&response).await.unwrap();
+        }
+    });
+    let dir = Temp::new();
+    let mut state = initial().1;
+    state.origin_port = port;
+    state.origin_profile.key_share_group = X25519;
+    let node = Node::load(dir.0.join("state.json"), CONTROL.to_vec(), state).unwrap();
+    let hello = Template::from_json(TEMPLATE)
+        .unwrap()
+        .build(&ALICE)
+        .unwrap()
+        .record;
+    let client = parse_client_hello(&hello).unwrap();
+    assert_eq!(node.origin_for(&client).key_share_group, X25519);
+    let groups = timeout(Duration::from_secs(5), seen.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(groups, [X25519_MLKEM768, X25519]);
+    let mut profile = node.origin_for(&client);
+    for _ in 0..100 {
+        if profile.key_share_group == X25519_MLKEM768 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        profile = node.origin_for(&client);
+    }
+    assert_eq!(profile.key_share_group, X25519_MLKEM768);
+    assert_eq!(profile.record_sizes, [105, 205]);
+    assert!(seen.try_recv().is_err(), "one probe per template");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn many_users_are_matched_off_the_runtime() {
+    use fiend_core::node::Principal;
+    let dir = Temp::new();
+    let mut state = initial().1;
+    for index in 0..200u8 {
+        let mut secret = [0x40; 32];
+        secret[0] = index;
+        state.users.push(user(&format!("user-{index}"), &secret));
+    }
+    let node = Node::load(dir.0.join("state.json"), CONTROL.to_vec(), state).unwrap();
+    let hello = Template::from_json(TEMPLATE)
+        .unwrap()
+        .build(&BOB)
+        .unwrap()
+        .record;
+    let Some((secret, Principal::User(_))) = node
+        .authenticate_off_runtime(&hello[5..], unix_time() as i64)
+        .await
+    else {
+        panic!("bob is a user")
+    };
+    assert_eq!(secret, BOB);
+    let mut stranger = hello[5..].to_vec();
+    stranger[40] ^= 1;
+    assert!(
+        node.authenticate_off_runtime(&stranger, unix_time() as i64)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn usage_sync_keeps_active_sessions_but_quota_sync_revokes_them() {
     use fiend_core::node::Principal;
     let dir = Temp::new();

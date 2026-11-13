@@ -48,7 +48,7 @@ origin_host = "origin.example"
         settings.config.tcp_idle,
         Duration::from_secs(2 * 3600 + 4 * 60)
     );
-    assert_eq!(settings.config.tcp_notsent_lowat, 0);
+    assert_eq!(settings.config.tcp_notsent_lowat, 128 << 10);
     assert_eq!(settings.config.target, TargetPolicy::default());
     assert_eq!(settings.config.mux.max_links, 8);
 }
@@ -64,10 +64,12 @@ listen = "127.0.0.1:8443"
 origin_host = "origin.example"
 origin_port = 9443
 replay_ttl_ms = 14400000
+replay_capacity = 4194304
 max_connections = 2048
 max_user_sessions = 8
 max_user_lanes = 100
 tcp_notsent_lowat = 131072
+post_handshake_records = true
 
 [target]
 allow_loopback = true
@@ -95,12 +97,14 @@ max_links = 3
     assert_eq!(settings.config.origin_host, "origin.example");
     assert_eq!(settings.config.origin_port, 9443);
     assert_eq!(settings.config.replay_ttl, Duration::from_secs(4 * 3600));
+    assert_eq!(settings.config.replay_capacity, 4 << 20);
     assert_eq!(settings.config.udp_idle, Duration::from_millis(2500));
     assert_eq!(settings.config.max_connections, 2048);
     assert_eq!(settings.config.max_user_sessions, 8);
     assert_eq!(settings.config.max_user_lanes, 100);
     assert_eq!(settings.config.tcp_idle, Duration::from_secs(60));
     assert_eq!(settings.config.tcp_notsent_lowat, 131072);
+    assert!(settings.config.post_handshake_records);
     assert_eq!(
         settings.config.target,
         TargetPolicy {

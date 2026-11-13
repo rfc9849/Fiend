@@ -64,6 +64,9 @@ version = "3"
 [dependencies.zeroize]
 version = "1"
 
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc = "0.2"
+
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 sysinfo = { version = "=0.40.1", default-features = false, features = ["system", "network"] }
 

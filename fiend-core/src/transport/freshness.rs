@@ -1,4 +1,6 @@
+use std::collections::hash_map::RandomState;
 use std::collections::{HashSet, VecDeque};
+use std::hash::BuildHasher;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -34,6 +36,7 @@ pub struct FreshnessCheck {
     ttl: Duration,
     shard_limit: usize,
     shards: Vec<Mutex<Shard>>,
+    salt: RandomState,
     started: Instant,
     last_purge: AtomicU64,
     purge_interval: Duration,
@@ -49,6 +52,7 @@ impl FreshnessCheck {
             ttl,
             shard_limit: max_entries.div_ceil(SHARDS).max(1),
             shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
+            salt: RandomState::new(),
             started: Instant::now(),
             last_purge: AtomicU64::new(0),
             purge_interval: (ttl / 4).clamp(Duration::from_secs(1), Duration::from_secs(60)),
@@ -58,7 +62,7 @@ impl FreshnessCheck {
     pub fn check(&self, random: &[u8; 32]) -> bool {
         self.maybe_purge();
 
-        let shard = &self.shards[random[0] as usize % SHARDS];
+        let shard = &self.shards[(self.salt.hash_one(random) % SHARDS as u64) as usize];
         let mut shard = shard.lock().unwrap_or_else(|error| error.into_inner());
         if shard.seen.contains(random) {
             return false;
@@ -145,17 +149,36 @@ mod tests {
     #[test]
     fn size_is_capped_by_evicting_the_oldest_entry() {
         let guard = FreshnessCheck::with_limit(Duration::from_secs(3600), SHARDS * 2);
-        let random = |index: u8| {
+        let random = |index: u16| {
             let mut random = [0u8; 32];
-            random[1] = index;
+            random[..2].copy_from_slice(&index.to_be_bytes());
             random
         };
-        for index in 0..10 {
-            assert!(guard.check(&random(index)));
+        let shard = |index: u16| guard.salt.hash_one(random(index)) % SHARDS as u64;
+        let same: Vec<u16> = (0..u16::MAX)
+            .filter(|index| shard(*index) == shard(0))
+            .take(10)
+            .collect();
+        for index in &same {
+            assert!(guard.check(&random(*index)));
         }
         assert_eq!(guard.len(), 2);
-        assert!(!guard.check(&random(9)));
-        assert!(!guard.check(&random(8)));
-        assert!(guard.check(&random(0)), "the oldest entry was evicted");
+        assert!(!guard.check(&random(same[9])));
+        assert!(!guard.check(&random(same[8])));
+        assert!(
+            guard.check(&random(same[0])),
+            "the oldest entry was evicted"
+        );
+    }
+
+    #[test]
+    fn a_shared_first_byte_does_not_pick_one_shard() {
+        let guard = FreshnessCheck::with_limit(Duration::from_secs(3600), SHARDS * 4);
+        for index in 0..=255u8 {
+            let mut random = [0u8; 32];
+            random[1] = index;
+            assert!(guard.check(&random));
+        }
+        assert!(guard.len() > 4 * 4, "entries spread over several shards");
     }
 }

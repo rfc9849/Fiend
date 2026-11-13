@@ -169,6 +169,71 @@ impl Packet {
     }
 }
 
+pub fn abort_fin(raw: &[u8]) -> Option<(FlowKey, Vec<Vec<u8>>)> {
+    let sliced = SlicedPacket::from_ip(raw).ok()?;
+    let (source, destination) = match &sliced.net {
+        Some(NetSlice::Ipv4(ip)) => (
+            IpAddr::V4(ip.header().source_addr()),
+            IpAddr::V4(ip.header().destination_addr()),
+        ),
+        Some(NetSlice::Ipv6(ip)) => (
+            IpAddr::V6(ip.header().source_addr()),
+            IpAddr::V6(ip.header().destination_addr()),
+        ),
+        _ => return None,
+    };
+    let Some(TransportSlice::Tcp(tcp)) = &sliced.transport else {
+        return None;
+    };
+    if !tcp.fin() || tcp.rst() {
+        return None;
+    }
+    let key = FlowKey {
+        source: SocketAddr::new(destination, tcp.destination_port()),
+        destination: SocketAddr::new(source, tcp.source_port()),
+    };
+    let payload = tcp.payload();
+    let mut packets = Vec::with_capacity(2);
+    if !payload.is_empty() {
+        let offset = raw.len() - payload.len() - tcp.header_len();
+        let mut data = raw.to_vec();
+        data[offset + 13] &= !0x01;
+        let header = etherparse::TcpHeaderSlice::from_slice(&data[offset..])
+            .ok()?
+            .to_header();
+        let checksum = match (source, destination) {
+            (IpAddr::V4(src), IpAddr::V4(dst)) => {
+                header.calc_checksum_ipv4_raw(src.octets(), dst.octets(), payload)
+            }
+            (IpAddr::V6(src), IpAddr::V6(dst)) => {
+                header.calc_checksum_ipv6_raw(src.octets(), dst.octets(), payload)
+            }
+            _ => return None,
+        }
+        .ok()?;
+        data[offset + 16..offset + 18].copy_from_slice(&checksum.to_be_bytes());
+        packets.push(data);
+    }
+    let builder = match (source, destination) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => PacketBuilder::ipv4(src.octets(), dst.octets(), 64),
+        (IpAddr::V6(src), IpAddr::V6(dst)) => PacketBuilder::ipv6(src.octets(), dst.octets(), 64),
+        _ => return None,
+    };
+    let sequence = tcp.sequence_number().wrapping_add(payload.len() as u32);
+    let builder = builder
+        .tcp(tcp.source_port(), tcp.destination_port(), sequence, 0)
+        .rst();
+    let builder = if tcp.ack() {
+        builder.ack(tcp.acknowledgment_number())
+    } else {
+        builder
+    };
+    let mut reset = Vec::new();
+    builder.write(&mut reset, &[]).ok()?;
+    packets.push(reset);
+    Some((key, packets))
+}
+
 pub fn udp_packets(
     source: SocketAddr,
     destination: SocketAddr,
