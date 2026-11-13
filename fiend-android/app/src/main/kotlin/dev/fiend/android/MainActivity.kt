@@ -128,7 +128,7 @@ class MainActivity : ComponentActivity() {
                 ThemeMode.Dark -> true
             }
             FiendTheme(darkTheme = dark) {
-                FiendApp(versionName = "${BuildConfig.VERSION_NAME} · core 0.1.7")
+                FiendApp(versionName = "${BuildConfig.VERSION_NAME} · core 0.1.8")
             }
         }
     }

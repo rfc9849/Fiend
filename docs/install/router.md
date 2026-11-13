@@ -1,6 +1,6 @@
 # Router (OpenWrt)
 
-Fiend runs on OpenWrt 24.10 with firewall4 and dnsmasq, the defaults of OpenWrt. Files are in the [latest release](https://github.com/rfc9849/Fiend/releases/latest). Replace `0.1.7` below with its version.
+Fiend runs on OpenWrt 24.10 with firewall4 and dnsmasq, the defaults of OpenWrt. Files are in the [latest release](https://github.com/rfc9849/Fiend/releases/latest). Replace `0.1.8` below with its version.
 
 ## How it works
 
@@ -18,11 +18,11 @@ dnsmasq sends its DNS queries to Fiend. When a site is in a Tunnel or DPI bypass
 
    Packages are for `aarch64_*`, `arm_cortex-a*` and `x86_64`. MIPS routers are not supported.
 
-2. Copy `fiend_0.1.7-r1_<architecture>.ipk` and `luci-app-fiend_0.1.7-r1_all.ipk` to `/tmp` on the router, then install them:
+2. Copy `fiend_0.1.8-r1_<architecture>.ipk` and `luci-app-fiend_0.1.8-r1_all.ipk` to `/tmp` on the router, then install them:
 
    ```sh
    opkg update
-   opkg install /tmp/fiend_0.1.7-r1_*.ipk /tmp/luci-app-fiend_0.1.7-r1_all.ipk
+   opkg install /tmp/fiend_0.1.8-r1_*.ipk /tmp/luci-app-fiend_0.1.8-r1_all.ipk
    ```
 
    `opkg update` is necessary, because Fiend needs the `kmod-nft-tproxy` and `kmod-nft-socket` kernel modules.
