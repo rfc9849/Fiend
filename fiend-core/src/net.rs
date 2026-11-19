@@ -193,7 +193,7 @@ pub fn bind_listener(address: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn set_tcp_notsent_lowat<S>(stream: &S, bytes: u32) -> io::Result<()>
 where
     S: std::os::fd::AsFd,
@@ -204,7 +204,50 @@ where
     socket2::SockRef::from(stream).set_tcp_notsent_lowat(bytes)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[allow(unsafe_code)]
+pub fn set_tcp_notsent_lowat<S>(stream: &S, bytes: u32) -> io::Result<()>
+where
+    S: std::os::fd::AsFd,
+{
+    use std::os::fd::AsRawFd;
+    const TCP_NOTSENT_LOWAT: libc::c_int = 0x201;
+    if bytes == 0 {
+        return Ok(());
+    }
+    let result = unsafe {
+        libc::setsockopt(
+            stream.as_fd().as_raw_fd(),
+            libc::IPPROTO_TCP,
+            TCP_NOTSENT_LOWAT,
+            std::ptr::from_ref(&bytes).cast(),
+            std::mem::size_of::<u32>() as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+pub fn set_tcp_notsent_lowat<S>(_stream: &S, bytes: u32) -> io::Result<()> {
+    let _ = bytes;
+    Ok(())
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
 pub fn ack_probe(stream: &TcpStream) -> Option<AckProbe> {
     use std::os::fd::{AsFd, AsRawFd};
     let fd = stream.as_fd().try_clone_to_owned().ok()?;
@@ -212,7 +255,12 @@ pub fn ack_probe(stream: &TcpStream) -> Option<AckProbe> {
     Some(Box::new(move || bytes_acked(fd.as_raw_fd())))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
 pub fn ack_probe(_stream: &TcpStream) -> Option<AckProbe> {
     None
 }
@@ -240,10 +288,54 @@ fn bytes_acked(fd: std::os::fd::RawFd) -> Option<u64> {
     Some(u64::from_ne_bytes(info[BYTES_ACKED].try_into().ok()?))
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn set_tcp_notsent_lowat<S>(_stream: &S, bytes: u32) -> io::Result<()> {
-    let _ = bytes;
-    Ok(())
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[repr(C)]
+struct AppleTcpConnectionInfo {
+    state: u8,
+    snd_wscale: u8,
+    rcv_wscale: u8,
+    pad1: u8,
+    options: u32,
+    flags: u32,
+    rto: u32,
+    maxseg: u32,
+    snd_ssthresh: u32,
+    snd_cwnd: u32,
+    snd_wnd: u32,
+    snd_sbbytes: u32,
+    rcv_wnd: u32,
+    rttcur: u32,
+    srtt: u32,
+    rttvar: u32,
+    tfo_bits: u32,
+    txpackets: u64,
+    txbytes: u64,
+    txretransmitbytes: u64,
+    rxpackets: u64,
+    rxbytes: u64,
+    rxoutoforderbytes: u64,
+    txretransmitpackets: u64,
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[allow(unsafe_code)]
+fn bytes_acked(fd: std::os::fd::RawFd) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<AppleTcpConnectionInfo>::zeroed();
+    let mut length = std::mem::size_of::<AppleTcpConnectionInfo>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_CONNECTION_INFO,
+            info.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 || (length as usize) < std::mem::size_of::<AppleTcpConnectionInfo>() {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some(info.txbytes.saturating_sub(info.txretransmitbytes))
 }
 
 #[cfg(test)]
@@ -391,6 +483,30 @@ mod tests {
                 "192.0.2.3:443",
             ]
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn sets_low_water_mark_and_probes_acked_bytes_on_loopback() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let (client, accepted) =
+            tokio::join!(TcpStream::connect(address), listener.accept());
+        let mut client = client.expect("connect");
+        let (mut peer, _) = accepted.expect("accept");
+        set_tcp_notsent_lowat(&client, 64 << 10).expect("set option");
+        let probe = ack_probe(&client).expect("ack probe");
+        let before = probe().expect("initial count");
+        client.write_all(&vec![0x55u8; 32 << 10]).await.expect("write");
+        let mut received = vec![0u8; 32 << 10];
+        peer.read_exact(&mut received).await.expect("read");
+        let after = probe().expect("updated count");
+        assert!(after > before, "expected {after} > {before}");
     }
 }
 
