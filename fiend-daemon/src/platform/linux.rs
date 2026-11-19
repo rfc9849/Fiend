@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fiend_core::net::ProtectSocket;
 use fiend_ipc::ConnectStep;
@@ -86,12 +86,12 @@ fn monitor(
                 .inspect_err(|error| tracing::warn!(%error, "cannot watch netlink route events"))
                 .ok();
             let mut last = current_network();
-            let mut since_check = Duration::ZERO;
+            let mut last_check = Instant::now();
             loop {
-                let mut waited = Duration::ZERO;
-                let mut changed_at = None;
-                while waited < MONITOR_PERIOD
-                    && changed_at.is_none_or(|at: Duration| waited < at + EVENT_SETTLE)
+                let started = Instant::now();
+                let mut changed_at: Option<Instant> = None;
+                while started.elapsed() < MONITOR_PERIOD
+                    && changed_at.is_none_or(|at| at.elapsed() < EVENT_SETTLE)
                 {
                     if stop.load(Ordering::Acquire) {
                         return;
@@ -103,9 +103,9 @@ fn monitor(
                             false
                         }
                     };
-                    waited += EVENT_WAIT;
                     if event {
-                        changed_at = Some(waited);
+                        changed_at = Some(Instant::now());
+                        std::thread::sleep(EVENT_WAIT);
                     }
                 }
                 let now = current_network();
@@ -114,11 +114,10 @@ fn monitor(
                     last = now;
                     network_changed();
                 }
-                since_check += waited;
-                if since_check < RULE_CHECK {
+                if last_check.elapsed() < RULE_CHECK {
                     continue;
                 }
-                since_check = Duration::ZERO;
+                last_check = Instant::now();
                 let Some(WatchedRules {
                     steps,
                     check,
@@ -329,19 +328,28 @@ fn network_state(
     v6: Vec<String>,
     addresses: impl IntoIterator<Item = (String, IpAddr)>,
 ) -> Vec<String> {
-    let interfaces: Vec<&str> = v4
+    let use_v6 = v4.is_none();
+    let routes: Vec<String> = if use_v6 {
+        v6
+    } else {
+        v4.into_iter().collect()
+    };
+    let interfaces: Vec<&str> = routes
         .iter()
-        .chain(&v6)
         .filter_map(|route| route.split_whitespace().next())
         .collect();
-    let mut state: Vec<String> = v4.iter().chain(&v6).cloned().collect();
+    let mut state = routes;
     for (interface, address) in addresses {
         if !interfaces.contains(&interface.as_str()) {
             continue;
         }
         let address = match address {
-            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => v4.to_string(),
-            IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 != 0xfe80 && !v6.is_loopback() => {
+            IpAddr::V4(v4) if !use_v6 && !v4.is_loopback() && !v4.is_link_local() => {
+                v4.to_string()
+            }
+            IpAddr::V6(v6)
+                if use_v6 && v6.segments()[0] & 0xffc0 != 0xfe80 && !v6.is_loopback() =>
+            {
                 let segments = v6.segments();
                 format!(
                     "{:x}:{:x}:{:x}:{:x}::/64",
@@ -836,13 +844,27 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\n";
             ]
         };
         let before = network_state(route(), v6(), at("192.168.1.10", "2001:db8:1:2::10"));
-        let rotated = network_state(route(), v6(), at("192.168.1.10", "2001:db8:1:2::99"));
+        let v6_churn = network_state(
+            route(),
+            vec!["eth0 fe800000000000000000000000000002".to_owned()],
+            at("192.168.1.10", "2001:db8:9:2::99"),
+        );
         let renumbered = network_state(route(), v6(), at("192.168.1.11", "2001:db8:1:2::10"));
-        let moved = network_state(route(), v6(), at("192.168.1.10", "2001:db8:9:2::10"));
-        assert_eq!(before, rotated, "a new temporary address keeps the /64");
+        assert_eq!(
+            before, v6_churn,
+            "IPv6 churn does not reset a dual-stack IPv4 network"
+        );
         assert_ne!(before, renumbered);
-        assert_ne!(before, moved);
         assert!(!before.iter().any(|entry| entry.contains("docker0")));
         assert!(!before.iter().any(|entry| entry.contains("fe80::1234")));
+
+        let v6_before = network_state(None, v6(), at("192.168.1.10", "2001:db8:1:2::10"));
+        let v6_rotated = network_state(None, v6(), at("192.168.1.10", "2001:db8:1:2::99"));
+        let v6_moved = network_state(None, v6(), at("192.168.1.10", "2001:db8:9:2::10"));
+        assert_eq!(
+            v6_before, v6_rotated,
+            "a new temporary address keeps the /64"
+        );
+        assert_ne!(v6_before, v6_moved);
     }
 }
