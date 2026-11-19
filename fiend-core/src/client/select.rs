@@ -215,6 +215,9 @@ impl Selector {
                 .map_err(transport::Error::from)?;
             let connected = started.elapsed();
             stream.set_nodelay(true).map_err(transport::Error::from)?;
+            if let Err(error) = crate::net::set_tcp_keepalive(&stream) {
+                tracing::debug!(%error, "cannot set TCP keepalive");
+            }
             if let Err(error) = crate::net::set_tcp_notsent_lowat(&stream, self.notsent_lowat) {
                 tracing::warn!(%error, "cannot set TCP_NOTSENT_LOWAT");
             }

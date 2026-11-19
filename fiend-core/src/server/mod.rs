@@ -243,6 +243,7 @@ impl Server {
 const EARLY_ORIGIN_DELAY: Duration = Duration::from_millis(100);
 const PROXY_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_TCP_IDLE: Duration = Duration::from_secs(7440);
+const TCP_RELAY_BUFFER: usize = 64 * 1024;
 
 async fn read_more(stream: &TcpStream, buffered: &mut Vec<u8>) {
     let wait = tokio::time::Instant::now() + Duration::from_millis(250);
@@ -345,7 +346,12 @@ async fn handle_routed(
                 epoch,
             };
             tokio::select! {
-                _ = tokio::io::copy_bidirectional(&mut lane, &mut upstream) => {}
+                _ = tokio::io::copy_bidirectional_with_sizes(
+                    &mut lane,
+                    &mut upstream,
+                    TCP_RELAY_BUFFER,
+                    TCP_RELAY_BUFFER,
+                ) => {}
                 _ = idle(&activity, epoch, config.tcp_idle) => {
                     tracing::debug!(authority = %target, "TCP lane idle timeout");
                 }
@@ -518,14 +524,13 @@ fn touch(activity: &AtomicU64, epoch: Instant) {
 }
 
 async fn idle(activity: &AtomicU64, epoch: Instant, timeout: Duration) {
-    let check = timeout
-        .min(Duration::from_secs(1))
-        .max(Duration::from_millis(10));
+    let limit = millis(timeout);
     loop {
-        sleep(check).await;
-        if elapsed_ms(epoch).saturating_sub(activity.load(Ordering::Relaxed)) >= millis(timeout) {
+        let since = elapsed_ms(epoch).saturating_sub(activity.load(Ordering::Relaxed));
+        if since >= limit {
             return;
         }
+        sleep(Duration::from_millis((limit - since).max(1))).await;
     }
 }
 
