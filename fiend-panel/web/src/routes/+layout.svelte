@@ -6,6 +6,7 @@
   import { page } from '$app/state';
   import Shell from '#lib/components/Shell.svelte';
   import Toasts from '#lib/components/Toasts.svelte';
+  import { isOpenPath, loginPath, panelPath, signedInPath, type PanelUrl } from '#lib/navigation.ts';
   import { loadSession } from '#lib/api/client.ts';
   import { session } from '#lib/stores/session.svelte.ts';
   import { initTheme } from '#lib/stores/theme.svelte.ts';
@@ -13,24 +14,19 @@
   let { children }: { children: Snippet } = $props();
   let ready = $state(false);
   let failure = $state('');
-  const open = $derived(page.url.pathname.startsWith('/login') || page.url.pathname.startsWith('/setup'));
+  const open = $derived(isOpenPath(page.url.pathname));
 
-  async function check(path: string) {
-    if (path.startsWith('/login') || path.startsWith('/setup')) {
+  async function check(url: PanelUrl) {
+    if (isOpenPath(url.pathname)) {
       ready = true;
       return;
     }
     try {
-      const info = await loadSession();
+      const info = await loadSession(false);
       session.info = info;
-      if (!info) {
-        await goto(`/login?next=${encodeURIComponent(path)}`, { replaceState: true });
-        ready = true;
-        return;
-      }
-      if (!info.wizard.done && !path.startsWith('/welcome')) {
-        await goto('/welcome', { replaceState: true });
-      }
+      const current = panelPath(url);
+      const destination = info ? signedInPath(info, url, current) : loginPath(url);
+      if (destination !== current) await goto(destination, { replaceState: true });
       ready = true;
     } catch (error) {
       failure = error instanceof Error ? error.message : 'The panel does not answer.';
@@ -39,14 +35,14 @@
 
   onMount(() => {
     initTheme();
-    check(page.url.pathname);
+    check(page.url);
   });
 </script>
 
 {#if failure}
   <main class="failure"><h1>The panel does not answer</h1><p>{failure}</p></main>
 {:else if ready}
-  {#if open || page.url.pathname.startsWith('/welcome') || !session.info}
+  {#if open || page.url.pathname === '/welcome' || !session.info}
     {@render children()}
   {:else}
     <Shell admin={session.info.admin.name} version={session.info.version}>{@render children()}</Shell>

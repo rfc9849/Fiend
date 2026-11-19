@@ -280,6 +280,7 @@ async fn session(
     loop {
         let health: Health =
             serde_json::from_value(client.call(Call::Health).await?).map_err(io::Error::other)?;
+        let version = crate::db::version(&app.db).await as u64;
         let node = state::node(app, node_id)
             .await
             .map_err(|_| io::Error::other("node removed"))?;
@@ -308,15 +309,15 @@ async fn session(
         }
         let mut status = "online";
         let mut last_error = None;
-        match state::desired(app, &node).await {
-            Ok(Some(mut desired)) => {
+        match state::desired(app, &node, version).await {
+            Ok(Some(desired)) => {
                 let in_sync = node.applied_version == desired.version as i64
                     && health.state_version == desired.version;
                 if !in_sync && desired.version <= health.state_version {
                     crate::db::raise_version(&app.db, health.state_version as i64 + 1)
                         .await
                         .map_err(io::Error::other)?;
-                    desired.version = crate::db::version(&app.db).await as u64;
+                    continue;
                 }
                 if !in_sync {
                     match client.call(Call::ApplyState(desired.clone())).await {

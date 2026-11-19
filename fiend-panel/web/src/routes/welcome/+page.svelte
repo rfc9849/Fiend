@@ -1,28 +1,29 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
+  import { page } from '$app/state';
+  import { returnPath } from '#lib/navigation.ts';
   import Centered from '#lib/components/Centered.svelte';
   import Field from '#lib/components/Field.svelte';
   import Button from '#lib/components/Button.svelte';
-  import TemplatePicker from '#lib/components/TemplatePicker.svelte';
+  import DisguiseSwitch from '#lib/components/DisguiseSwitch.svelte';
   import Qr from '#lib/components/Qr.svelte';
   import CopyField from '#lib/components/CopyField.svelte';
   import { api, fieldErrors, loadSession } from '#lib/api/client.ts';
   import { session } from '#lib/stores/session.svelte.ts';
-  import { toast } from '#lib/stores/toasts.svelte.ts';
-  import type { Created, LocalNodeDefaults, NodeView, PresetView, UserLink, UserView } from '#lib/api/generated/index.ts';
+  import type { Created, LocalNodeDefaults, NodeView, UserLink, UserView } from '#lib/api/generated/index.ts';
 
   let step = $state(2);
   let defaults = $state<LocalNodeDefaults | null>(null);
   let localNode = $state<NodeView | null>(null);
-  let presets = $state<PresetView[]>([]);
   let nodeName = $state('main');
   let address = $state('');
-  let preset = $state('wikipedia');
-  let file = $state<string | null>(null);
+  let disguiseOpen = $state(false);
   let userName = $state('');
   let link = $state<UserLink | null>(null);
+  let createdUser = $state<number | null>(null);
   let busy = $state(false);
+  let checking = $state(false);
   let error = $state('');
   let fields = $state<Record<string, string>>({});
 
@@ -32,15 +33,27 @@
     session.info = await loadSession();
   }
 
-  onMount(async () => {
+  async function checkNode() {
+    checking = true;
+    error = '';
     try {
-      [defaults, presets] = await Promise.all([api.get<LocalNodeDefaults>('/wizard/local'), api.get<PresetView[]>('/disguises/presets')]);
+      defaults = await api.get<LocalNodeDefaults>('/wizard/local');
       if (defaults.address && !address) address = defaults.address;
+    } catch (failure) {
+      fail(failure);
+    } finally {
+      checking = false;
+    }
+  }
+
+  onMount(async () => {
+    await checkNode();
+    try {
       await refresh();
       const wizard = session.info?.wizard;
-      if (wizard?.local_node) step = wizard.disguise ? (wizard.first_user ? 4 : 4) : 3;
+      if (wizard?.local_node) step = wizard.disguise ? 4 : 3;
     } catch (failure) {
-      error = fieldErrors(failure).form ?? '';
+      fail(failure);
     }
   });
 
@@ -58,7 +71,7 @@
       step = 3;
       return;
     }
-    if (!address.trim()) fields.address = 'Enter the public IP address of this server.';
+    if (!address.trim()) fields.address = 'Enter the public IP address or host name of this server.';
     if (!nodeName.trim()) fields.name = 'Enter a name.';
     if (Object.keys(fields).length) return;
     busy = true;
@@ -73,31 +86,12 @@
     }
   }
 
-  async function saveDisguise(event: SubmitEvent) {
-    event.preventDefault();
-    fields = {};
-    error = '';
-    if (!localNode) return;
-    if (session.info?.wizard.disguise) {
-      step = 4;
-      return;
-    }
-    if (preset === 'file' && !file) fields.template = 'Choose a template file.';
-    if (Object.keys(fields).length) return;
+  async function loadLink() {
+    if (createdUser === null) return;
     busy = true;
+    error = '';
     try {
-      const created = await api.post<Created>('/disguises', {
-        preset: preset === 'file' ? null : preset,
-        template_base64: preset === 'file' ? file : null
-      });
-      await api.put(`/nodes/${localNode.id}`, { name: localNode.name, address: localNode.address, port: localNode.port, disguise_id: created.id });
-      try {
-        await api.post(`/disguises/${created.id}/probe`, { node_id: localNode.id });
-      } catch (failure) {
-        toast(`Origin probe failed. ${fieldErrors(failure).form ?? ''}`, true);
-      }
-      await refresh();
-      step = 4;
+      link = await api.get<UserLink>(`/users/${createdUser}/link`);
     } catch (failure) {
       fail(failure);
     } finally {
@@ -116,7 +110,8 @@
     busy = true;
     try {
       const user = await api.post<UserView>('/users', { name: userName.trim(), enabled: true, note: '', traffic_limit: null, expire_at: null, hold_days: null, reset_period: 'none', nodes: [] });
-      link = await api.get<UserLink>(`/users/${user.id}/link`);
+      createdUser = user.id;
+      await loadLink();
     } catch (failure) {
       fail(failure);
     } finally {
@@ -125,11 +120,15 @@
   }
 
   async function finish() {
+    if (busy) return;
+    fields = {};
+    error = '';
     busy = true;
     try {
       await api.post('/wizard/done');
       session.info = await loadSession();
-      await goto('/');
+      const next = returnPath(page.url);
+      await goto(new URL(next, page.url.origin).pathname === '/welcome' ? '/' : next, { replaceState: true });
     } catch (failure) {
       fail(failure);
     } finally {
@@ -160,21 +159,39 @@
           <Field label="Public address" id="address" error={fields.address}><input id="address" inputmode="url" placeholder="203.0.113.10" bind:value={address} /></Field>
         </div>
       {/if}
-      <div class="row end"><Button kind="primary" type="submit" {busy} disabled={!defaults?.available && !localNode}>Next</Button></div>
-    </form>
-  {:else if step === 3}
-    <h1 class="title">Disguise</h1>
-    <form novalidate class="stack" onsubmit={saveDisguise}>
-      {#if session.info?.wizard.disguise}
-        <p class="note">Already set.</p>
-      {:else}
-        <TemplatePicker {presets} bind:preset bind:file error={fields.template} />
-      {/if}
       <div class="row between">
-        <Button kind="ghost" onclick={() => (step = 2)}>Back</Button>
-        <Button kind="primary" type="submit" {busy}>Next</Button>
+        <Button kind="ghost" disabled={busy} onclick={finish}>Finish setup later</Button>
+        <div class="row">
+          {#if !localNode && !defaults?.available}
+            <Button busy={checking} disabled={busy} onclick={checkNode}>Check node again</Button>
+          {/if}
+          <Button kind="primary" type="submit" {busy} disabled={checking || (!defaults?.available && !localNode)}>Next</Button>
+        </div>
       </div>
     </form>
+  {:else if step === 3}
+    <h1 class="title">TLS disguise</h1>
+    <div class="stack">
+      {#if localNode?.disguise_id}
+        <p class="note">Selected: {localNode.disguise_name}.</p>
+      {:else}
+        <p>Choose and check the TLS disguise before sharing a link.</p>
+      {/if}
+      <div class="row between">
+        <Button kind="ghost" disabled={busy} onclick={() => (step = 2)}>Back</Button>
+        <div class="row">
+          <Button kind="ghost" disabled={busy} onclick={finish}>Finish setup later</Button>
+          {#if localNode?.disguise_id}
+            <Button kind="primary" onclick={() => (step = 4)}>Next</Button>
+          {:else if localNode}
+            <Button kind="primary" onclick={() => (disguiseOpen = true)}>Set disguise</Button>
+          {/if}
+        </div>
+      </div>
+    </div>
+    {#if disguiseOpen && localNode}
+      <DisguiseSwitch bind:open={disguiseOpen} node={localNode} onsaved={(updated) => { localNode = updated; step = 4; }} />
+    {/if}
   {:else}
     <h1 class="title">First user</h1>
     {#if link}
@@ -187,7 +204,15 @@
       </div>
       <div class="row between">
         <Button kind="ghost" onclick={() => (step = 3)}>Back</Button>
-        <Button kind="primary" {busy} onclick={finish}>Open the dashboard</Button>
+        <Button kind="primary" {busy} onclick={finish}>Finish setup</Button>
+      </div>
+    {:else if createdUser !== null}
+      <div class="stack">
+        <p>User {userName} was created.</p>
+        <div class="row between">
+          <Button kind="ghost" disabled={busy} onclick={finish}>Open panel</Button>
+          <Button kind="primary" {busy} onclick={loadLink}>Retry getting link</Button>
+        </div>
       </div>
     {:else}
       <form novalidate class="stack" onsubmit={saveUser}>
@@ -195,7 +220,7 @@
         <div class="row between">
           <Button kind="ghost" onclick={() => (step = 3)}>Back</Button>
           <div class="row">
-            {#if session.info?.wizard.first_user}<Button kind="ghost" onclick={finish}>Skip</Button>{/if}
+            <Button kind="ghost" disabled={busy} onclick={finish}>{session.info?.wizard.first_user ? 'Finish setup' : 'Finish setup later'}</Button>
             <Button kind="primary" type="submit" {busy}>Create user</Button>
           </div>
         </div>
@@ -210,7 +235,6 @@
   .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
   dt { color: var(--muted); }
   dd { margin: 0; }
-  .end { justify-content: flex-end; }
   .between { justify-content: space-between; }
   .share { display: flex; gap: 18px; align-items: flex-start; margin-bottom: 18px; }
   .grow { flex: 1; min-width: 0; }

@@ -7,7 +7,7 @@
   import Dialog from '#lib/components/Dialog.svelte';
   import Qr from '#lib/components/Qr.svelte';
   import CopyField from '#lib/components/CopyField.svelte';
-  import { api, base64Text, fieldErrors, loadSession } from '#lib/api/client.ts';
+  import { ApiError, api, base64Text, fieldErrors, loadSession } from '#lib/api/client.ts';
   import { session } from '#lib/stores/session.svelte.ts';
   import { setTheme, theme, type Theme } from '#lib/stores/theme.svelte.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
@@ -47,6 +47,8 @@
   let restoreFields = $state<Record<string, string>>({});
   let restoreError = $state('');
   let restoreBusy = $state(false);
+  let restarting = $state(false);
+  let restartError = $state('');
 
   const me = $derived(session.info?.admin);
 
@@ -151,21 +153,52 @@
     if (file) restoreOpen = true;
   }
 
+  async function panelInstance(): Promise<string> {
+    const response = await fetch('/health', { cache: 'no-store', signal: AbortSignal.timeout(3000) }).catch(() => null);
+    const instance = response?.headers.get('x-panel-instance');
+    if (!response?.ok || !instance) throw new ApiError(0, 'Could not check whether the panel is running.');
+    return instance;
+  }
+
+  async function waitForRestart(previous: string) {
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      try {
+        if (await panelInstance() !== previous) {
+          location.replace('/login');
+          return;
+        }
+      } catch {
+        continue;
+      }
+    }
+    restarting = false;
+    restartError = 'The panel has not come back online. Check the panel service before trying another restore.';
+  }
+
   async function restore(event: SubmitEvent) {
     event.preventDefault();
+    if (restoreBusy || restarting) return;
     restoreFields = {};
     restoreError = '';
     if (!restorePassword) restoreFields.current = 'Enter the current password.';
     if (me?.totp && !restoreCode.trim()) restoreFields.totp_code = 'Enter the code from your app.';
     if (!restoreFile || Object.keys(restoreFields).length) return;
+    restartError = '';
     restoreBusy = true;
     try {
       const headers: Record<string, string> = { 'x-current-password': base64Text(restorePassword) };
       if (me?.totp) headers['x-current-code'] = restoreCode.trim();
-      await api.upload('/restore', await restoreFile.arrayBuffer(), headers);
+      const bytes = await restoreFile.arrayBuffer();
+      const instance = await panelInstance();
+      await api.upload('/restore', bytes, headers);
       restoreOpen = false;
-      toast('Restarting');
-      setTimeout(() => location.assign('/login'), 4000);
+      restoreFile = null;
+      restorePassword = '';
+      restoreCode = '';
+      restarting = true;
+      await waitForRestart(instance);
     } catch (failure) {
       const result = fieldErrors(failure);
       restoreError = result.form ?? '';
@@ -225,12 +258,14 @@
 
 <section class="card" aria-labelledby="backup-title">
   <h2 id="backup-title">Backup</h2>
+  {#if restarting}<p class="note" role="status">Backup accepted. Waiting for the panel to restart.</p>{/if}
+  {#if restartError}<p class="note error" role="alert">{restartError}</p>{/if}
   <p class="lead">Contains all secrets.</p>
   <div class="row">
     {#if me?.totp}<div class="code"><Field label="Two-factor code" id="backup-code"><input id="backup-code" inputmode="numeric" autocomplete="one-time-code" bind:value={backupCode} /></Field></div>{/if}
     <Button icon="down" busy={backupBusy} onclick={backup}>Download backup</Button>
     <label class="upload">
-      <input class="visually-hidden" type="file" accept=".db,application/vnd.sqlite3,application/octet-stream" onchange={(event) => { const input = event.currentTarget as HTMLInputElement; const file = input.files?.[0] ?? null; input.value = ''; openRestore(file); }} />
+      <input class="visually-hidden" type="file" disabled={restoreBusy || restarting} accept=".db,application/vnd.sqlite3,application/octet-stream" onchange={(event) => { const input = event.currentTarget as HTMLInputElement; const file = input.files?.[0] ?? null; input.value = ''; openRestore(file); }} />
       Restore from file
     </label>
   </div>
@@ -288,7 +323,7 @@
 
 <Dialog bind:open={restoreOpen} title="Restore from {restoreFile?.name ?? ''}">
   <form id="restore-form" novalidate class="stack" onsubmit={restore}>
-    <p>All panel data is replaced. The panel restarts.</p>
+    <p>This replaces all panel data and signs out all administrators. The panel keeps a copy of the previous database.</p>
     {#if restoreError}<p class="note error" role="alert">{restoreError}</p>{/if}
     <Field label="Current password" id="restore-password" error={restoreFields.current}><input id="restore-password" type="password" autocomplete="current-password" bind:value={restorePassword} /></Field>
     {#if me?.totp}<Field label="Two-factor code" id="restore-code" error={restoreFields.totp_code}><input id="restore-code" inputmode="numeric" autocomplete="one-time-code" bind:value={restoreCode} /></Field>{/if}

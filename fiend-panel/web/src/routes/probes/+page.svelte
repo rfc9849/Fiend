@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { page } from '$app/state';
   import TopBar from '#lib/components/TopBar.svelte';
   import Tabs from '#lib/components/Tabs.svelte';
   import Button from '#lib/components/Button.svelte';
@@ -46,6 +47,8 @@
   }
 
   onMount(() => {
+    const initial = page.url.searchParams.get('range');
+    if (initial && ['1h', '24h', '7d', '30d'].includes(initial)) range = initial;
     load();
     const stop = onEvent((kind) => {
       if (kind === 'stats') {

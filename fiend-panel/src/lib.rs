@@ -210,6 +210,7 @@ pub struct Inner {
     pub events: broadcast::Sender<types::Event>,
     pub limiter: auth::Limiter,
     pub(crate) pending_logins: auth::PendingLogins,
+    instance: String,
     pub sync: sync::Sync,
     pub totp_steps: Mutex<HashMap<i64, u64>>,
 }
@@ -231,6 +232,7 @@ impl App {
             events,
             limiter: auth::Limiter::default(),
             pending_logins: auth::PendingLogins::default(),
+            instance: hex::encode(rand::random::<[u8; 16]>()),
             sync: sync::Sync::default(),
             totp_steps: Mutex::new(HashMap::new()),
         })))
@@ -276,7 +278,12 @@ pub fn router(app: App) -> Router {
     Router::new()
         .route(
             "/health",
-            axum::routing::get(|| async { env!("CARGO_PKG_VERSION") }),
+            axum::routing::get(|State(app): State<App>| async move {
+                (
+                    [("x-panel-instance", app.instance.clone())],
+                    env!("CARGO_PKG_VERSION"),
+                )
+            }),
         )
         .nest("/api", api::routes())
         .fallback(fallback)
@@ -308,6 +315,7 @@ const SPA_ROUTES: &[&str] = &[
     "users",
     "disguises",
     "routing",
+    "probes",
     "settings",
 ];
 

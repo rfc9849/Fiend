@@ -8,13 +8,14 @@
   import { api, fieldErrors } from '#lib/api/client.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
   import { bytes, date, percent, stateLabel } from '#lib/format.ts';
-  import type { NodeSessions, NodeView, UserDetail, UserLink, UserSecret, UserView } from '#lib/api/generated/index.ts';
+  import type { NodeSessionClose, NodeSessions, NodeView, UserDetail, UserLink, UserSecret, UserView } from '#lib/api/generated/index.ts';
 
   let { id, nodes, onclose, onchange }: { id: number; nodes: NodeView[]; onclose: () => void; onchange: () => void } = $props();
   let detail = $state<UserDetail | null>(null);
   let link = $state<UserLink | null>(null);
   let linkError = $state('');
   let sessions = $state<NodeSessions[] | null>(null);
+  let closed = $state<NodeSessionClose[] | null>(null);
   let editing = $state(false);
   let draft = $state<UserDraft>(toDraft(null));
   let fields = $state<Record<string, string>>({});
@@ -81,9 +82,10 @@
       await api.post(`/users/${id}/reset`);
       toast('Usage reset');
     } else if (confirm === 'kill') {
-      await api.del(`/users/${id}/sessions`);
-      toast('Sessions closed');
+      closed = await api.del<NodeSessionClose[]>(`/users/${id}/sessions`);
       sessions = null;
+      onchange();
+      return;
     } else if (confirm === 'delete') {
       await api.del(`/users/${id}`);
       toast('User removed');
@@ -98,7 +100,7 @@
   const texts = {
     secret: ['New secret', 'The old link stops working.', 'Make new secret'],
     reset: ['Reset usage', '', 'Reset'],
-    kill: ['Close sessions', '', 'Close sessions'],
+    kill: ['Close sessions', 'This disconnects the user. They can reconnect if their access is enabled.', 'Close sessions'],
     delete: ['Remove user', '', 'Remove']
   } as const;
 </script>
@@ -144,6 +146,14 @@
       </section>
       <section aria-label="Open sessions">
         <div class="row between"><p class="label">Sessions</p><Button kind="ghost" onclick={async () => (sessions = await api.get<NodeSessions[]>(`/users/${id}/sessions`))}>Show</Button></div>
+        {#if closed}
+          <p class="label" role="status">{closed.length ? 'Result by node' : 'There are no nodes to close sessions on.'}</p>
+          <ul class="usage">
+            {#each closed as row (row.node_id)}
+              <li><span>{row.node_name}</span><span class:close-failed={row.closed === null}>{row.closed === null ? `Not confirmed: ${row.error}` : `${row.closed} session${row.closed === 1 ? '' : 's'} signaled to disconnect`}</span></li>
+            {/each}
+          </ul>
+        {/if}
         {#if sessions}
           <ul class="usage">
             {#each sessions as row (row.node_id)}<li><span>{row.node_name}</span><span>{row.error ? 'not available' : `${row.started_at.length} open`}</span></li>{/each}
@@ -178,6 +188,7 @@
   dd { margin: 0; overflow-wrap: anywhere; }
   .usage { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .usage li { display: flex; justify-content: space-between; gap: 10px; }
+  .close-failed { color: var(--danger); }
   .between { justify-content: space-between; }
   .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 </style>

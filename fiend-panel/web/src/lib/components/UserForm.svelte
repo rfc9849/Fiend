@@ -24,6 +24,7 @@
   {:else if draft.start === 'hold'}
     <Field label="Days after the first connection" id="user-hold" error={fields.hold_days}><input id="user-hold" inputmode="numeric" bind:value={draft.holdDays} /></Field>
   {/if}
+  {#if nodes.length > 1}
   <fieldset class="nodes">
     <legend>Nodes</legend>
     <p class="small muted">None selected: all nodes.</p>
@@ -32,6 +33,7 @@
     {/each}
     {#if fields.nodes}<p class="error">{fields.nodes}</p>{/if}
   </fieldset>
+  {/if}
   <Field label="Note" id="user-note" error={fields.note}><textarea id="user-note" bind:value={draft.note}></textarea></Field>
 </div>
 

@@ -1,36 +1,35 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import TopBar from '#lib/components/TopBar.svelte';
-  import NodeTable from '#lib/components/NodeTable.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
-  import { onEvent } from '#lib/stores/events.ts';
   import type { NodeView } from '#lib/api/generated/index.ts';
 
-  let nodes = $state<NodeView[]>([]);
   let error = $state('');
-  let loaded = $state(false);
+  let empty = $state(false);
 
-  async function load() {
+  onMount(async () => {
     try {
-      nodes = await api.get<NodeView[]>('/nodes');
-      error = '';
+      const nodes = await api.get<NodeView[]>('/nodes');
+      const local = nodes.find((node) => node.local);
+      if (local) await goto(`/nodes/${local.id}`, { replaceState: true });
+      else empty = true;
     } catch (failure) {
       error = fieldErrors(failure).form ?? '';
-    } finally {
-      loaded = true;
     }
-  }
-
-  onMount(() => {
-    load();
-    return onEvent((kind) => {
-      if (kind === 'nodes' || kind === 'stats') load();
-    });
   });
 </script>
 
-<svelte:head><title>Nodes · fiend</title></svelte:head>
+<svelte:head><title>Server · fiend</title></svelte:head>
 
-<TopBar title="Nodes" />
-{#if error}<p class="note error" role="alert">{error}</p>{/if}
-{#if loaded}<NodeTable {nodes} />{/if}
+<TopBar title="Server" />
+{#if error}
+  <p class="note error" role="alert">{error}</p>
+{:else if empty}
+  <section class="card stack">
+    <h2>No server connected</h2>
+    <a href="/welcome?next=%2Fnodes">Connect the local server</a>
+  </section>
+{:else}
+  <p class="muted">Loading…</p>
+{/if}

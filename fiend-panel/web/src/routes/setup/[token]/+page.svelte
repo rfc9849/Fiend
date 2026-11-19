@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
+  import { signedInPath } from '#lib/navigation.ts';
   import { page } from '$app/state';
   import Centered from '#lib/components/Centered.svelte';
   import Field from '#lib/components/Field.svelte';
@@ -47,7 +48,7 @@
     try {
       await api.post('/setup', { token, name: name.trim(), password, totp_secret: useTotp ? totp?.secret ?? null : null, totp_code: useTotp ? code.trim() : null });
       session.info = await loadSession();
-      await goto('/welcome');
+      await goto(session.info ? signedInPath(session.info, page.url, '/') : '/login', { replaceState: true });
     } catch (failure) {
       const result = fieldErrors(failure);
       error = result.form ?? '';

@@ -547,11 +547,27 @@ async fn local_node_sync_links_statistics_and_limits() {
     assert_eq!(body["field"], "template");
     let (status, _) = panel.put(&format!("/api/nodes/{node_id}"), json!({"name": "main", "address": "127.0.0.1", "port": node_address.port(), "disguise_id": disguise})).await;
     assert_eq!(status, StatusCode::OK);
+    let (status, body) = panel.put(&format!("/api/nodes/{node_id}"), json!({"name": "main", "address": "127.0.0.1", "port": node_address.port(), "disguise_id": null})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
     let (status, user) = panel.post("/api/users", json!({"name": "alice", "enabled": true, "note": "test", "traffic_limit": 200000, "expire_at": null, "hold_days": null, "reset_period": "month", "nodes": []})).await;
     assert_eq!(status, StatusCode::OK, "{user}");
     let alice = user["id"].as_i64().unwrap();
     assert!(user["reset_at"].as_i64().unwrap() > fiend_panel::now());
+    sqlx::query("UPDATE nodes SET disguise_version = applied_version + 1 WHERE id = ?")
+        .bind(node_id)
+        .execute(&panel.app.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        panel.get(&format!("/api/users/{alice}/link")).await.0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("UPDATE nodes SET disguise_version = 0 WHERE id = ?")
+        .bind(node_id)
+        .execute(&panel.app.db)
+        .await
+        .unwrap();
     let (status, link) = panel.get(&format!("/api/users/{alice}/link")).await;
     assert_eq!(status, StatusCode::OK, "{link}");
     let text = link["link"].as_str().unwrap();
@@ -713,75 +729,121 @@ async fn local_node_sync_links_statistics_and_limits() {
     assert_eq!(status, StatusCode::OK, "{logs}");
     let (status, sessions) = panel.get(&format!("/api/users/{alice}/sessions")).await;
     assert_eq!(status, StatusCode::OK, "{sessions}");
+    let (status, closed) = panel.del(&format!("/api/users/{alice}/sessions")).await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert!(closed[0]["closed"].is_u64() && closed[0]["error"].is_null());
 }
 
 #[tokio::test]
-async fn warp_outbound_turns_on_warp_for_nodes() {
+async fn warp_rules_enable_the_tunnel_and_fail_closed() {
+    use fiend_core::node::outbound::{Context, OutboundKind, Router};
+
     let dir = Temp::new();
     let mut panel = Panel::new(&dir.0).await;
     panel.setup().await;
-    let insert = async |panel: &Panel, name: &str| -> i64 {
-        sqlx::query_scalar("INSERT INTO nodes (name, address, port, local, control_secret, service_secret, created_at) VALUES (?, '127.0.0.1', 1, 0, ?, ?, 0) RETURNING id")
-            .bind(name)
-            .bind(hex::encode(CONTROL))
-            .bind(hex::encode([1u8; 32]))
-            .fetch_one(&panel.app.db)
-            .await
-            .unwrap()
-    };
-    let first = insert(&panel, "first").await;
-    let second = insert(&panel, "second").await;
-    let (status, body) = panel.post("/api/outbounds", json!({"node_id": null, "name": "WARP", "kind": "warp", "server": null, "username": null, "password": null, "udp": false, "link_node_id": null, "udp_fallback": null})).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = panel
-        .post(
-            "/api/rules",
-            json!({"node_id": null, "pattern": "domain:resolve.rs", "outbound": "WARP"}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    for id in [first, second] {
-        let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, id)
-            .await
-            .unwrap();
-        assert!(warp.enabled, "node {id}");
-        assert!(outbounds.iter().any(|outbound| outbound.id == "WARP"));
-        assert!(rules.iter().any(|rule| rule.outbound == "WARP"));
+    let id: i64 = sqlx::query_scalar("INSERT INTO nodes (name, address, port, local, control_secret, service_secret, created_at) VALUES ('main', '127.0.0.1', 1, 0, '', '', 0) RETURNING id")
+        .fetch_one(&panel.app.db)
+        .await
+        .unwrap();
+
+    let mut ids = Vec::new();
+    for (domain, action, udp) in [
+        ("block.example", "@block", None),
+        ("warp.example", "@warp", None),
+        ("udp.example", "@warp", Some("direct")),
+    ] {
+        let (status, body) = panel
+            .post(
+                "/api/rules",
+                json!({"node_id": null, "pattern": format!("domain:{domain}"), "outbound": action, "udp_fallback": udp}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        ids.push(body["id"].as_i64().unwrap());
     }
+    let (status, warp) = panel.get(&format!("/api/nodes/{id}/warp")).await;
+    assert_eq!(status, StatusCode::OK, "{warp}");
+    assert_eq!(warp["rule_count"], 2);
+    let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, id)
+        .await
+        .unwrap();
+    assert!(warp.enabled);
+    fiend_core::node::outbound::validate(&outbounds, &rules, &warp).unwrap();
+    let router = Router::build(&outbounds, &rules, None).unwrap();
+    let target = |host: &str| Address::Domain {
+        host: host.into(),
+        port: 443,
+    };
+    assert!(matches!(
+        router.route(&target("block.example")).config.kind,
+        OutboundKind::Block
+    ));
+    assert!(router.udp_route(&target("warp.example")).is_none());
+    assert!(matches!(
+        router
+            .udp_route(&target("udp.example"))
+            .unwrap()
+            .config
+            .kind,
+        OutboundKind::Direct
+    ));
+    let context = Context {
+        policy: TargetPolicy::default(),
+        timeout: Duration::from_secs(1),
+        warp: None,
+        resolver: None,
+    };
+    let dest = target("warp.example");
+    let runtime = router.route(&dest);
+    assert!(matches!(runtime.config.kind, OutboundKind::Warp));
+    let error = runtime.connect_tcp(&dest, &context).await.err().unwrap();
+    assert_eq!(error.to_string(), "WARP is not running");
 
-    let (status, body) = panel
-        .put(
-            &format!("/api/nodes/{second}/warp"),
-            json!({"enabled": false, "rotate_every": null}),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let (outbounds, rules, warp) = fiend_panel::state::routing_for(&panel.app, second)
+    for id in &ids[1..] {
+        assert_eq!(
+            panel.del(&format!("/api/rules/{id}")).await.0,
+            StatusCode::NO_CONTENT
+        );
+    }
+    let (_, rules, warp) = fiend_panel::state::routing_for(&panel.app, id)
         .await
         .unwrap();
-    assert!(!warp.enabled, "an explicit off stays off");
-    assert!(outbounds.is_empty() && rules.is_empty());
+    assert_eq!(rules.len(), 1);
+    assert!(!warp.enabled);
+}
 
-    let third = insert(&panel, "third").await;
-    sqlx::query("INSERT INTO warp (node_id, status) VALUES (?, '{}')")
-        .bind(third)
-        .execute(&panel.app.db)
+#[tokio::test]
+async fn routing_migration_preserves_existing_actions_and_udp() {
+    use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+
+    let dir = Temp::new();
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(dir.0.join("panel.db"))
+            .create_if_missing(true),
+    )
+    .await
+    .unwrap();
+    fiend_panel::db::MIGRATOR
+        .run_direct(Some(2), &mut connection, false)
         .await
         .unwrap();
-    let before = fiend_panel::db::version(&panel.app.db).await;
-    let (outbounds, _, warp) = fiend_panel::state::routing_for(&panel.app, third)
-        .await
-        .unwrap();
-    assert!(warp.enabled, "a new node gets WARP");
-    assert!(outbounds.iter().any(|outbound| outbound.id == "WARP"));
-    assert!(
-        fiend_panel::db::version(&panel.app.db).await > before,
-        "the node gets the change"
-    );
-    let (_, _, warp) = fiend_panel::state::routing_for(&panel.app, second)
-        .await
-        .unwrap();
-    assert!(!warp.enabled, "an explicit off stays off");
+    sqlx::raw_sql(
+        "INSERT INTO outbounds (name, kind, config, udp_fallback) VALUES ('old-warp', 'warp', '{}', 'direct'), ('old-block', 'block', '{}', NULL), ('warp', 'socks5', '{}', NULL);
+         INSERT INTO rules (position, pattern, outbound) VALUES (1, 'domain:a.example', 'old-warp'), (2, 'domain:b.example', 'old-block'), (3, 'domain:c.example', 'warp');"
+    ).execute(&mut connection).await.unwrap();
+    connection.close().await.unwrap();
+
+    let mut panel = Panel::new(&dir.0).await;
+    panel.setup().await;
+    let (status, routing) = panel.get("/api/routing").await;
+    assert_eq!(status, StatusCode::OK, "{routing}");
+    assert_eq!(routing["rules"][0]["outbound"], "@warp");
+    assert_eq!(routing["rules"][0]["udp_fallback"], "direct");
+    assert_eq!(routing["rules"][1]["outbound"], "@block");
+    assert_eq!(routing["rules"][2]["outbound"], "warp");
+    assert_eq!(routing["outbounds"][0]["name"], "warp");
+    assert_eq!(routing["outbounds"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -807,8 +869,39 @@ async fn unreachable_nodes_report_errors() {
         .post(&format!("/api/nodes/{id}/restart"), json!({}))
         .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let disguise: i64 = sqlx::query_scalar("INSERT INTO disguises (name, origin_host, origin_port, template_raw, created_at) VALUES ('test', 'localhost', 443, X'00', 0) RETURNING id")
+        .fetch_one(&panel.app.db).await.unwrap();
+    let candidate = json!({"disguise_id": disguise});
+    let (status, checks) = panel
+        .post(
+            &format!("/api/nodes/{id}/disguise/check"),
+            candidate.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{checks}");
+    assert_eq!(checks["ready"], false);
+    let (status, body) = panel
+        .put(&format!("/api/nodes/{id}/disguise"), candidate)
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    let (_, node) = panel.get(&format!("/api/nodes/{id}")).await;
+    assert!(node["disguise_id"].is_null());
     let (status, body) = panel.get("/api/users/999").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, user) = panel
+        .post("/api/users", json!({"name": "alice", "enabled": true, "note": "", "traffic_limit": null, "expire_at": null, "hold_days": null, "reset_period": "none", "nodes": []}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{user}");
+    let (status, closed) = panel
+        .del(&format!("/api/users/{}/sessions", user["id"]))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed[0]["node_id"], id);
+    assert!(closed[0]["closed"].is_null() && closed[0]["error"].is_string());
+    let (status, audit) = panel.get("/api/audit").await;
+    assert_eq!(status, StatusCode::OK, "{audit}");
+    assert_eq!(audit[0]["action"], "session close failed");
 }
 
 async fn raw(
@@ -1084,6 +1177,60 @@ async fn restore_needs_the_password_and_codes_are_rate_limited() {
         StatusCode::TOO_MANY_REQUESTS,
         "sign-in uses the same code limit"
     );
+}
+
+#[tokio::test]
+async fn restore_rejects_an_incompatible_database() {
+    use base64::Engine;
+    use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+
+    let dir = Temp::new();
+    let mut panel = Panel::new(&dir.0).await;
+    panel.setup().await;
+    let backup = dir.0.join("incompatible.db");
+    sqlx::query("VACUUM INTO ?")
+        .bind(backup.to_string_lossy().as_ref())
+        .execute(&panel.app.db)
+        .await
+        .unwrap();
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&backup))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 1")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    let cookie = format!("fiend_session={}", panel.cookie.as_ref().unwrap());
+    let csrf = panel.csrf.as_deref().unwrap();
+    let password = base64::engine::general_purpose::STANDARD.encode("a long test password");
+    let response = raw(
+        &panel.router,
+        "POST",
+        "/api/restore",
+        &[
+            ("cookie", &cookie),
+            ("x-csrf-token", csrf),
+            ("x-current-password", &password),
+        ],
+        None,
+        Body::from(fs::read(backup).unwrap()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !panel
+            .app
+            .config
+            .database
+            .with_extension("db.restore")
+            .exists()
+    );
+    let (status, body) = panel.get("/api/session").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["admin"]["name"], "owner");
 }
 
 #[tokio::test]

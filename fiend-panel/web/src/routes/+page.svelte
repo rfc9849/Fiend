@@ -62,10 +62,10 @@
     <StatCard label="Traffic now" icon="speed" value={traffic[0]} unit={traffic[1]} samples={data.traffic_samples} />
     <StatCard label="Users online" icon="users" value={String(data.users_online)} unit="of {data.users_total}" samples={data.online_samples} />
     <StatCard label="Nodes online" icon="server" value={String(data.nodes_online)} unit="of {data.nodes_total}" samples={data.node_samples} />
-    <a class="stat-link" href="/probes" aria-label="Probes sent to origin: {data.origin_recent} in 1 h. Show probes"><StatCard label="Probes sent to origin" icon="shield" value={String(data.origin_recent)} unit="in 1 h" samples={data.origin_samples} /></a>
+    <a class="stat-link" href="/probes?range=1h" aria-label="Probes sent to origin: {data.origin_recent} in 1 h. Show probes"><StatCard label="Probes sent to origin" icon="shield" value={String(data.origin_recent)} unit="in 1 h" samples={data.origin_samples} /></a>
   </div>
   <section class="section" aria-labelledby="nodes-title">
-    <div class="card-header"><h2 id="nodes-title">Nodes</h2><a href="/nodes" class="small">All nodes</a></div>
+    <div class="card-header"><h2 id="nodes-title">Server</h2><a href="/nodes" class="small">Open server</a></div>
     <NodeTable nodes={data.nodes} />
   </section>
   <section class="card section" aria-labelledby="traffic-title">

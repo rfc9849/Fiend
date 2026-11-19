@@ -1,4 +1,5 @@
 import type { ErrorBody, SessionInfo } from './generated';
+import { isOpenPath, loginPath } from '#lib/navigation.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -19,7 +20,7 @@ export function setCsrf(token: string) {
 
 type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
-async function request<T>(method: Method, path: string, body?: unknown, raw?: Blob | ArrayBuffer, extra: Record<string, string> = {}): Promise<T> {
+async function request<T>(method: Method, path: string, body?: unknown, raw?: Blob | ArrayBuffer, extra: Record<string, string> = {}, redirect = true): Promise<T> {
   const headers: Record<string, string> = { ...extra };
   if (method !== 'GET') headers['x-csrf-token'] = csrf;
   let payload: BodyInit | undefined;
@@ -36,10 +37,8 @@ async function request<T>(method: Method, path: string, body?: unknown, raw?: Bl
   } catch {
     throw new ApiError(0, 'The panel does not answer.');
   }
-  if (response.status === 401 && !path.startsWith('/login') && !path.startsWith('/setup')) {
-    if (!location.pathname.startsWith('/login') && !location.pathname.startsWith('/setup')) {
-      location.assign(`/login?next=${encodeURIComponent(location.pathname)}`);
-    }
+  if (redirect && response.status === 401 && !path.startsWith('/login') && !isOpenPath(path) && !isOpenPath(location.pathname)) {
+    location.assign(loginPath(new URL(location.href)));
   }
   if (!response.ok) {
     let error: ErrorBody | null = null;
@@ -70,9 +69,9 @@ export function base64Text(text: string): string {
   return btoa(binary);
 }
 
-export async function loadSession(): Promise<SessionInfo | null> {
+export async function loadSession(redirect = true): Promise<SessionInfo | null> {
   try {
-    const session = await api.get<SessionInfo>('/session');
+    const session = await request<SessionInfo>('GET', '/session', undefined, undefined, {}, redirect);
     setCsrf(session.csrf);
     return session;
   } catch (error) {

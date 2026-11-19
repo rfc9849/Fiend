@@ -6,6 +6,7 @@
   import Field from '#lib/components/Field.svelte';
   import Button from '#lib/components/Button.svelte';
   import { ApiError, api, fieldErrors, loadSession } from '#lib/api/client.ts';
+  import { returnPath, signedInPath } from '#lib/navigation.ts';
   import type { LoginChallenge, LoginTotp } from '#lib/api/generated/index.ts';
   import { session } from '#lib/stores/session.svelte.ts';
 
@@ -23,8 +24,7 @@
     const info = await loadSession();
     if (!info) throw new ApiError(401, 'Sign in again to continue.');
     session.info = info;
-    const next = page.url.searchParams.get('next');
-    await goto(next && next.startsWith('/') && !next.startsWith('//') ? next : '/');
+    await goto(signedInPath(info, page.url, returnPath(page.url)), { replaceState: true });
   }
 
   async function submitPassword(event: SubmitEvent) {

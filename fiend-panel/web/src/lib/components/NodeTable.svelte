@@ -1,17 +1,18 @@
 <script lang="ts">
+  import NodeSync from './NodeSync.svelte';
   import type { NodeView } from '#lib/api/generated/index.ts';
   import { ago, bytes, rate, stateLabel } from '#lib/format.ts';
   let { nodes }: { nodes: NodeView[] } = $props();
 </script>
 
 {#if nodes.length === 0}
-  <p class="empty">No node yet. Finish the setup wizard to add the local node.</p>
+  <p class="empty">No nodes yet. <a href="/welcome?next=%2Fnodes">Connect the local node</a>.</p>
 {:else}
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
-          <th>Name</th><th>Address</th><th>Version</th><th class="num">CPU</th><th class="num">Memory</th><th class="num">Traffic</th><th>Last seen</th>
+          <th>Name</th><th>Address</th><th>Version</th><th>Settings</th><th class="num">CPU</th><th class="num">Memory</th><th class="num">Traffic</th><th>Last seen</th>
         </tr>
       </thead>
       <tbody>
@@ -26,6 +27,7 @@
             </td>
             <td class="mono">{node.address}:{node.port}</td>
             <td>{#if node.version}<span class="mono">{node.version}</span>{#if node.arch}<span class="muted arch">{node.arch}</span>{/if}{:else}—{/if}</td>
+            <td><NodeSync {node} /></td>
             <td class="num">{node.cpu === null ? '—' : `${node.cpu.toFixed(0)} %`}</td>
             <td class="num">{node.memory_used === null ? '—' : `${bytes(node.memory_used)} / ${bytes(node.memory_total)}`}</td>
             <td class="num">{rate(node.traffic_rate)}</td>

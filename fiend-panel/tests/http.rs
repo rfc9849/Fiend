@@ -123,6 +123,7 @@ async fn http_security_and_assets() {
     for (path, status, mime) in [
         ("/", StatusCode::OK, "text/html; charset=utf-8"),
         ("/users", StatusCode::OK, "text/html; charset=utf-8"),
+        ("/probes", StatusCode::OK, "text/html; charset=utf-8"),
         ("/health", StatusCode::OK, "text/plain; charset=utf-8"),
         ("/missing.js", StatusCode::NOT_FOUND, ""),
         ("/elsewhere", StatusCode::NOT_FOUND, ""),
@@ -152,6 +153,9 @@ async fn http_security_and_assets() {
         assert_eq!(response.headers()["referrer-policy"], "no-referrer");
         if !mime.is_empty() {
             assert_eq!(response.headers()["content-type"], mime);
+        }
+        if path == "/health" {
+            assert_eq!(response.headers()["x-panel-instance"].as_bytes().len(), 32);
         }
         if path == "/" {
             let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();

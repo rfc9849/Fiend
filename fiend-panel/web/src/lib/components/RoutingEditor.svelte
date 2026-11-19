@@ -6,13 +6,12 @@
   import Field from './Field.svelte';
   import Select from './Select.svelte';
   import Switch from './Switch.svelte';
+  import WarpCard from './WarpCard.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
   import type { NodeView, OutboundView, Routing, RuleView } from '#lib/api/generated/index.ts';
 
-  let { node = null }: { node?: number | null } = $props();
   let routing = $state<Routing | null>(null);
-  let global = $state<Routing | null>(null);
   let nodes = $state<NodeView[]>([]);
   let error = $state('');
   let outboundOpen = $state(false);
@@ -20,8 +19,10 @@
   let removing = $state<{ kind: 'outbound' | 'rule'; id: number; name: string } | null>(null);
   let removeOpen = $state(false);
   let editing = $state<number | null>(null);
+  let scope = $state<number | null>(null);
+  let warpRevision = $state(0);
   let form = $state({ name: '', kind: 'socks5', server: '', username: '', password: '', udp: false, link: '', fallback: '' });
-  let rule = $state({ pattern: '', outbound: 'direct' });
+  let rule = $state({ pattern: '', outbound: 'direct', udp: '' });
   let fields = $state<Record<string, string>>({});
   let formError = $state('');
   let busy = $state(false);
@@ -34,27 +35,46 @@
     { value: 'block', label: 'Block' },
     { value: 'direct', label: 'Direct' }
   ];
-  const base = $derived(node === null ? '' : `?node=${node}`);
-  const available = $derived([...(global?.outbounds ?? []), ...(node === null ? [] : routing?.outbounds ?? [])]);
-  const outboundOptions = $derived([{ value: 'direct', label: 'direct', detail: 'built in' }, ...available.filter((item, index, list) => list.findIndex((other) => other.name === item.name) === index).map((item) => ({ value: item.name, label: item.name, detail: item.kind }))]);
+  const builtIn = [
+    { value: 'direct', label: 'Direct' },
+    { value: '@block', label: 'Block' },
+    { value: '@warp', label: 'Cloudflare WARP' }
+  ];
+  const available = $derived((routing?.outbounds ?? []).filter((item) => item.node_id === null || item.node_id === scope));
+  const outboundOptions = $derived([...builtIn, ...available.filter((item, i, list) =>
+    list.findLastIndex((other) => other.name === item.name) === i
+  ).map((item) => ({ value: item.name, label: item.name, detail: item.kind }))]);
+  const udpOptions = $derived([
+    { value: '', label: 'Block UDP' },
+    { value: 'direct', label: 'Direct' },
+    ...available.filter((item, i, list) => item.udp && list.findLastIndex((other) => other.name === item.name) === i)
+      .map((item) => ({ value: item.name, label: item.name }))
+  ]);
+  const actionLabel = (value: string) => builtIn.find((item) => item.value === value)?.label ?? value;
 
   async function load() {
     try {
-      routing = await api.get<Routing>(`/routing${base}`);
-      global = node === null ? routing : await api.get<Routing>('/routing');
-      nodes = await api.get<NodeView[]>('/nodes');
+      const [global, list] = await Promise.all([api.get<Routing>('/routing'), api.get<NodeView[]>('/nodes')]);
+      const local = list.find((node) => node.local);
+      const scoped = local ? await api.get<Routing>(`/routing?node=${local.id}`) : null;
+      nodes = list;
+      routing = {
+        rules: [...global.rules, ...(scoped?.rules ?? [])],
+        outbounds: [...global.outbounds, ...(scoped?.outbounds ?? [])]
+      };
+      error = '';
+      warpRevision++;
     } catch (failure) {
       error = fieldErrors(failure).form ?? '';
     }
   }
 
-  $effect(() => {
-    node;
-    load();
-  });
+  import { onMount } from 'svelte';
+  onMount(load);
 
   function editOutbound(item: OutboundView | null) {
     editing = item?.id ?? null;
+    scope = item?.node_id ?? null;
     fields = {};
     formError = '';
     form = item
@@ -65,9 +85,10 @@
 
   function editRule(item: RuleView | null) {
     editing = item?.id ?? null;
+    scope = item?.node_id ?? null;
     fields = {};
     formError = '';
-    rule = item ? { pattern: item.pattern, outbound: item.outbound } : { pattern: '', outbound: outboundOptions[1]?.value ?? 'direct' };
+    rule = item ? { pattern: item.pattern, outbound: item.outbound, udp: item.udp_fallback ?? '' } : { pattern: '', outbound: 'direct', udp: '' };
     ruleOpen = true;
   }
 
@@ -81,7 +102,7 @@
     if (Object.keys(fields).length) return;
     busy = true;
     const body = {
-      node_id: node,
+      node_id: scope,
       name: form.name.trim(),
       kind: form.kind,
       server: form.server.trim() || null,
@@ -115,7 +136,7 @@
       return;
     }
     busy = true;
-    const body = { node_id: node, pattern: rule.pattern, outbound: rule.outbound };
+    const body = { node_id: scope, pattern: rule.pattern, outbound: rule.outbound, udp_fallback: rule.outbound === '@warp' ? rule.udp || null : null };
     try {
       if (editing === null) await api.post('/rules', body);
       else await api.put(`/rules/${editing}`, body);
@@ -132,11 +153,12 @@
   }
 
   async function move(index: number, delta: number) {
-    if (!routing) return;
-    const ids = routing.rules.map((item) => item.id);
-    const target = index + delta;
-    if (target < 0 || target >= ids.length) return;
-    [ids[index], ids[target]] = [ids[target], ids[index]];
+    const item = routing?.rules[index];
+    const neighbor = routing?.rules[index + delta];
+    if (!item || !neighbor || item.node_id !== neighbor.node_id) return;
+    const ids = routing!.rules.filter((rule) => rule.node_id === item.node_id).map((rule) => rule.id);
+    const from = ids.indexOf(item.id);
+    [ids[from], ids[from + delta]] = [ids[from + delta], ids[from]];
     try {
       await api.post('/rules/order', { ids });
       await load();
@@ -159,10 +181,44 @@
 </script>
 
 {#if error}<p class="note error" role="alert">{error}</p>{/if}
-<p class="note">First match wins. {node === null ? 'Node rules run after these.' : 'Global rules run first.'} No match: direct.</p>
+<p class="note">The first matching rule sets the route. Unmatched traffic goes direct.</p>
 
-<section class="block" aria-labelledby="outbounds-{node ?? 'global'}">
-  <div class="card-header"><h2 id="outbounds-{node ?? 'global'}">{node === null ? 'Global outbounds' : 'Outbounds of this node'}</h2><Button icon="plus" onclick={() => editOutbound(null)}>Add outbound</Button></div>
+<section class="block" aria-labelledby="routing-rules">
+  <div class="card-header"><h2 id="routing-rules">Rules</h2><Button icon="plus" onclick={() => editRule(null)}>Add rule</Button></div>
+  {#if routing?.rules.length}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th class="index">#</th><th>Patterns</th><th>Action</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+        <tbody>
+          {#each routing.rules as item, index (item.id)}
+            <tr>
+              <td class="index">{index + 1}</td>
+              <td class="mono pattern">{summary(item.pattern)}</td>
+              <td class="mono">{actionLabel(item.outbound)}{#if item.outbound === '@warp'}<div class="small muted">UDP: {item.udp_fallback ? actionLabel(item.udp_fallback) : 'blocked'}</div>{/if}</td>
+              <td class="actions">
+                <IconButton icon="up" label="Move rule {index + 1} up" disabled={routing.rules[index - 1]?.node_id !== item.node_id} onclick={() => move(index, -1)} />
+                <IconButton icon="down" label="Move rule {index + 1} down" disabled={routing.rules[index + 1]?.node_id !== item.node_id} onclick={() => move(index, 1)} />
+                <IconButton icon="edit" label="Edit rule {index + 1}" onclick={() => editRule(item)} />
+                <IconButton icon="close" label="Remove rule {index + 1}" onclick={() => { removing = { kind: 'rule', id: item.id, name: `rule ${index + 1}` }; removeOpen = true; }} />
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {:else}
+    <p class="empty">No rules. Add a rule to send selected traffic through WARP, block it or use a custom outbound.</p>
+  {/if}
+</section>
+
+<div class="block">
+  {#each nodes.filter((node) => node.local) as node (node.id)}
+    <WarpCard node={node.id} revision={warpRevision} />
+  {/each}
+</div>
+
+<section class="block" aria-labelledby="routing-outbounds">
+  <div class="card-header"><h2 id="routing-outbounds">Custom outbounds</h2><Button icon="plus" onclick={() => editOutbound(null)}>Add outbound</Button></div>
   {#if routing?.outbounds.length}
     <div class="table-wrap">
       <table>
@@ -180,40 +236,8 @@
         </tbody>
       </table>
     </div>
-  {:else if node === null}
-    <p class="empty">No outbounds.</p>
   {:else}
-    <p class="empty">None. {#if global?.outbounds.length}Global: <span class="mono">{global.outbounds.map((item) => item.name).join(', ')}</span> · <a href="/routing">Edit</a>{/if}</p>
-  {/if}
-</section>
-
-<section class="block" aria-labelledby="rules-{node ?? 'global'}">
-  <div class="card-header"><h2 id="rules-{node ?? 'global'}">{node === null ? 'Global rules' : 'Rules of this node'}</h2><Button icon="plus" onclick={() => editRule(null)}>Add rule</Button></div>
-  {#if routing?.rules.length}
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th class="index">#</th><th>Patterns</th><th>Outbound</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-        <tbody>
-          {#each routing.rules as item, index (item.id)}
-            <tr>
-              <td class="index">{index + 1}</td>
-              <td class="mono pattern">{summary(item.pattern)}</td>
-              <td class="mono">{item.outbound}</td>
-              <td class="actions">
-                <IconButton icon="up" label="Move rule {index + 1} up" disabled={index === 0} onclick={() => move(index, -1)} />
-                <IconButton icon="down" label="Move rule {index + 1} down" disabled={index === routing.rules.length - 1} onclick={() => move(index, 1)} />
-                <IconButton icon="edit" label="Edit rule {index + 1}" onclick={() => editRule(item)} />
-                <IconButton icon="close" label="Remove rule {index + 1}" onclick={() => { removing = { kind: 'rule', id: item.id, name: `rule ${index + 1}` }; removeOpen = true; }} />
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {:else if node === null}
-    <p class="empty">No rules.</p>
-  {:else}
-    <p class="empty">None. {#if global?.rules.length}{global.rules.length} global rule{global.rules.length === 1 ? '' : 's'} · <a href="/routing">Edit</a>{/if}</p>
+    <p class="empty">Add a custom outbound to route through an external proxy.</p>
   {/if}
 </section>
 
@@ -221,7 +245,7 @@
   <form id="outbound-form" novalidate class="stack" onsubmit={saveOutbound}>
     {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
     <Field label="Name" id="outbound-name" error={fields.name}><input id="outbound-name" bind:value={form.name} /></Field>
-    <Field label="Type" id="outbound-kind" error={fields.kind}><Select id="outbound-kind" bind:value={form.kind} options={kinds} label="Type" /></Field>
+    <Field label="Type" id="outbound-kind" error={fields.kind}><Select id="outbound-kind" bind:value={form.kind} options={kinds.filter((kind) => !['warp', 'block', 'direct', 'fiend'].includes(kind.value) || (editing !== null && kind.value === form.kind))} label="Type" /></Field>
     {#if form.kind === 'socks5' || form.kind === 'http'}
       <Field label="Proxy server" id="outbound-server" error={fields.server}><input id="outbound-server" bind:value={form.server} placeholder="127.0.0.1:1080" /></Field>
       <div class="grid-2">
@@ -231,7 +255,7 @@
       {#if form.kind === 'socks5'}<Switch id="outbound-udp" bind:checked={form.udp} label="The proxy supports UDP ASSOCIATE" />{/if}
     {/if}
     {#if form.kind === 'fiend'}
-      <Field label="Node" id="outbound-link" error={fields.link_node_id}><Select id="outbound-link" bind:value={form.link} label="Node" options={nodes.filter((item) => item.id !== node).map((item) => ({ value: String(item.id), label: item.name, detail: item.address }))} /></Field>
+      <Field label="Node" id="outbound-link" error={fields.link_node_id}><Select id="outbound-link" bind:value={form.link} label="Node" options={nodes.filter((item) => item.id !== scope).map((item) => ({ value: String(item.id), label: item.name, detail: item.address }))} /></Field>
     {/if}
     {#if form.kind === 'http' || form.kind === 'warp' || (form.kind === 'socks5' && !form.udp)}
       <Field label="UDP traffic" id="outbound-fallback" error={fields.udp_fallback}>
@@ -249,7 +273,12 @@
   <form id="rule-form" novalidate class="stack" onsubmit={saveRule}>
     {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
     <Field label="Patterns" id="rule-pattern" error={fields.pattern} help="One per line: domain:example.com, full:www.example.com, keyword:ads, ip:10.0.0.0/8"><textarea id="rule-pattern" spellcheck="false" bind:value={rule.pattern}></textarea></Field>
-    <Field label="Outbound" id="rule-outbound" error={fields.outbound}><Select id="rule-outbound" bind:value={rule.outbound} options={outboundOptions} label="Outbound" /></Field>
+    <Field label="Action" id="rule-outbound" error={fields.outbound}><Select id="rule-outbound" bind:value={rule.outbound} options={outboundOptions} label="Action" /></Field>
+    {#if rule.outbound === '@warp'}
+      <Field label="UDP traffic" id="rule-udp" error={fields.udp_fallback} help="WARP carries TCP. Traffic routed to WARP stops when the tunnel is unavailable.">
+        <Select id="rule-udp" bind:value={rule.udp} options={udpOptions} label="UDP traffic" />
+      </Field>
+    {/if}
   </form>
   {#snippet actions()}
     <Button kind="ghost" onclick={() => (ruleOpen = false)}>Cancel</Button>

@@ -106,6 +106,9 @@ pub struct NodeView {
     pub applied_version: i64,
     pub desired_version: i64,
     pub disguise_id: Option<i64>,
+    pub disguise_version: i64,
+    pub disguise_changed_at: Option<i64>,
+    pub disguise_name: Option<String>,
     pub users: i64,
 }
 
@@ -124,7 +127,7 @@ pub struct NodeLogs {
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct WarpView {
-    pub enabled: bool,
+    pub rule_count: usize,
     pub registered: bool,
     pub running: bool,
     pub exit_v4: Option<String>,
@@ -140,7 +143,6 @@ pub struct WarpView {
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct WarpSettingsInput {
-    pub enabled: bool,
     pub rotate_every: Option<i64>,
 }
 
@@ -214,6 +216,14 @@ pub struct NodeSessions {
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
+pub struct NodeSessionClose {
+    pub node_id: i64,
+    pub node_name: String,
+    pub closed: Option<u64>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct UserDetail {
     pub user: UserView,
     pub usage: Vec<NodeUsage>,
@@ -263,6 +273,17 @@ pub struct PresetView {
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
+pub struct DisguiseSelection {
+    pub disguise_id: i64,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+pub struct DisguiseCheck {
+    pub checks: Vec<Check>,
+    pub ready: bool,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct ProbeInput {
     pub node_id: i64,
 }
@@ -301,6 +322,7 @@ pub struct RuleView {
     pub position: i64,
     pub pattern: String,
     pub outbound: String,
+    pub udp_fallback: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
@@ -308,6 +330,7 @@ pub struct RuleInput {
     pub node_id: Option<i64>,
     pub pattern: String,
     pub outbound: String,
+    pub udp_fallback: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
@@ -457,11 +480,14 @@ pub fn export(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         UserSecret,
         NodeUsage,
         NodeSessions,
+        NodeSessionClose,
         UserDetail,
         Check,
         OriginProfileView,
         DisguiseView,
         DisguiseInput,
+        DisguiseSelection,
+        DisguiseCheck,
         PresetView,
         ProbeInput,
         OutboundView,

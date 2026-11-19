@@ -21,7 +21,7 @@ On Android, capture with [PCAPdroid](https://github.com/emanuele-f/PCAPdroid) in
 
 ## Import
 
-In the panel, open **Disguises**, click **Add disguise**, select **Import a file** and choose `hello.bin`. Then select the disguise on the node page.
+In the panel, open **Server**, choose **Set disguise** or **Change disguise**, and import `hello.bin`. Check the site from the server, apply the disguise, and wait for the server to confirm it before sharing new user links.
 
 If the panel does not accept the file, make sure that you exported the **Record Layer** line. If it still fails, the app does not fit. Try a different app.
 

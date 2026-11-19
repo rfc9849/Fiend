@@ -25,6 +25,8 @@ pub struct NodeRow {
     pub last_seen: Option<i64>,
     pub started_at: Option<i64>,
     pub disguise_id: Option<i64>,
+    pub disguise_version: i64,
+    pub disguise_changed_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -113,9 +115,10 @@ pub struct RuleRow {
     pub position: i64,
     pub pattern: String,
     pub outbound: String,
+    pub udp_fallback: Option<String>,
 }
 
-pub const NODE_COLUMNS: &str = "id, name, address, port, local, arch, control_secret, service_secret, version, applied_version, status, last_error, last_seen, started_at, disguise_id, created_at";
+pub const NODE_COLUMNS: &str = "id, name, address, port, local, arch, control_secret, service_secret, version, applied_version, status, last_error, last_seen, started_at, disguise_id, disguise_version, disguise_changed_at, created_at";
 pub const USER_COLUMNS: &str = "id, name, secret, enabled, note, traffic_limit, used_up, used_down, expire_at, hold_days, reset_period, reset_at, usage_epoch, last_seen, online, created_at";
 
 pub async fn node(app: &App, id: i64) -> ApiResult<NodeRow> {
@@ -268,31 +271,14 @@ pub async fn routing_for(
             merged.push(row);
         }
     }
-    if merged.iter().any(|row| row.kind == "warp") {
-        let added = sqlx::query("INSERT INTO warp (node_id, enabled) VALUES (?, 1) ON CONFLICT(node_id) DO UPDATE SET enabled = 1 WHERE chosen = 0 AND enabled = 0")
-            .bind(node_id)
-            .execute(&app.db)
-            .await?;
-        if added.rows_affected() > 0 {
-            crate::db::bump_version(&app.db).await?;
-        }
-    }
-    let warp: Option<(bool, Option<i64>)> =
-        sqlx::query_as("SELECT enabled, rotate_every FROM warp WHERE node_id = ?")
+    let rotate_every: Option<i64> =
+        sqlx::query_scalar("SELECT rotate_every FROM warp WHERE node_id = ?")
             .bind(node_id)
             .fetch_optional(&app.db)
-            .await?;
-    let warp = warp
-        .map(|(enabled, rotate_every)| WarpSettings {
-            enabled,
-            rotate_every: rotate_every.map(|value| value as u64),
-        })
-        .unwrap_or_default();
+            .await?
+            .flatten();
     let mut outbounds = Vec::new();
     for row in &merged {
-        if row.kind == "warp" && !warp.enabled {
-            continue;
-        }
         if row.kind == "fiend"
             && serde_json::from_str::<serde_json::Value>(&row.config)
                 .ok()
@@ -320,24 +306,84 @@ pub async fn routing_for(
             outbound.udp_fallback = None;
         }
     }
-    let rules: Vec<RuleRow> = sqlx::query_as(
-        "SELECT id, node_id, position, pattern, outbound FROM rules WHERE node_id IS NULL OR node_id = ? ORDER BY node_id IS NOT NULL, position, id",
+    let rows: Vec<RuleRow> = sqlx::query_as(
+        "SELECT id, node_id, position, pattern, outbound, udp_fallback FROM rules WHERE node_id IS NULL OR node_id = ? ORDER BY node_id IS NOT NULL, position, id",
     )
     .bind(node_id)
     .fetch_all(&app.db)
     .await?;
-    let rules = rules
-        .into_iter()
-        .filter(|rule| rule.outbound == "direct" || names.contains(&rule.outbound))
-        .map(|rule| Rule {
-            pattern: rule.pattern,
-            outbound: rule.outbound,
-        })
-        .collect();
+    let mut rules = Vec::new();
+    for row in rows {
+        let outbound = match row.outbound.as_str() {
+            "@warp" | "@block" => {
+                let kind = if row.outbound == "@warp" {
+                    OutboundKind::Warp
+                } else {
+                    OutboundKind::Block
+                };
+                let fallback = row.udp_fallback.filter(|fallback| {
+                    fallback == "direct"
+                        || outbounds
+                            .iter()
+                            .any(|item| item.id == *fallback && item.kind.supports_udp())
+                });
+                if let Some(item) = outbounds
+                    .iter()
+                    .find(|item| item.kind == kind && item.udp_fallback == fallback)
+                {
+                    item.id.clone()
+                } else {
+                    let mut index = outbounds.len();
+                    let id = loop {
+                        let id = format!("panel-action-{index}");
+                        if !outbounds.iter().any(|item| item.id == id) {
+                            break id;
+                        }
+                        index += 1;
+                    };
+                    outbounds.push(Outbound {
+                        id: id.clone(),
+                        kind,
+                        udp_fallback: fallback,
+                    });
+                    id
+                }
+            }
+            "direct" => row.outbound,
+            _ if names.contains(&row.outbound) => row.outbound,
+            _ => continue,
+        };
+        rules.push(Rule {
+            pattern: row.pattern,
+            outbound,
+        });
+    }
+    outbounds.retain(|item| {
+        !matches!(item.kind, OutboundKind::Warp)
+            || rules.iter().any(|rule| rule.outbound == item.id)
+    });
+    let warp = WarpSettings {
+        enabled: outbounds
+            .iter()
+            .any(|item| matches!(item.kind, OutboundKind::Warp)),
+        rotate_every: rotate_every.map(|value| value as u64),
+    };
     Ok((outbounds, rules, warp))
 }
 
-pub async fn desired(app: &App, node: &NodeRow) -> ApiResult<Option<DesiredState>> {
+pub async fn warp_rule_count(app: &App, node_id: i64) -> ApiResult<usize> {
+    let (outbounds, rules, _) = routing_for(app, node_id).await?;
+    Ok(rules
+        .iter()
+        .filter(|rule| {
+            outbounds
+                .iter()
+                .any(|item| item.id == rule.outbound && matches!(item.kind, OutboundKind::Warp))
+        })
+        .count())
+}
+
+pub async fn desired(app: &App, node: &NodeRow, version: u64) -> ApiResult<Option<DesiredState>> {
     let Some(disguise_id) = node.disguise_id else {
         return Ok(None);
     };
@@ -375,7 +421,7 @@ pub async fn desired(app: &App, node: &NodeRow) -> ApiResult<Option<DesiredState
     });
     let (outbounds, rules, warp) = routing_for(app, node.id).await?;
     Ok(Some(DesiredState {
-        version: crate::db::version(&app.db).await as u64,
+        version,
         users,
         origin_host: disguise.origin_host.clone(),
         origin_port: disguise.origin_port as u16,
@@ -410,6 +456,11 @@ pub async fn user_link(app: &App, user: &UserRow) -> ApiResult<Link> {
             ));
             continue;
         };
+        if node.applied_version < node.disguise_version {
+            return Err(ApiError::conflict(
+                "Wait for the node to apply its TLS disguise before sharing a link.",
+            ));
+        }
         if first_disguise.is_none() {
             first_disguise = Some(disguise_id);
             template = Some(self::disguise(app, disguise_id).await?.template()?);

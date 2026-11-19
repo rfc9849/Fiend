@@ -44,6 +44,8 @@ pub fn routes() -> Router<App> {
             "/nodes/{id}",
             get(get_node).put(edit_node).delete(delete_node),
         )
+        .route("/nodes/{id}/disguise/check", post(check_node_disguise))
+        .route("/nodes/{id}/disguise", put(apply_node_disguise))
         .route("/nodes/{id}/restart", post(restart_node))
         .route("/nodes/{id}/logs", get(node_logs))
         .route(
@@ -178,6 +180,8 @@ async fn local_state(app: &App) -> std::io::Result<fiend_core::node::DesiredStat
         last_seen: None,
         started_at: None,
         disguise_id: None,
+        disguise_version: 0,
+        disguise_changed_at: None,
         created_at: 0,
     };
     let mut client = crate::sync::connect(app, &probe).await?;
@@ -253,6 +257,10 @@ async fn node_view(
         .bind(node.id)
         .fetch_one(&app.db)
         .await?;
+    let disguise_name = sqlx::query_scalar("SELECT name FROM disguises WHERE id = ?")
+        .bind(node.disguise_id)
+        .fetch_optional(&app.db)
+        .await?;
     let live = live.get(&node.id).cloned().unwrap_or_default();
     let fresh = node.last_seen.is_some_and(|seen| now() - seen < 30);
     let status = if node.status == "online" && !fresh {
@@ -279,6 +287,9 @@ async fn node_view(
         applied_version: node.applied_version,
         desired_version: crate::db::version(&app.db).await,
         disguise_id: node.disguise_id,
+        disguise_version: node.disguise_version,
+        disguise_changed_at: node.disguise_changed_at,
+        disguise_name,
         users,
     })
 }
@@ -414,6 +425,9 @@ async fn edit_node(
             "A port change needs a node reinstall.",
         ));
     }
+    if node.disguise_id.is_some() && node.disguise_id != input.disguise_id {
+        return Err(ApiError::field("disguise_id", "Use Change disguise to check and switch the TLS disguise."));
+    }
     if let Some(disguise) = input.disguise_id {
         state::disguise(&app, disguise).await?;
     }
@@ -432,6 +446,85 @@ async fn edit_node(
     )
     .await;
     changed(&app).await?;
+    get_node(State(app), admin, Path(id)).await
+}
+
+async fn inspect_disguise(
+    app: &App,
+    node: &NodeRow,
+    disguise: &DisguiseRow,
+) -> (Vec<Check>, Option<fiend_core::transport::OriginProfile>) {
+    let addresses = [node.address.clone()];
+    let fallbacks = fiend_core::config::load_server(&app.config.local_node)
+        .map(|settings| settings.fallbacks)
+        .unwrap_or_default();
+    let (same_server, fallback, result) = tokio::join!(
+        same_server_check(&disguise.origin_host, &addresses),
+        fallback_check(&disguise.origin_host, disguise.origin_port as u16, &addresses, &fallbacks),
+        probe_origin(app, disguise, node.id),
+    );
+    let (detail, profile) = match result {
+        Ok(profile) => ("The node reached the site and completed the TLS check.".into(), Some(profile)),
+        Err(error) => (error.message, None),
+    };
+    let mut checks = vec![same_server, fallback];
+    checks.push(Check { name: "Origin connection".into(), ok: profile.is_some(), detail });
+    (checks, profile)
+}
+
+async fn check_node_disguise(
+    State(app): State<App>,
+    _admin: Admin,
+    Path(id): Path<i64>,
+    Json(input): Json<DisguiseSelection>,
+) -> ApiResult<Json<DisguiseCheck>> {
+    let node = state::node(&app, id).await?;
+    let disguise = state::disguise(&app, input.disguise_id).await?;
+    let (checks, profile) = inspect_disguise(&app, &node, &disguise).await;
+    Ok(Json(DisguiseCheck { checks, ready: profile.is_some() }))
+}
+
+async fn apply_node_disguise(
+    State(app): State<App>,
+    admin: Admin,
+    Path(id): Path<i64>,
+    Json(input): Json<DisguiseSelection>,
+) -> ApiResult<Json<NodeView>> {
+    let node = state::node(&app, id).await?;
+    let disguise = state::disguise(&app, input.disguise_id).await?;
+    let profile = probe_origin(&app, &disguise, id).await?;
+    let mut transaction = app.db.begin().await?;
+    let version = crate::db::bump_version_tx(&mut transaction).await?;
+    let result = sqlx::query(
+        "UPDATE nodes SET disguise_id = ?, disguise_version = ?, disguise_changed_at = ? WHERE id = ? AND disguise_id IS ? AND address = ?",
+    )
+    .bind(disguise.id)
+    .bind(version)
+    .bind(now())
+    .bind(id)
+    .bind(node.disguise_id)
+    .bind(&node.address)
+    .execute(&mut *transaction)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::conflict("The node settings changed. Reopen Change disguise and try again."));
+    }
+    sqlx::query("UPDATE disguises SET origin_profile = ?, probed_at = ?, probe_error = NULL WHERE id = ?")
+        .bind(serde_json::to_string(&profile).map_err(ApiError::internal)?)
+        .bind(now())
+        .bind(disguise.id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    app.sync.wake_all();
+    app.emit("nodes", Some(id.to_string()));
+    app.audit(
+        Some(admin.id),
+        "disguise selected",
+        &format!("node {}", node.name),
+        &disguise.name,
+    )
+    .await;
     get_node(State(app), admin, Path(id)).await
 }
 
@@ -508,11 +601,11 @@ async fn node_logs(
 }
 
 fn warp_view(
-    row: Option<(bool, Option<i64>, Option<String>)>,
+    row: (usize, Option<i64>, Option<String>),
     status: Option<serde_json::Value>,
     error: Option<String>,
 ) -> WarpView {
-    let (enabled, rotate_every, saved) = row.unwrap_or((false, None, None));
+    let (rule_count, rotate_every, saved) = row;
     let status = status
         .or_else(|| saved.and_then(|text| serde_json::from_str(&text).ok()))
         .unwrap_or_default();
@@ -523,7 +616,7 @@ fn warp_view(
             .map(str::to_owned)
     };
     WarpView {
-        enabled,
+        rule_count,
         registered: status
             .get("registered")
             .and_then(serde_json::Value::as_bool)
@@ -545,13 +638,15 @@ fn warp_view(
     }
 }
 
-async fn warp_row(app: &App, id: i64) -> ApiResult<Option<(bool, Option<i64>, Option<String>)>> {
-    Ok(
-        sqlx::query_as("SELECT enabled, rotate_every, status FROM warp WHERE node_id = ?")
+async fn warp_row(app: &App, id: i64) -> ApiResult<(usize, Option<i64>, Option<String>)> {
+    let count = state::warp_rule_count(app, id).await?;
+    let (rotate_every, status) =
+        sqlx::query_as("SELECT rotate_every, status FROM warp WHERE node_id = ?")
             .bind(id)
             .fetch_optional(&app.db)
-            .await?,
-    )
+            .await?
+            .unwrap_or_default();
+    Ok((count, rotate_every, status))
 }
 
 async fn save_warp_status(
@@ -609,82 +704,20 @@ async fn warp_settings(
             "Choose off, 6 h, 12 h, 24 h, or 7 d.",
         ));
     }
-    sqlx::query("INSERT INTO warp (node_id, enabled, rotate_every, chosen) VALUES (?, ?, ?, 1) ON CONFLICT(node_id) DO UPDATE SET enabled = excluded.enabled, rotate_every = excluded.rotate_every, chosen = 1")
+    sqlx::query("INSERT INTO warp (node_id, rotate_every) VALUES (?, ?) ON CONFLICT(node_id) DO UPDATE SET rotate_every = excluded.rotate_every")
         .bind(id)
-        .bind(input.enabled)
         .bind(input.rotate_every)
         .execute(&app.db)
         .await?;
     app.audit(
         Some(admin.id),
-        "WARP settings",
+        "WARP rotation schedule changed",
         &format!("node {}", node.name),
-        &match (input.enabled, input.rotate_every) {
-            (false, _) => "off".to_owned(),
-            (true, None) => "on".to_owned(),
-            (true, Some(every)) if every % 86400 == 0 => {
-                format!("on, New IP every {} d", every / 86400)
-            }
-            (true, Some(every)) => format!("on, New IP every {} h", every / 3600),
-        },
+        "",
     )
     .await;
     changed(&app).await?;
-    if input.enabled {
-        ensure_warp(&app, id).await?;
-    }
     Ok(Json(warp_view(warp_row(&app, id).await?, None, None)))
-}
-
-async fn ensure_warp(app: &App, id: i64) -> ApiResult<()> {
-    wait_applied(app, id).await;
-    let status = crate::sync::call(app, id, Call::WarpStatus)
-        .await
-        .map_err(control_error)?;
-    if status
-        .get("registered")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        save_warp_status(app, id, status).await?;
-        return Ok(());
-    }
-    let status = match crate::sync::call(app, id, Call::WarpRegister).await {
-        Ok(status) => status,
-        Err(error) => {
-            let status = crate::sync::call(app, id, Call::WarpStatus)
-                .await
-                .map_err(control_error)?;
-            if !status
-                .get("registered")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(control_error(error));
-            }
-            status
-        }
-    };
-    crate::sync::registered(app, id, status).await;
-    Ok(())
-}
-
-async fn enable_warp_for(app: &App, node_id: Option<i64>) -> ApiResult<()> {
-    let nodes: Vec<i64> = match node_id {
-        Some(id) => vec![id],
-        None => state::nodes(app)
-            .await?
-            .iter()
-            .map(|node| node.id)
-            .collect(),
-    };
-    for id in &nodes {
-        sqlx::query("INSERT INTO warp (node_id, enabled, chosen) VALUES (?, 1, 1) ON CONFLICT(node_id) DO UPDATE SET enabled = 1, chosen = 1")
-            .bind(id)
-            .execute(&app.db)
-            .await?;
-    }
-    changed(app).await
 }
 
 async fn wait_applied(app: &App, id: i64) {
@@ -707,9 +740,8 @@ async fn warp_register(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<WarpView>> {
     let node = state::node(&app, id).await?;
-    let enabled = warp_row(&app, id).await?.is_some_and(|row| row.0);
-    if !enabled {
-        return Err(ApiError::bad("Turn on WARP for this node first."));
+    if state::warp_rule_count(&app, id).await? == 0 {
+        return Err(ApiError::bad("Add a rule that uses WARP first."));
     }
     wait_applied(&app, id).await;
     let status = crate::sync::call(&app, id, Call::WarpRegister)
@@ -787,6 +819,9 @@ async fn warp_delete(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<WarpView>> {
     let node = state::node(&app, id).await?;
+    if state::warp_rule_count(&app, id).await? != 0 {
+        return Err(ApiError::conflict("Remove or change the rules that use WARP before deleting the account."));
+    }
     crate::sync::call(&app, id, Call::WarpDelete)
         .await
         .map_err(control_error)?;
@@ -1161,10 +1196,11 @@ async fn kill_sessions(
     State(app): State<App>,
     admin: Admin,
     Path(id): Path<i64>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<Json<Vec<NodeSessionClose>>> {
     let user = state::user(&app, id).await?;
+    let mut results = Vec::new();
     for node in state::nodes(&app).await? {
-        let _ = crate::sync::call(
+        let call = crate::sync::call(
             &app,
             node.id,
             Call::KillSessions {
@@ -1172,15 +1208,41 @@ async fn kill_sessions(
             },
         )
         .await;
+        let (closed, error) = match call {
+            Ok(value) => match value["closed"].as_u64() {
+                Some(count) => (Some(count), None),
+                None => (
+                    None,
+                    Some("The node did not report how many sessions it closed.".into()),
+                ),
+            },
+            Err(error) => (None, Some(error.to_string())),
+        };
+        results.push(NodeSessionClose {
+            node_id: node.id,
+            node_name: node.name,
+            closed,
+            error,
+        });
     }
+    let confirmed = results.iter().filter(|row| row.closed.is_some()).count();
+    let action = if results.is_empty() {
+        "no nodes to close sessions on"
+    } else if confirmed == results.len() {
+        "sessions closed"
+    } else if confirmed == 0 {
+        "session close failed"
+    } else {
+        "sessions partially closed"
+    };
     app.audit(
         Some(admin.id),
-        "sessions closed",
+        action,
         &format!("user {}", user.name),
-        "",
+        &format!("{confirmed} of {} nodes confirmed", results.len()),
     )
     .await;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(results))
 }
 
 fn disguise_checks(row: &DisguiseRow) -> (String, Vec<Check>) {
@@ -1553,21 +1615,28 @@ async fn delete_disguise(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn probe_disguise(app: &App, id: i64, node: i64) -> ApiResult<()> {
-    let row = state::disguise(app, id).await?;
+async fn probe_origin(
+    app: &App,
+    disguise: &DisguiseRow,
+    node: i64,
+) -> ApiResult<fiend_core::transport::OriginProfile> {
     let result = crate::sync::call(
         app,
         node,
         Call::ProbeOrigin {
-            host: Some(row.origin_host.clone()),
-            port: Some(row.origin_port as u16),
+            host: Some(disguise.origin_host.clone()),
+            port: Some(disguise.origin_port as u16),
         },
     )
-    .await;
-    match result {
-        Ok(value) => {
-            let profile: fiend_core::transport::OriginProfile =
-                serde_json::from_value(value).map_err(ApiError::internal)?;
+    .await
+    .map_err(control_error)?;
+    serde_json::from_value(result).map_err(ApiError::internal)
+}
+
+pub async fn probe_disguise(app: &App, id: i64, node: i64) -> ApiResult<()> {
+    let row = state::disguise(app, id).await?;
+    match probe_origin(app, &row, node).await {
+        Ok(profile) => {
             sqlx::query("UPDATE disguises SET origin_profile = ?, probed_at = ?, probe_error = NULL WHERE id = ?")
                 .bind(serde_json::to_string(&profile).map_err(ApiError::internal)?)
                 .bind(now())
@@ -1580,11 +1649,11 @@ pub async fn probe_disguise(app: &App, id: i64, node: i64) -> ApiResult<()> {
         Err(error) => {
             sqlx::query("UPDATE disguises SET probed_at = ?, probe_error = ? WHERE id = ?")
                 .bind(now())
-                .bind(error.to_string())
+                .bind(&error.message)
                 .bind(id)
                 .execute(&app.db)
                 .await?;
-            Err(control_error(error))
+            Err(error)
         }
     }
 }
@@ -1655,7 +1724,7 @@ async fn routing(
         .bind(query.node)
         .fetch_all(&app.db)
         .await?;
-    let rules: Vec<RuleRow> = sqlx::query_as("SELECT id, node_id, position, pattern, outbound FROM rules WHERE node_id IS ? ORDER BY position, id")
+    let rules: Vec<RuleRow> = sqlx::query_as("SELECT id, node_id, position, pattern, outbound, udp_fallback FROM rules WHERE node_id IS ? ORDER BY position, id")
         .bind(query.node)
         .fetch_all(&app.db)
         .await?;
@@ -1669,6 +1738,7 @@ async fn routing(
                 position: rule.position,
                 pattern: rule.pattern,
                 outbound: rule.outbound,
+                udp_fallback: rule.udp_fallback,
             })
             .collect(),
     }))
@@ -1772,8 +1842,7 @@ async fn outbound_config(
 
 async fn validate_routing(app: &App) -> ApiResult<()> {
     for node in state::nodes(app).await? {
-        let (outbounds, rules, mut warp) = state::routing_for(app, node.id).await?;
-        warp.enabled = true;
+        let (outbounds, rules, warp) = state::routing_for(app, node.id).await?;
         fiend_core::node::outbound::validate(&outbounds, &rules, &warp)
             .map_err(|error| ApiError::bad(format!("Node {}: {error}", node.name)))?;
     }
@@ -1815,9 +1884,6 @@ async fn create_outbound(
     )
     .await;
     changed(&app).await?;
-    if input.kind == "warp" {
-        enable_warp_for(&app, input.node_id).await?;
-    }
     Ok(Json(Created { id }))
 }
 
@@ -1885,9 +1951,6 @@ async fn edit_outbound(
     )
     .await;
     changed(&app).await?;
-    if input.kind == "warp" && previous.kind != "warp" {
-        enable_warp_for(&app, input.node_id).await?;
-    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1914,6 +1977,15 @@ async fn delete_outbound(
     if used > 0 {
         return Err(ApiError::conflict("Rules use this outbound."));
     }
+    let used_for_udp: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rules WHERE udp_fallback = ? AND (node_id IS ? OR ? IS NULL))")
+        .bind(&row.name)
+        .bind(row.node_id)
+        .bind(row.node_id)
+        .fetch_one(&app.db)
+        .await?;
+    if used_for_udp {
+        return Err(ApiError::conflict("A WARP rule uses this outbound for UDP."));
+    }
     sqlx::query("DELETE FROM outbounds WHERE id = ?")
         .bind(id)
         .execute(&app.db)
@@ -1939,16 +2011,33 @@ async fn check_rule(app: &App, input: &RuleInput) -> ApiResult<()> {
     }
     fiend_rules::parse_list(&input.pattern, true)
         .map_err(|error| ApiError::field("pattern", error.to_string()))?;
-    if input.outbound != "direct" {
-        let found: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM outbounds WHERE name = ? AND (node_id IS NULL OR node_id IS ?)",
+    if !matches!(input.outbound.as_str(), "direct" | "@warp" | "@block") {
+        let found: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM outbounds WHERE name = ? AND (node_id IS NULL OR node_id IS ?))",
         )
         .bind(&input.outbound)
         .bind(input.node_id)
         .fetch_one(&app.db)
         .await?;
-        if found == 0 {
-            return Err(ApiError::field("outbound", "Choose an outbound."));
+        if !found {
+            return Err(ApiError::field("outbound", "Choose an action."));
+        }
+    }
+    if let Some(fallback) = &input.udp_fallback {
+        if input.outbound != "@warp" {
+            return Err(ApiError::field("udp_fallback", "This action does not take a UDP route."));
+        }
+        if fallback != "direct" {
+            let target: Option<OutboundRow> = sqlx::query_as(
+                "SELECT id, node_id, name, kind, config, udp_fallback FROM outbounds WHERE name = ? AND (node_id IS NULL OR node_id IS ?) ORDER BY node_id IS NOT NULL DESC, id DESC LIMIT 1",
+            )
+            .bind(fallback)
+            .bind(input.node_id)
+            .fetch_optional(&app.db)
+            .await?;
+            if !target.is_some_and(|row| outbound_view(&row).udp) {
+                return Err(ApiError::field("udp_fallback", "Choose an outbound that supports UDP."));
+            }
         }
     }
     if let Some(node) = input.node_id {
@@ -1969,12 +2058,13 @@ async fn create_rule(
             .fetch_one(&app.db)
             .await?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO rules (node_id, position, pattern, outbound) VALUES (?, ?, ?, ?) RETURNING id",
+        "INSERT INTO rules (node_id, position, pattern, outbound, udp_fallback) VALUES (?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(input.node_id)
     .bind(position)
     .bind(&input.pattern)
     .bind(&input.outbound)
+    .bind(&input.udp_fallback)
     .fetch_one(&app.db)
     .await?;
     app.audit(
@@ -1996,9 +2086,10 @@ async fn edit_rule(
 ) -> ApiResult<StatusCode> {
     check_rule(&app, &input).await?;
     let result =
-        sqlx::query("UPDATE rules SET pattern = ?, outbound = ? WHERE id = ? AND node_id IS ?")
+        sqlx::query("UPDATE rules SET pattern = ?, outbound = ?, udp_fallback = ? WHERE id = ? AND node_id IS ?")
             .bind(&input.pattern)
             .bind(&input.outbound)
+            .bind(&input.udp_fallback)
             .bind(id)
             .bind(input.node_id)
             .execute(&app.db)
@@ -2272,46 +2363,7 @@ async fn restore(
     if !body.starts_with(b"SQLite format 3\0") {
         return Err(ApiError::bad("The file is not a panel database backup."));
     }
-    let staging = app.config.database.with_extension("db.check");
-    tokio::fs::write(&staging, &body)
-        .await
-        .map_err(ApiError::internal)?;
-    let check = async {
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&staging)
-            .read_only(true);
-        let mut connection = sqlx::ConnectOptions::connect(&options).await?;
-        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
-            .fetch_one(&mut connection)
-            .await?;
-        let admins: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admins")
-            .fetch_one(&mut connection)
-            .await?;
-        let migrations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
-            .fetch_one(&mut connection)
-            .await?;
-        sqlx::Connection::close(connection).await?;
-        Ok::<_, sqlx::Error>((integrity, admins, migrations))
-    }
-    .await;
-    match check {
-        Ok((integrity, admins, migrations))
-            if integrity == "ok" && admins > 0 && migrations > 0 => {}
-        _ => {
-            let _ = std::fs::remove_file(&staging);
-            return Err(ApiError::bad(
-                "The file is not a valid panel database backup.",
-            ));
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))
-            .map_err(ApiError::internal)?;
-    }
-    std::fs::rename(&staging, app.config.database.with_extension("db.restore"))
-        .map_err(ApiError::internal)?;
+    crate::db::stage_restore(&app.config.database, &body).await?;
     app.audit(
         Some(admin.id),
         "restore staged",
