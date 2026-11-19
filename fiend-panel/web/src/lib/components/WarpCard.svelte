@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Button from './Button.svelte';
-  import Field from './Field.svelte';
   import Select from './Select.svelte';
   import Confirm from './Confirm.svelte';
+  import Icon from './Icon.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
   import { onEvent } from '#lib/stores/events.ts';
@@ -18,6 +18,10 @@
   let deleting = $state(false);
   let every = $state('off');
   let request = 0;
+
+  const ready = $derived(!!warp && warp.rule_count > 0 && warp.running && warp.warp_on && !warp.error);
+  const badgeTone = $derived(!warp ? '' : warp.error ? 'warn' : ready ? 'green' : warp.rule_count > 0 ? 'warn' : '');
+  const badgeLabel = $derived(!warp ? 'Loading' : warp.error ? 'Needs attention' : ready ? 'Ready' : warp.rule_count > 0 ? 'Pending' : 'Standby');
 
   async function load() {
     const current = ++request;
@@ -74,50 +78,105 @@
   });
 </script>
 
-<section class="card" aria-labelledby="warp-title-{node}">
-  <div class="card-header">
-    <h2 id="warp-title-{node}">Cloudflare WARP</h2>
-    {#if warp?.registered}<Button kind="primary" icon="refresh" busy={busy === 'rotate'} disabled={!warp.running || !!busy} onclick={rotate}>New IP</Button>{/if}
+<section aria-labelledby="warp-title-{node}">
+  <div class="group-head">
+    <h2 id="warp-title-{node}" class="group-title">
+      Cloudflare WARP
+      {#if warp}<span class="badge {badgeTone}">{badgeLabel}</span>{/if}
+    </h2>
+    {#if warp?.registered}
+      <Button size="compact" kind="primary" icon="refresh" busy={busy === 'rotate'} disabled={!warp.running || !!busy} onclick={rotate}>New IP</Button>
+    {/if}
   </div>
-  {#if error}<p class="note error" role="alert">{error}</p>{/if}
-  {#if warp}
-    <div class="stack">
-      {#if warp.rule_count}
-        <p>{warp.rule_count} rule{warp.rule_count === 1 ? '' : 's'} use{warp.rule_count === 1 ? 's' : ''} WARP. {warp.running && warp.warp_on && !warp.error ? 'Tunnel ready.' : 'Tunnel not confirmed.'}</p>
-        {#if !warp.registered}<div class="row"><Button busy={busy === 'register'} disabled={!!busy} onclick={register}>Retry registration</Button></div>{/if}
-      {:else}
-        <p>No rules use WARP. Choose Cloudflare WARP when adding a rule to start the tunnel.</p>
+
+  <div class="group">
+    {#if error}
+      <div class="group-body"><p class="note error" role="alert">{error}</p></div>
+    {/if}
+
+    {#if warp}
+      <div class="group-row">
+        <div class="setting-lead">
+          <span class="icon-tile {ready ? 'green' : warp.error ? 'warn' : 'accent'}"><Icon name="shield" size={16} /></span>
+          <div class="setting-copy">
+            {#if warp.rule_count}
+              <div class="setting-title">{warp.rule_count} rule{warp.rule_count === 1 ? '' : 's'} routed via WARP</div>
+              <p class="setting-desc">{ready ? 'Tunnel active and verified.' : 'Tunnel is not confirmed yet.'}</p>
+            {:else}
+              <div class="setting-title">Built-in WARP outbound</div>
+              <p class="setting-desc">Select Cloudflare WARP on any rule to activate the tunnel automatically.</p>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      {#if warp.rule_count && !warp.registered}
+        <div class="group-row">
+          <span class="info-label">Registration</span>
+          <Button size="compact" busy={busy === 'register'} disabled={!!busy} onclick={register}>Retry registration</Button>
+        </div>
       {/if}
+
       {#if warp.registered}
-        <dl class="facts">
-          <dt>Exit IPv4</dt><dd class="mono">{warp.exit_v4 ?? '—'}</dd>
-          <dt>Exit IPv6</dt><dd class="mono">{warp.exit_v6 ?? '—'}</dd>
-          <dt>Location</dt><dd>{warp.colo ?? '—'}{#if !warp.warp_on} · <span class="warn-text">not on WARP</span>{/if}</dd>
-          <dt>Account made</dt><dd>{ago(warp.created_at)}</dd>
-          <dt>Last new IP</dt><dd>{date(warp.rotated_at)}</dd>
-        </dl>
+        <div class="group-row">
+          <span class="info-label">Exit IPv4</span>
+          <span class="info-value mono">{warp.exit_v4 ?? '—'}</span>
+        </div>
+        <div class="group-row">
+          <span class="info-label">Exit IPv6</span>
+          <span class="info-value mono">{warp.exit_v6 ?? '—'}</span>
+        </div>
+        <div class="group-row">
+          <span class="info-label">Location</span>
+          <span class="info-value">
+            {warp.colo ?? '—'}
+            {#if !warp.warp_on}<span class="badge warn">not on WARP</span>{/if}
+          </span>
+        </div>
+        <div class="group-row">
+          <span class="info-label">Account made</span>
+          <span class="info-value">{ago(warp.created_at)}</span>
+        </div>
+        <div class="group-row">
+          <span class="info-label">Last new IP</span>
+          <span class="info-value">{date(warp.rotated_at)}</span>
+        </div>
+
         {#if rotation}
-          <p class="note">
-            IPv4: <span class="mono">{rotation.before_v4 ?? '—'}</span> → <span class="mono">{rotation.after_v4 ?? '—'}</span><br />
-            IPv6: <span class="mono">{rotation.before_v6 ?? '—'}</span> → <span class="mono">{rotation.after_v6 ?? '—'}</span>
-          </p>
+          <div class="group-body diff-box">
+            <p class="note">
+              IPv4: <span class="mono">{rotation.before_v4 ?? '—'}</span> → <span class="mono">{rotation.after_v4 ?? '—'}</span><br />
+              IPv6: <span class="mono">{rotation.before_v6 ?? '—'}</span> → <span class="mono">{rotation.after_v6 ?? '—'}</span>
+            </p>
+          </div>
         {/if}
-        <div class="rotate"><Field label="Automatic new IP" id="warp-rotate-{node}"><Select id="warp-rotate-{node}" bind:value={every} label="Automatic new IP" onchange={settings} options={[{ value: 'off', label: 'Off' }, { value: '21600', label: 'Every 6 h' }, { value: '43200', label: 'Every 12 h' }, { value: '86400', label: 'Every 24 h' }, { value: '604800', label: 'Every 7 d' }]} /></Field></div>
+
+        <div class="group-row">
+          <span class="info-label">Auto rotation</span>
+          <div class="rotate">
+            <Select id="warp-rotate-{node}" bind:value={every} label="Automatic new IP" onchange={settings} options={[{ value: 'off', label: 'Off' }, { value: '21600', label: 'Every 6 h' }, { value: '43200', label: 'Every 12 h' }, { value: '86400', label: 'Every 24 h' }, { value: '604800', label: 'Every 7 d' }]} />
+          </div>
+        </div>
       {/if}
-      {#if warp.error}<p class="note warn">{warp.error}</p>{/if}
-      {#if warp.registered && !warp.rule_count}<div><Button kind="ghost" onclick={() => (deleting = true)}>Delete account</Button></div>{/if}
-    </div>
-  {:else}
-    <p class="muted">Loading…</p>
-  {/if}
+
+      {#if warp.error}
+        <div class="group-body diff-box"><p class="note warn">{warp.error}</p></div>
+      {/if}
+
+      {#if warp.registered && !warp.rule_count}
+        <div class="group-footer end">
+          <Button size="compact" kind="danger" onclick={() => (deleting = true)}>Delete account</Button>
+        </div>
+      {/if}
+    {:else}
+      <div class="group-row"><p class="muted small">Loading…</p></div>
+    {/if}
+  </div>
 </section>
 
-<Confirm bind:open={deleting} title="Delete the WARP account"  action="Delete account" onconfirm={async () => { warp = await api.del<WarpView>(`/nodes/${node}/warp`); toast('WARP account deleted'); }} />
+<Confirm bind:open={deleting} title="Delete the WARP account" action="Delete account" onconfirm={async () => { warp = await api.del<WarpView>(`/nodes/${node}/warp`); toast('WARP account deleted'); }} />
 
 <style>
-  .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; }
-  dt { color: var(--muted); }
-  dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-  .rotate { width: 200px; }
-  .warn-text { color: var(--warn); }
+  .rotate { width: 138px; }
+  .diff-box { border-top: 1px solid var(--line); padding: 12px 14px; }
 </style>

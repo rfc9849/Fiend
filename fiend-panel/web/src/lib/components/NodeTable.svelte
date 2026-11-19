@@ -1,12 +1,19 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import NodeSync from './NodeSync.svelte';
+  import EmptyState from './EmptyState.svelte';
+  import Button from './Button.svelte';
   import type { NodeView } from '#lib/api/generated/index.ts';
   import { ago, bytes, rate, stateLabel } from '#lib/format.ts';
   let { nodes }: { nodes: NodeView[] } = $props();
 </script>
 
 {#if nodes.length === 0}
-  <p class="empty">No nodes yet. <a href="/welcome?next=%2Fnodes">Connect the local node</a>.</p>
+  <EmptyState icon="server" title="No server connected" message="Connect the local server to start monitoring traffic and managing access." compact>
+    {#snippet actions()}
+      <Button kind="primary" size="compact" onclick={() => goto('/welcome?next=%2Fnodes')}>Connect local server</Button>
+    {/snippet}
+  </EmptyState>
 {:else}
   <div class="table-wrap">
     <table>
@@ -40,7 +47,6 @@
 {/if}
 
 <style>
-  .empty { padding: 18px; border: 1px dashed var(--line); border-radius: 9px; text-align: center; }
   .state { color: var(--danger); }
-  .arch { margin-left: 6px; }
+  .arch { margin-left: 6px; font-size: 11px; }
 </style>

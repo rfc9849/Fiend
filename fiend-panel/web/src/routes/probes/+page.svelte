@@ -4,6 +4,8 @@
   import TopBar from '#lib/components/TopBar.svelte';
   import Tabs from '#lib/components/Tabs.svelte';
   import Button from '#lib/components/Button.svelte';
+  import EmptyState from '#lib/components/EmptyState.svelte';
+  import Icon from '#lib/components/Icon.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
   import { onEvent } from '#lib/stores/events.ts';
   import { ago, bytes, date } from '#lib/format.ts';
@@ -20,14 +22,31 @@
     bad_early_data: 'Bad early data',
     key_share: 'Unsupported key share'
   };
+  const rangeLabels: Record<string, string> = { '1h': '1 h', '24h': '24 h', '7d': '7 d', '30d': '30 d' };
   const tone = (reason: string) => (reason === 'replay' ? 'danger' : reason === 'unknown_key' ? '' : 'warn');
 
   let report = $state<ProbeReport | null>(null);
   let range = $state('24h');
   let peer = $state('');
   let open = $state<number | null>(null);
+  let copiedId = $state<number | null>(null);
   let error = $state('');
   let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const topReason = $derived.by(() => {
+    if (!report?.probes.length) return null;
+    const counts: Record<string, number> = {};
+    for (const item of report.probes) counts[item.reason] = (counts[item.reason] ?? 0) + 1;
+    let best = '';
+    let max = 0;
+    for (const [key, count] of Object.entries(counts)) {
+      if (count > max) {
+        best = key;
+        max = count;
+      }
+    }
+    return best ? { key: best, label: reasons[best] ?? best, count: max } : null;
+  });
 
   async function load() {
     try {
@@ -94,44 +113,115 @@
     }
     return lines.join('\n');
   }
+
+  async function copyHex(probe: ProbeView) {
+    try {
+      await navigator.clipboard.writeText(dump(probe.head));
+      copiedId = probe.id;
+      setTimeout(() => {
+        if (copiedId === probe.id) copiedId = null;
+      }, 2000);
+    } catch {
+      copiedId = null;
+    }
+  }
 </script>
 
 <svelte:head><title>Probes · fiend</title></svelte:head>
 
-<TopBar title="Probes" subtitle="Connections that did not authenticate. The node sent them to the origin." />
-{#if error}<p class="note error" role="alert">{error}</p>{/if}
-<div class="filters">
-  <Tabs label="Probe range" bind:value={range} onchange={load} tabs={[{ value: '1h', label: '1 h' }, { value: '24h', label: '24 h' }, { value: '7d', label: '7 d' }, { value: '30d', label: '30 d' }]} />
-  {#if peer}<Button kind="ghost" icon="close" onclick={() => pick('')}>Show all addresses (now {peer})</Button>{/if}
-</div>
+<TopBar title="Probes" subtitle="Unauthenticated connections forwarded to the origin.">
+  {#snippet actions()}
+    <Tabs label="Probe range" bind:value={range} onchange={load} tabs={[{ value: '1h', label: '1 h' }, { value: '24h', label: '24 h' }, { value: '7d', label: '7 d' }, { value: '30d', label: '30 d' }]} />
+  {/snippet}
+</TopBar>
+
+{#if error}<p class="note error banner" role="alert">{error}</p>{/if}
+
+{#if peer}
+  <div class="filter-bar">
+    <span class="badge accent mono">Source: {peer}</span>
+    <Button size="compact" kind="ghost" icon="close" onclick={() => pick('')}>Show all addresses</Button>
+  </div>
+{/if}
+
 {#if report}
-  <section class="card" aria-labelledby="peers-title">
-    <div class="card-header"><h2 id="peers-title">Sources</h2><span class="muted small">{report.total} probe{report.total === 1 ? '' : 's'} from {report.peers.length} address{report.peers.length === 1 ? '' : 'es'}</span></div>
+  <div class="kpi-grid">
+    <section class="kpi" aria-label="Total probes">
+      <div class="kpi-head"><span>Total probes</span><Icon name="shield" size={15} /></div>
+      <div class="kpi-val">
+        <span class="kpi-num">{report.total}</span>
+        <span class="kpi-unit">in {rangeLabels[range] ?? range}</span>
+      </div>
+      <div class="kpi-foot">{peer ? `Filtered to ${peer}` : 'Forwarded to origin'}</div>
+    </section>
+
+    <section class="kpi" aria-label="Unique sources">
+      <div class="kpi-head"><span>Unique sources</span><Icon name="globe" size={15} /></div>
+      <div class="kpi-val">
+        <span class="kpi-num">{report.peers.length}</span>
+        <span class="kpi-unit">address{report.peers.length === 1 ? '' : 'es'}</span>
+      </div>
+      <div class="kpi-foot">Distinct client IPs</div>
+    </section>
+
+    <section class="kpi" aria-label="Top reason">
+      <div class="kpi-head"><span>Top reason</span><Icon name="info" size={15} /></div>
+      <div class="kpi-val">
+        <span class="kpi-num reason-num">{topReason ? topReason.label : '—'}</span>
+      </div>
+      <div class="kpi-foot">{topReason ? `${topReason.count} in recent samples` : 'No rejections recorded'}</div>
+    </section>
+
+    <section class="kpi" aria-label="Captured samples">
+      <div class="kpi-head"><span>Recent samples</span><Icon name="log" size={15} /></div>
+      <div class="kpi-val">
+        <span class="kpi-num">{report.probes.length}</span>
+        <span class="kpi-unit">inspectable</span>
+      </div>
+      <div class="kpi-foot">Select any row to inspect payload</div>
+    </section>
+  </div>
+
+  <section class="section" aria-labelledby="peers-title">
+    <div class="group-head">
+      <h2 id="peers-title" class="group-title">
+        Sources
+        <span class="badge">{report.peers.length}</span>
+      </h2>
+      <span class="muted small">{report.total} probe{report.total === 1 ? '' : 's'} in the last {rangeLabels[range] ?? range}</span>
+    </div>
     {#if report.peers.length}
       <div class="table-wrap peers">
         <table>
-          <thead><tr><th>Address</th><th class="num">Probes</th><th>First</th><th>Last</th><th>Reasons</th><th></th></tr></thead>
+          <thead><tr><th>Address</th><th class="num">Probes</th><th>First</th><th>Last</th><th>Reasons</th><th><span class="visually-hidden">External</span></th></tr></thead>
           <tbody>
             {#each report.peers as row (row.peer)}
-              <tr>
-                <td><button type="button" class="link mono" onclick={() => pick(row.peer)}>{row.peer}</button></td>
+              <tr class:selected={peer === row.peer}>
+                <td><button type="button" class="link mono" onclick={() => pick(peer === row.peer ? '' : row.peer)}>{row.peer}</button></td>
                 <td class="num">{row.count}</td>
                 <td>{date(row.first)}</td>
-                <td>{ago(row.last)}</td>
-                <td class="reasons">{#each row.reasons as reason (reason)}<span class="badge {tone(reason)}">{reasons[reason] ?? reason}</span>{/each}</td>
-                <td><a class="small" href="https://ipinfo.io/{row.peer}" target="_blank" rel="noopener noreferrer">IP info</a></td>
+                <td class="muted">{ago(row.last)}</td>
+                <td><div class="reasons">{#each row.reasons as reason (reason)}<span class="badge {tone(reason)}">{reasons[reason] ?? reason}</span>{/each}</div></td>
+                <td class="ext"><a class="small" href="https://ipinfo.io/{row.peer}" target="_blank" rel="noopener noreferrer">IP info</a></td>
               </tr>
             {/each}
           </tbody>
         </table>
       </div>
     {:else}
-      <p class="empty">No probes in this range.</p>
+      <EmptyState icon="shield" title="No probes in this range" message="No unauthenticated connections were forwarded to the origin during the last {rangeLabels[range] ?? range}." />
     {/if}
   </section>
+
   {#if report.probes.length}
-    <section class="card" aria-labelledby="recent-title">
-      <div class="card-header"><h2 id="recent-title">Recent probes</h2><span class="muted small">Newest {report.probes.length}. Select a row to see the data.</span></div>
+    <section class="section" aria-labelledby="recent-title">
+      <div class="group-head">
+        <h2 id="recent-title" class="group-title">
+          Recent probes
+          <span class="badge">{report.probes.length}</span>
+        </h2>
+        <span class="muted small">Select a row to inspect captured bytes</span>
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Time</th><th>Node</th><th>Address</th><th>Reason</th><th>Data</th><th class="num">Size</th></tr></thead>
@@ -149,10 +239,21 @@
                 <tr class="dump-row">
                   <td colspan="6">
                     {#if probe.head}
-                      <pre class="dump">{dump(probe.head)}</pre>
-                      {#if probe.size > probe.head.length / 2}<p class="muted small">Shows the first {bytes(probe.head.length / 2)} of {bytes(probe.size)}.</p>{/if}
+                      <div class="dump-box">
+                        <div class="dump-head">
+                          <span class="small muted">
+                            {#if probe.size > probe.head.length / 2}
+                              First {bytes(probe.head.length / 2)} of {bytes(probe.size)}
+                            {:else}
+                              Captured payload · {bytes(probe.size)}
+                            {/if}
+                          </span>
+                          <Button size="compact" kind="ghost" icon={copiedId === probe.id ? 'check' : 'copy'} onclick={() => copyHex(probe)}>{copiedId === probe.id ? 'Copied' : 'Copy hex'}</Button>
+                        </div>
+                        <pre class="dump">{dump(probe.head)}</pre>
+                      </div>
                     {:else}
-                      <p class="muted small">The peer sent no data before the node forwarded the connection.</p>
+                      <p class="muted small empty-dump">The peer sent no data before the node forwarded the connection.</p>
                     {/if}
                   </td>
                 </tr>
@@ -168,16 +269,22 @@
 {/if}
 
 <style>
-  .filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .banner { margin-bottom: 16px; }
+  .filter-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .section { margin-top: 24px; }
+  .reason-num { font-size: 16px; letter-spacing: -.2px; }
   .peers { max-height: 420px; overflow: auto; }
   .link { color: var(--text); text-align: left; }
   .link:hover { text-decoration: underline; }
-  .reasons { display: flex; gap: 6px; align-items: center; height: 36px; }
+  .reasons { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 6px 0; }
+  .ext { text-align: right; width: 1%; }
   .data { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
   .data .link { font-family: var(--mono); font-size: 12px; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .dump-row td { height: auto; padding: 10px 12px; white-space: normal; background: var(--soft); }
-  .dump-row:hover { background: none; }
-  .dump { font-family: var(--mono); font-size: 12px; line-height: 1.5; overflow-x: auto; margin: 0 0 6px; white-space: pre; }
-  .empty { padding: 18px; border: 1px dashed var(--line); border-radius: 9px; text-align: center; }
+  .dump-row td { height: auto; padding: 12px 14px; white-space: normal; background: var(--soft); }
+  .dump-row:hover { background: var(--soft); }
+  .dump-box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .dump-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px 6px 12px; border-bottom: 1px solid var(--line); background: var(--soft); }
+  .dump { font-family: var(--mono); font-size: 11.5px; line-height: 1.55; overflow-x: auto; margin: 0; padding: 12px; white-space: pre; color: var(--text); }
+  .empty-dump { margin: 0; }
 </style>

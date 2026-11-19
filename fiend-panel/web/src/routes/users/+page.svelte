@@ -4,17 +4,21 @@
   import Button from '#lib/components/Button.svelte';
   import Tabs from '#lib/components/Tabs.svelte';
   import Dialog from '#lib/components/Dialog.svelte';
+  import EmptyState from '#lib/components/EmptyState.svelte';
+  import Icon from '#lib/components/Icon.svelte';
   import UserForm, { toDraft, toInput, type UserDraft } from '#lib/components/UserForm.svelte';
   import UserDetail from '#lib/components/UserDetail.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
   import { onEvent } from '#lib/stores/events.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
-  import { ago, bytes, day, percent, stateLabel } from '#lib/format.ts';
+  import { ago, bytes, day, initials, percent, stateLabel } from '#lib/format.ts';
   import type { NodeView, UserView } from '#lib/api/generated/index.ts';
 
   let users = $state<UserView[]>([]);
   let nodes = $state<NodeView[]>([]);
+  let loading = $state(true);
   let filter = $state('all');
+  let query = $state('');
   let selected = $state<number | null>(null);
   let adding = $state(false);
   let draft = $state<UserDraft>(toDraft(null));
@@ -31,8 +35,24 @@
     expired: (user) => user.state === 'expired',
     near: near
   };
-  const shown = $derived(users.filter(filters[filter]));
+  const onlineCount = $derived(users.filter((user) => user.online > 0).length);
+  const shown = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    return users.filter((user) => {
+      if (!filters[filter](user)) return false;
+      if (!q) return true;
+      return user.name.toLowerCase().includes(q) || user.note.toLowerCase().includes(q);
+    });
+  });
   const nodeName = (id: number) => nodes.find((node) => node.id === id)?.name ?? `#${id}`;
+  const stateBadge = (state: string) => (state === 'disabled' ? '' : state === 'expired' || state === 'limited' ? 'danger' : state === 'on_hold' ? 'warn' : '');
+
+  function openAdd() {
+    draft = toDraft(null);
+    fields = {};
+    formError = '';
+    adding = true;
+  }
 
   async function load() {
     try {
@@ -40,6 +60,8 @@
       error = '';
     } catch (failure) {
       error = fieldErrors(failure).form ?? '';
+    } finally {
+      loading = false;
     }
   }
 
@@ -75,11 +97,15 @@
 
 <svelte:head><title>Users · fiend</title></svelte:head>
 
-<TopBar title="Users">
-  {#snippet actions()}<Button kind="primary" icon="plus" onclick={() => { draft = toDraft(null); fields = {}; formError = ''; adding = true; }}>Add user</Button>{/snippet}
+<TopBar title="Users" subtitle={loading ? '' : `${users.length} user${users.length === 1 ? '' : 's'} · ${onlineCount} online`}>
+  {#snippet actions()}
+    <Button kind="primary" icon="plus" onclick={openAdd}>Add user</Button>
+  {/snippet}
 </TopBar>
-{#if error}<p class="note error" role="alert">{error}</p>{/if}
-<div class="filters">
+
+{#if error}<p class="note error banner" role="alert">{error}</p>{/if}
+
+<div class="toolbar">
   <Tabs label="Filter users" bind:value={filter} tabs={[
     { value: 'all', label: 'All', count: users.length },
     { value: 'active', label: 'Active', count: users.filter(filters.active).length },
@@ -87,35 +113,85 @@
     { value: 'expired', label: 'Expired', count: users.filter(filters.expired).length },
     { value: 'near', label: 'Near limit', count: users.filter(near).length }
   ]} />
+  <div class="search-input">
+    <input type="search" aria-label="Search users" placeholder="Filter by name or note…" bind:value={query} />
+    {#if query}
+      <button type="button" class="clear" aria-label="Clear search" onclick={() => (query = '')}><Icon name="close" size={14} /></button>
+    {/if}
+  </div>
 </div>
+
 <div class="split" class:open={selected !== null}>
   <div class="list">
-    {#if shown.length}
+    {#if loading}
+      <p class="muted">Loading…</p>
+    {:else if shown.length}
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th class="num">Used / limit</th><th>Expiry</th><th>Last seen</th><th>Nodes</th></tr></thead>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th class="num">Traffic</th>
+              <th>Expiry</th>
+              <th>Last seen</th>
+              {#if nodes.length > 1 && selected === null}<th>Nodes</th>{/if}
+            </tr>
+          </thead>
           <tbody>
             {#each shown as user (user.id)}
+              {@const pct = user.traffic_limit ? percent(user.used, user.traffic_limit) : 0}
               <tr class:selected={selected === user.id}>
                 <td>
-                  <button type="button" class="pick" aria-pressed={selected === user.id} onclick={() => (selected = user.id)}>
-                    <span class="dot {user.state}" aria-hidden="true"></span><span>{user.name}</span><span class="visually-hidden">, {stateLabel(user.state)}</span>
-                    {#if user.online}<span class="badge green" title="{user.online} open session{user.online === 1 ? '' : 's'}">online</span>{/if}
+                  <button type="button" class="pick" aria-pressed={selected === user.id} onclick={() => (selected = selected === user.id ? null : user.id)}>
+                    <span class="avatar" class:accent={selected === user.id} aria-hidden="true">{initials(user.name)}</span>
+                    <span class="user-meta">
+                      <span class="user-line">
+                        <span class="dot {user.state}" aria-hidden="true"></span>
+                        <span class="user-name">{user.name}</span>
+                        <span class="visually-hidden">, {stateLabel(user.state)}</span>
+                        {#if user.online}
+                          <span class="badge green" title="{user.online} open session{user.online === 1 ? '' : 's'}">online</span>
+                        {:else if user.state !== 'active'}
+                          <span class="badge {stateBadge(user.state)}">{stateLabel(user.state)}</span>
+                        {/if}
+                      </span>
+                      {#if user.note}<span class="user-note">{user.note}</span>{/if}
+                    </span>
                   </button>
                 </td>
-                <td class="num">{bytes(user.used)} / {user.traffic_limit ? bytes(user.traffic_limit) : '∞'}{#if user.traffic_limit}<span class="pct" class:warn={near(user)}> {percent(user.used, user.traffic_limit)} %</span>{/if}</td>
-                <td>{user.hold_days && !user.expire_at ? `${user.hold_days} d after first connection` : user.expire_at ? day(user.expire_at) : 'Never'}</td>
-                <td>{ago(user.last_seen)}</td>
-                <td>{user.nodes.length ? user.nodes.map(nodeName).join(', ') : 'All'}</td>
+                <td class="num traffic-cell">
+                  <div class="traffic-stack">
+                    <span>{bytes(user.used)} <span class="muted">/ {user.traffic_limit ? bytes(user.traffic_limit) : '∞'}</span></span>
+                    {#if user.traffic_limit}
+                      <progress class="meter mini" class:warn={pct >= 80 && pct < 100} class:danger={pct >= 100} value={pct} max="100" aria-label="{pct}% of limit"></progress>
+                    {/if}
+                  </div>
+                </td>
+                <td>{user.hold_days && !user.expire_at ? `${user.hold_days} d after connect` : user.expire_at ? day(user.expire_at) : 'Never'}</td>
+                <td class="muted">{ago(user.last_seen)}</td>
+                {#if nodes.length > 1 && selected === null}
+                  <td class="muted">{user.nodes.length ? user.nodes.map(nodeName).join(', ') : 'All'}</td>
+                {/if}
               </tr>
             {/each}
           </tbody>
         </table>
       </div>
+    {:else if users.length}
+      <EmptyState icon="users" title="No matching users" message="No users match the active filter or search query." compact>
+        {#snippet actions()}
+          <Button size="compact" onclick={() => { filter = 'all'; query = ''; }}>Reset filters</Button>
+        {/snippet}
+      </EmptyState>
     {:else}
-      <p class="empty">{users.length ? 'No users match this filter.' : 'No users yet.'}</p>
+      <EmptyState icon="users" title="No users yet" message="Add a user to generate a Fiend profile link and QR code.">
+        {#snippet actions()}
+          <Button kind="primary" icon="plus" onclick={openAdd}>Add user</Button>
+        {/snippet}
+      </EmptyState>
     {/if}
   </div>
+
   {#if selected !== null}
     <aside class="detail" aria-label="User details">
       {#key selected}<UserDetail id={selected} {nodes} onclose={() => (selected = null)} onchange={load} />{/key}
@@ -125,7 +201,7 @@
 
 <Dialog bind:open={adding} title="Add user">
   <form id="add-user" novalidate onsubmit={create}>
-    {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
+    {#if formError}<p class="note error banner" role="alert">{formError}</p>{/if}
     <UserForm bind:draft {nodes} {fields} />
   </form>
   {#snippet actions()}
@@ -135,18 +211,24 @@
 </Dialog>
 
 <style>
-  .filters { margin-bottom: 14px; }
-  .split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
-  .split.open { grid-template-columns: minmax(0, 1fr) 380px; }
+  .banner { margin-bottom: 14px; }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
+  .split.open { grid-template-columns: minmax(0, 1fr) 410px; }
   .list { min-width: 0; }
-  .pick { display: inline-flex; align-items: center; gap: 8px; color: var(--text); text-align: left; }
-  .pick::after { content: ''; position: absolute; inset: 0; }
   tbody tr { position: relative; cursor: pointer; }
-  .pick:hover span:nth-child(2) { text-decoration: underline; }
-  .pct { color: var(--muted); }
-  .pct.warn { color: var(--warn); }
-  .empty { padding: 18px; border: 1px dashed var(--line); border-radius: 9px; text-align: center; }
-  .detail { position: sticky; top: 16px; min-width: 0; }
+  tbody td { height: 52px; }
+  .pick { display: inline-flex; align-items: center; gap: 10px; color: var(--text); text-align: left; max-width: 100%; }
+  .pick::after { content: ''; position: absolute; inset: 0; }
+  .user-meta { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+  .user-line { display: inline-flex; align-items: center; gap: 7px; }
+  .user-name { font-weight: 500; }
+  .pick:hover .user-name { text-decoration: underline; }
+  .user-note { font-size: 11px; color: var(--muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .traffic-cell { min-width: 148px; }
+  .traffic-stack { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 4px; width: 100%; }
+  .meter.mini { width: 104px; height: 3px; }
+  .detail { position: sticky; top: 18px; min-width: 0; }
   @media (max-width: 1100px) {
     .split.open { grid-template-columns: minmax(0, 1fr); }
     .detail { position: static; }

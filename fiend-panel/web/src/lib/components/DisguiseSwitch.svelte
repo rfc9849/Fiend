@@ -5,6 +5,7 @@
   import Field from './Field.svelte';
   import Select from './Select.svelte';
   import TemplatePicker from './TemplatePicker.svelte';
+  import Icon from './Icon.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
   import type { Created, DisguiseCheck, DisguiseView, NodeView, PresetView } from '#lib/api/generated/index.ts';
 
@@ -84,12 +85,12 @@
 </script>
 
 <Dialog bind:open title={node.disguise_id === null ? 'Set TLS disguise' : 'Change TLS disguise'}>
-  {#if error}<p class="note error" role="alert">{error}</p>{/if}
+  {#if error}<p class="note error banner" role="alert">{error}</p>{/if}
   {#if loading}
     <p class="muted">Loading saved disguises…</p>
   {:else if choice}
     <form id="check-disguise" class="stack" onsubmit={check}>
-      <p>The disguise sets the TLS template in new Fiend links and the site the server uses for incoming connections without Fiend access.</p>
+      <p class="lead">The disguise sets the TLS template in new Fiend links and the site the server uses for incoming connections without Fiend access.</p>
       <Field label="TLS disguise" id="disguise-choice">
         <Select id="disguise-choice" bind:value={choice} {options} label="TLS disguise" disabled={!!busy} onchange={() => { result = null; error = ''; templateError = ''; }} />
       </Field>
@@ -97,14 +98,20 @@
         <TemplatePicker presets={availablePresets} bind:preset bind:file error={templateError} />
       {/if}
       {#if result}
-        <div class="stack" role="status">
+        <div class="group" role="status">
           {#each result.checks as item (item.name)}
-            <p class="note" class:warn={!item.ok}><strong>{item.name}.</strong> {item.detail}</p>
+            <div class="group-row check-row">
+              <span class="check-icon" class:ok={item.ok}><Icon name={item.ok ? 'check' : 'info'} size={15} /></span>
+              <div class="setting-copy">
+                <div class="setting-title">{item.name}</div>
+                <p class="setting-desc">{item.detail}</p>
+              </div>
+            </div>
           {/each}
-          {#if result.ready && node.disguise_id !== null}
-            <p>Existing profiles keep their old TLS template. Send updated links after the server applies the change.</p>
-          {/if}
         </div>
+        {#if result.ready && node.disguise_id !== null}
+          <p class="note soft">Existing profiles keep their old TLS template. Share updated links after the server applies the change.</p>
+        {/if}
       {/if}
     </form>
   {/if}
@@ -119,3 +126,11 @@
     {/if}
   {/snippet}
 </Dialog>
+
+<style>
+  .banner { margin-bottom: 12px; }
+  .lead { font-size: 12.5px; line-height: 1.5; }
+  .check-row { justify-content: flex-start; align-items: flex-start; gap: 10px; min-height: 0; padding: 10px 14px; }
+  .check-icon { margin-top: 2px; color: var(--warn); display: inline-flex; flex: none; }
+  .check-icon.ok { color: var(--green); }
+</style>

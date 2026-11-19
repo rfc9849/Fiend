@@ -9,6 +9,7 @@
   import DisguiseSwitch from '#lib/components/DisguiseSwitch.svelte';
   import Qr from '#lib/components/Qr.svelte';
   import CopyField from '#lib/components/CopyField.svelte';
+  import Icon from '#lib/components/Icon.svelte';
   import { api, fieldErrors, loadSession } from '#lib/api/client.ts';
   import { session } from '#lib/stores/session.svelte.ts';
   import type { Created, LocalNodeDefaults, NodeView, UserLink, UserView } from '#lib/api/generated/index.ts';
@@ -139,27 +140,37 @@
 
 <svelte:head><title>Set up · fiend</title></svelte:head>
 
-<Centered wide>
-  <p class="step">Step {step} of 4</p>
-  {#if error}<p class="note error" role="alert">{error}</p>{/if}
+<Centered wide {step} steps={4}>
+  {#if error}<p class="note error banner" role="alert">{error}</p>{/if}
+
   {#if step === 2}
-    <h1 class="title">Local node</h1>
+    <div class="title-block">
+      <h1>Local server</h1>
+      <p>Confirm the server name and public address placed in user links.</p>
+    </div>
     <form novalidate class="stack" onsubmit={saveNode}>
       {#if defaults}
-        <dl class="facts">
-          <dt>Port</dt><dd class="mono">{defaults.port}</dd>
-        </dl>
+        <div class="group">
+          <div class="group-row">
+            <span class="info-label">Listening port</span>
+            <span class="info-value mono">{defaults.port}</span>
+          </div>
+          {#if localNode}
+            <div class="group-row">
+              <span class="info-label">Connected server</span>
+              <span class="info-value"><strong>{localNode.name}</strong> <span class="mono muted">{localNode.address}</span></span>
+            </div>
+          {/if}
+        </div>
         {#if defaults.error}<p class="note error">{defaults.error}</p>{/if}
       {/if}
-      {#if localNode}
-        <p class="note"><strong>{localNode.name}</strong> · <code>{localNode.address}</code></p>
-      {:else}
+      {#if !localNode}
         <div class="grid-2">
           <Field label="Name" id="name" error={fields.name}><input id="name" bind:value={nodeName} /></Field>
           <Field label="Public address" id="address" error={fields.address}><input id="address" inputmode="url" placeholder="203.0.113.10" bind:value={address} /></Field>
         </div>
       {/if}
-      <div class="row between">
+      <div class="row between footer-bar">
         <Button kind="ghost" disabled={busy} onclick={finish}>Finish setup later</Button>
         <div class="row">
           {#if !localNode && !defaults?.available}
@@ -170,14 +181,31 @@
       </div>
     </form>
   {:else if step === 3}
-    <h1 class="title">TLS disguise</h1>
+    <div class="title-block">
+      <h1>TLS disguise</h1>
+      <p>Choose and verify the TLS template used for incoming connections.</p>
+    </div>
     <div class="stack">
-      {#if localNode?.disguise_id}
-        <p class="note">Selected: {localNode.disguise_name}.</p>
-      {:else}
-        <p>Choose and check the TLS disguise before sharing a link.</p>
-      {/if}
-      <div class="row between">
+      <div class="group">
+        <div class="group-row">
+          <div class="setting-lead">
+            <span class="icon-tile {localNode?.disguise_id ? 'green' : 'warn'}"><Icon name="globe" size={16} /></span>
+            <div class="setting-copy">
+              {#if localNode?.disguise_id}
+                <div class="setting-title">{localNode.disguise_name} <span class="badge green">Selected</span></div>
+                <p class="setting-desc">Ready for user profile links.</p>
+              {:else}
+                <div class="setting-title">No disguise selected</div>
+                <p class="setting-desc">Pick a preset or import a template file and verify it from the server.</p>
+              {/if}
+            </div>
+          </div>
+          {#if localNode && !localNode.disguise_id}
+            <Button size="compact" kind="primary" onclick={() => (disguiseOpen = true)}>Set disguise</Button>
+          {/if}
+        </div>
+      </div>
+      <div class="row between footer-bar">
         <Button kind="ghost" disabled={busy} onclick={() => (step = 2)}>Back</Button>
         <div class="row">
           <Button kind="ghost" disabled={busy} onclick={finish}>Finish setup later</Button>
@@ -193,23 +221,29 @@
       <DisguiseSwitch bind:open={disguiseOpen} node={localNode} onsaved={(updated) => { localNode = updated; step = 4; }} />
     {/if}
   {:else}
-    <h1 class="title">First user</h1>
+    <div class="title-block">
+      <h1>First user</h1>
+      <p>Create your first user profile to connect a device.</p>
+    </div>
     {#if link}
-      <div class="share">
-        <Qr svg={link.qr_svg} label="QR code with the link for {userName}" />
-        <div class="stack grow">
-          <CopyField value={link.link} label="link" />
-          {#each link.warnings as warning}<p class="note warn">{warning}</p>{/each}
+      <div class="group">
+        <div class="group-body share">
+          <Qr svg={link.qr_svg} label="QR code with the link for {userName}" />
+          <div class="stack grow">
+            <p class="small muted">Scan this QR code in Fiend or copy the link below.</p>
+            <CopyField value={link.link} label="link" />
+            {#each link.warnings as warning}<p class="note warn">{warning}</p>{/each}
+          </div>
         </div>
       </div>
-      <div class="row between">
+      <div class="row between footer-bar">
         <Button kind="ghost" onclick={() => (step = 3)}>Back</Button>
         <Button kind="primary" {busy} onclick={finish}>Finish setup</Button>
       </div>
     {:else if createdUser !== null}
       <div class="stack">
-        <p>User {userName} was created.</p>
-        <div class="row between">
+        <p class="note">User <strong>{userName}</strong> was created.</p>
+        <div class="row between footer-bar">
           <Button kind="ghost" disabled={busy} onclick={finish}>Open panel</Button>
           <Button kind="primary" {busy} onclick={loadLink}>Retry getting link</Button>
         </div>
@@ -217,7 +251,7 @@
     {:else}
       <form novalidate class="stack" onsubmit={saveUser}>
         <Field label="User name" id="name" error={fields.name}><input id="name" bind:value={userName} placeholder="phone" /></Field>
-        <div class="row between">
+        <div class="row between footer-bar">
           <Button kind="ghost" onclick={() => (step = 3)}>Back</Button>
           <div class="row">
             <Button kind="ghost" disabled={busy} onclick={finish}>{session.info?.wizard.first_user ? 'Finish setup' : 'Finish setup later'}</Button>
@@ -230,13 +264,13 @@
 </Centered>
 
 <style>
-  .step { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-  .title { margin-bottom: 18px; }
-  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
-  dt { color: var(--muted); }
-  dd { margin: 0; }
+  .banner { margin-bottom: 14px; }
+  .title-block { margin-bottom: 18px; }
+  .title-block p { margin-top: 4px; font-size: 12.5px; }
   .between { justify-content: space-between; }
-  .share { display: flex; gap: 18px; align-items: flex-start; margin-bottom: 18px; }
+  .footer-bar { margin-top: 12px; }
+  .share { display: flex; gap: 18px; align-items: flex-start; background: var(--soft); }
+  .share :global(.qr) { width: 176px; }
   .grow { flex: 1; min-width: 0; }
   @media (max-width: 719px) { .share { flex-direction: column; } }
 </style>

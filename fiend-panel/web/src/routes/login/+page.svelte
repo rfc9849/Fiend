@@ -5,6 +5,7 @@
   import Centered from '#lib/components/Centered.svelte';
   import Field from '#lib/components/Field.svelte';
   import Button from '#lib/components/Button.svelte';
+  import Icon from '#lib/components/Icon.svelte';
   import { ApiError, api, fieldErrors, loadSession } from '#lib/api/client.ts';
   import { returnPath, signedInPath } from '#lib/navigation.ts';
   import type { LoginChallenge, LoginTotp } from '#lib/api/generated/index.ts';
@@ -108,29 +109,45 @@
 
 <Centered>
   {#if challenge}
-    <h1>Two-factor verification</h1>
-    <p class="intro help">Enter the six-digit code from your authenticator app.</p>
+    <div class="auth-head">
+      <span class="icon-tile accent"><Icon name="key" size={18} /></span>
+      <div>
+        <h1>Two-factor verification</h1>
+        <p class="subtitle">Enter the six-digit code from your authenticator app.</p>
+      </div>
+    </div>
     <form novalidate onsubmit={submitCode} class="stack">
       {#if error}<p class="note error" role="alert">{error}</p>{/if}
       <Field label="Verification code" id="code" error={fields.code}>
-        <input id="code" class="code" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" bind:this={codeInput} bind:value={code} readonly={busy} aria-invalid={!!fields.code} aria-describedby={fields.code ? 'code-error' : undefined} />
+        <input id="code" class="code" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" maxlength="6" placeholder="000000" bind:this={codeInput} bind:value={code} readonly={busy} aria-invalid={!!fields.code} aria-describedby={fields.code ? 'code-error' : undefined} />
       </Field>
-      <Button kind="primary" type="submit" {busy}>Verify and sign in</Button>
-      <Button kind="ghost" disabled={busy} onclick={() => startOver()}>Back to sign in</Button>
+      <div class="submit-stack">
+        <Button kind="primary" type="submit" {busy}>Verify and sign in</Button>
+        <Button kind="ghost" disabled={busy} onclick={() => startOver()}>Back to sign in</Button>
+      </div>
     </form>
   {:else}
-    <h1>Sign in</h1>
+    <div class="auth-head">
+      <div>
+        <h1>Sign in</h1>
+        <p class="subtitle">Manage your server, users, and routing rules.</p>
+      </div>
+    </div>
     <form novalidate onsubmit={submitPassword} class="stack">
       {#if error}<p class="note error" role="alert">{error}</p>{/if}
-      <Field label="Name" id="name" error={fields.name}><input id="name" autocomplete="username" bind:value={name} readonly={busy} aria-invalid={!!fields.name} /></Field>
+      <Field label="Admin name" id="name" error={fields.name}><input id="name" autocomplete="username" bind:value={name} readonly={busy} aria-invalid={!!fields.name} /></Field>
       <Field label="Password" id="password" error={fields.password}><input id="password" type="password" autocomplete="current-password" bind:this={passwordInput} bind:value={password} readonly={busy} aria-invalid={!!fields.password} /></Field>
-      <Button kind="primary" type="submit" {busy}>Sign in</Button>
+      <div class="submit-stack">
+        <Button kind="primary" type="submit" {busy}>Sign in</Button>
+      </div>
     </form>
   {/if}
 </Centered>
 
 <style>
-  h1 { margin-bottom: 18px; }
-  .intro { margin: -8px 0 18px; }
-  .code { font: 500 20px var(--mono); letter-spacing: .24em; }
+  .auth-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
+  .subtitle { margin-top: 4px; font-size: 12.5px; }
+  .code { font: 500 22px var(--mono); letter-spacing: .28em; text-align: center; height: 44px; }
+  .submit-stack { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+  .submit-stack :global(.button) { width: 100%; min-height: 36px; }
 </style>

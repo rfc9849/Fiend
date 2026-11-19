@@ -61,13 +61,16 @@
 
 <svelte:head><title>Set up · fiend</title></svelte:head>
 
-<Centered wide>
+<Centered wide step={valid ? 1 : 0} steps={valid ? 4 : 0}>
   {#if valid === false}
     <h1>Setup link expired</h1>
-    <p class="lead">New link: <code>docker compose exec panel fiend-panel renew-setup /etc/fiend/panel.toml && docker compose restart panel</code></p>
+    <p class="lead">Generate a fresh setup link on the server:</p>
+    <pre class="cmd">docker compose exec panel fiend-panel renew-setup /etc/fiend/panel.toml && docker compose restart panel</pre>
   {:else if valid}
-    <p class="step">Step 1 of 4</p>
-    <h1 class="title">Admin account</h1>
+    <div class="title-block">
+      <h1>Admin account</h1>
+      <p>Create the first administrator account for this panel.</p>
+    </div>
     <form novalidate onsubmit={submit} class="stack">
       {#if error}<p class="note error" role="alert">{error}</p>{/if}
       <Field label="Name" id="name" error={fields.name}><input id="name" autocomplete="username" bind:value={name} /></Field>
@@ -75,17 +78,27 @@
         <Field label="Password" id="password" error={fields.password} help="At least 12 characters"><input id="password" type="password" autocomplete="new-password" bind:value={password} /></Field>
         <Field label="Repeat password" id="confirm" error={fields.confirm}><input id="confirm" type="password" autocomplete="new-password" bind:value={confirm} /></Field>
       </div>
-      <Switch id="use-totp" bind:checked={useTotp} label="Two-factor sign-in" />
-      {#if useTotp && totp}
-        <div class="totp">
-          <Qr svg={totp.qr_svg} label="QR code for the authenticator app" />
-          <div class="stack grow">
-            <CopyField value={totp.secret} label="authenticator key" />
-            <Field label="Code from the app" id="totp" error={fields.totp_code}><input id="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" bind:value={code} /></Field>
+      <div class="group">
+        <div class="group-row">
+          <div class="setting-copy">
+            <div class="setting-title">Two-factor sign-in</div>
+            <p class="setting-desc">Recommended. Required to add or remove other admins.</p>
           </div>
+          <Switch id="use-totp" bind:checked={useTotp} label="" />
         </div>
-      {:else}
-        <p class="note warn">Needed to add other admins.</p>
+        {#if useTotp && totp}
+          <div class="group-body totp-box">
+            <Qr svg={totp.qr_svg} label="QR code for the authenticator app" />
+            <div class="stack grow">
+              <p class="small muted">Scan the QR code or enter this key in your authenticator app.</p>
+              <CopyField value={totp.secret} label="authenticator key" />
+              <Field label="Code from the app" id="totp" error={fields.totp_code}><input id="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" bind:value={code} /></Field>
+            </div>
+          </div>
+        {/if}
+      </div>
+      {#if !useTotp}
+        <p class="note warn">Two-factor sign-in is needed later to add other admins.</p>
       {/if}
       <div class="row end"><Button kind="primary" type="submit" {busy}>Continue</Button></div>
     </form>
@@ -95,11 +108,13 @@
 </Centered>
 
 <style>
-  .step { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-  .lead { margin: 6px 0 18px; line-height: 1.6; }
-  .title { margin-bottom: 18px; }
-  .totp { display: flex; gap: 18px; align-items: flex-start; }
+  .title-block { margin-bottom: 18px; }
+  .title-block p { margin-top: 4px; font-size: 12.5px; }
+  .lead { margin: 8px 0 12px; }
+  .cmd { margin: 0; padding: 12px 14px; border-radius: 6px; background: var(--soft); border: 1px solid var(--line); font: 12px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+  .totp-box { display: flex; gap: 18px; align-items: flex-start; border-top: 1px solid var(--line); background: var(--soft); }
+  .totp-box :global(.qr) { width: 170px; }
   .grow { flex: 1; min-width: 0; }
-  .end { justify-content: flex-end; }
-  @media (max-width: 719px) { .totp { flex-direction: column; } }
+  .end { justify-content: flex-end; margin-top: 4px; }
+  @media (max-width: 719px) { .totp-box { flex-direction: column; } }
 </style>

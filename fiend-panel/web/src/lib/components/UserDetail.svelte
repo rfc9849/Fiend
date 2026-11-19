@@ -7,7 +7,7 @@
   import UserForm, { toDraft, toInput, type UserDraft } from './UserForm.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
   import { toast } from '#lib/stores/toasts.svelte.ts';
-  import { bytes, date, percent, stateLabel } from '#lib/format.ts';
+  import { bytes, date, initials, percent, stateLabel } from '#lib/format.ts';
   import type { NodeSessionClose, NodeSessions, NodeView, UserDetail, UserLink, UserSecret, UserView } from '#lib/api/generated/index.ts';
 
   let { id, nodes, onclose, onchange }: { id: number; nodes: NodeView[]; onclose: () => void; onchange: () => void } = $props();
@@ -15,6 +15,7 @@
   let link = $state<UserLink | null>(null);
   let linkError = $state('');
   let sessions = $state<NodeSessions[] | null>(null);
+  let checkingSessions = $state(false);
   let closed = $state<NodeSessionClose[] | null>(null);
   let editing = $state(false);
   let draft = $state<UserDraft>(toDraft(null));
@@ -73,6 +74,15 @@
     onchange();
   }
 
+  async function loadSessions() {
+    checkingSessions = true;
+    try {
+      sessions = await api.get<NodeSessions[]>(`/users/${id}/sessions`);
+    } finally {
+      checkingSessions = false;
+    }
+  }
+
   async function run() {
     if (confirm === 'secret') {
       await api.post<UserSecret>(`/users/${id}/secret`);
@@ -105,72 +115,188 @@
   } as const;
 </script>
 
-<div class="card pane">
+<div class="pane">
   {#if detail}
     {@const user = detail.user}
-    <div class="head">
-      <div><h2>{user.name}</h2><p class="state"><span class="dot {user.state}" aria-hidden="true"></span>{stateLabel(user.state)}</p></div>
-      <IconButton icon="close" label="Close details" onclick={onclose} />
-    </div>
+    {@const pct = user.traffic_limit ? percent(user.used, user.traffic_limit) : 0}
+    <section class="group identity">
+      <div class="group-row identity-top">
+        <div class="setting-lead">
+          <span class="avatar lg accent" aria-hidden="true">{initials(user.name)}</span>
+          <div class="setting-copy">
+            <h2 class="user-title">{user.name}</h2>
+            <p class="state">
+              <span class="dot {user.state}" aria-hidden="true"></span>
+              <span>{stateLabel(user.state)}</span>
+              {#if user.online}<span class="badge green">{user.online} online</span>{/if}
+            </p>
+          </div>
+        </div>
+        <IconButton icon="close" label="Close details" onclick={onclose} />
+      </div>
+
+      {#if !editing}
+        <div class="group-footer quick-bar">
+          <Button size="compact" icon="edit" onclick={() => { draft = toDraft(user); fields = {}; editing = true; }}>Edit</Button>
+          <Button size="compact" onclick={toggle}>{user.enabled ? 'Disable' : 'Enable'}</Button>
+          <Button size="compact" icon="power" onclick={() => { confirm = 'kill'; confirmOpen = true; }}>Disconnect</Button>
+        </div>
+      {/if}
+    </section>
+
     {#if editing}
-      <form id="edit-user" novalidate onsubmit={save} class="stack">
-        {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
-        <UserForm bind:draft {nodes} {fields} />
-        <div class="row"><Button kind="primary" type="submit" {busy}>Save</Button><Button kind="ghost" onclick={() => (editing = false)}>Cancel</Button></div>
+      <form id="edit-user" novalidate onsubmit={save} class="group">
+        <div class="group-body stack">
+          {#if formError}<p class="note error" role="alert">{formError}</p>{/if}
+          <UserForm bind:draft {nodes} {fields} />
+        </div>
+        <div class="group-footer end">
+          <Button size="compact" kind="ghost" onclick={() => (editing = false)}>Cancel</Button>
+          <Button size="compact" kind="primary" type="submit" {busy}>Save changes</Button>
+        </div>
       </form>
     {:else}
-      <section class="stack" aria-label="Link">
-        {#if link}
-          <Qr svg={link.qr_svg} label="QR code with the link of {user.name}" />
-          <CopyField value={link.link} label="link of {user.name}" />
-          <p class="small muted">{link.servers.length} server{link.servers.length === 1 ? '' : 's'}: <span class="mono">{link.servers.join(', ')}</span></p>
-          {#each link.warnings as warning}<p class="note warn">{warning}</p>{/each}
-        {:else if linkError}
-          <p class="note warn">{linkError}</p>
-        {/if}
-        {#key secretKey}<div><p class="label">Secret</p><CopyField value="" secret label="secret of {user.name}" onreveal={async () => (await api.get<UserSecret>(`/users/${id}/secret`)).secret} /></div>{/key}
+      <section aria-label="Access">
+        <div class="group-head"><h3 class="group-title">Access link</h3></div>
+        <div class="group">
+          {#if link}
+            <div class="qr-stage">
+              <Qr svg={link.qr_svg} label="QR code with the link of {user.name}" />
+            </div>
+            <div class="group-body stack compact-stack">
+              <CopyField value={link.link} label="link of {user.name}" />
+              <p class="small muted">{link.servers.length} server{link.servers.length === 1 ? '' : 's'}: <span class="mono">{link.servers.join(', ')}</span></p>
+              {#each link.warnings as warning}<p class="note warn">{warning}</p>{/each}
+            </div>
+          {:else if linkError}
+            <div class="group-body"><p class="note warn">{linkError}</p></div>
+          {/if}
+          <div class="group-row secret-row">
+            <div class="secret-wrap">
+              <span class="info-label">Secret</span>
+              {#key secretKey}
+                <CopyField value="" secret label="secret of {user.name}" onreveal={async () => (await api.get<UserSecret>(`/users/${id}/secret`)).secret} />
+              {/key}
+            </div>
+          </div>
+        </div>
       </section>
-      <dl class="facts">
-        <dt>Used</dt><dd>{bytes(user.used)}{#if user.traffic_limit} of {bytes(user.traffic_limit)} ({percent(user.used, user.traffic_limit)} %){/if}</dd>
-        <dt>Reset</dt><dd>{user.reset_period === 'none' ? 'Never' : `${user.reset_period}, next ${date(user.reset_at)}`}</dd>
-        <dt>Expiry</dt><dd>{user.hold_days && !user.expire_at ? `${user.hold_days} days after the first connection` : user.expire_at ? date(user.expire_at) : 'Never'}</dd>
-        <dt>Nodes</dt><dd>{user.nodes.length ? user.nodes.map((node) => nodes.find((item) => item.id === node)?.name ?? node).join(', ') : 'All nodes'}</dd>
-        <dt>Online</dt><dd>{user.online} session{user.online === 1 ? '' : 's'}</dd>
-        {#if user.note}<dt>Note</dt><dd>{user.note}</dd>{/if}
-      </dl>
-      <section aria-label="Usage per node in the last 30 days">
-        <p class="label">Last 30 days per node</p>
-        <ul class="usage">
-          {#each detail.usage as row (row.node_id)}<li><span>{row.node_name}</span><span class="num">↑ {bytes(row.up)} · ↓ {bytes(row.down)}</span></li>{/each}
-        </ul>
+
+      <section aria-label="Account details">
+        <div class="group-head"><h3 class="group-title">Details</h3></div>
+        <div class="group">
+          <div class="group-row">
+            <span class="info-label">Used</span>
+            <span class="info-value">
+              {bytes(user.used)}{#if user.traffic_limit} <span class="muted">of {bytes(user.traffic_limit)} ({pct} %)</span>{/if}
+            </span>
+          </div>
+          {#if user.traffic_limit}
+            <div class="meter-row">
+              <progress class="meter" class:warn={pct >= 80 && pct < 100} class:danger={pct >= 100} value={pct} max="100" aria-label="Usage {pct}%"></progress>
+            </div>
+          {/if}
+          <div class="group-row">
+            <span class="info-label">Reset</span>
+            <span class="info-value">{user.reset_period === 'none' ? 'Never' : `${user.reset_period}, next ${date(user.reset_at)}`}</span>
+          </div>
+          <div class="group-row">
+            <span class="info-label">Expiry</span>
+            <span class="info-value">{user.hold_days && !user.expire_at ? `${user.hold_days} d after connect` : user.expire_at ? date(user.expire_at) : 'Never'}</span>
+          </div>
+          <div class="group-row">
+            <span class="info-label">Nodes</span>
+            <span class="info-value">{user.nodes.length ? user.nodes.map((node) => nodes.find((item) => item.id === node)?.name ?? node).join(', ') : 'All nodes'}</span>
+          </div>
+          <div class="group-row">
+            <span class="info-label">Sessions</span>
+            <span class="info-value">
+              <span>{user.online} open</span>
+              <Button size="compact" kind="ghost" busy={checkingSessions} onclick={loadSessions}>Inspect</Button>
+            </span>
+          </div>
+          {#if user.note}
+            <div class="group-row">
+              <span class="info-label">Note</span>
+              <span class="info-value">{user.note}</span>
+            </div>
+          {/if}
+        </div>
       </section>
-      <section aria-label="Open sessions">
-        <div class="row between"><p class="label">Sessions</p><Button kind="ghost" onclick={async () => (sessions = await api.get<NodeSessions[]>(`/users/${id}/sessions`))}>Show</Button></div>
-        {#if closed}
-          <p class="label" role="status">{closed.length ? 'Result by node' : 'There are no nodes to close sessions on.'}</p>
-          <ul class="usage">
-            {#each closed as row (row.node_id)}
-              <li><span>{row.node_name}</span><span class:close-failed={row.closed === null}>{row.closed === null ? `Not confirmed: ${row.error}` : `${row.closed} session${row.closed === 1 ? '' : 's'} signaled to disconnect`}</span></li>
+
+      {#if sessions || closed}
+        <section aria-label="Session status">
+          <div class="group-head"><h3 class="group-title">{closed ? 'Disconnect result' : 'Open sessions'}</h3></div>
+          <div class="group">
+            {#if closed}
+              {#if closed.length}
+                {#each closed as row (row.node_id)}
+                  <div class="group-row">
+                    <span class="info-label">{row.node_name}</span>
+                    <span class="info-value" class:close-failed={row.closed === null}>
+                      {row.closed === null ? `Not confirmed: ${row.error}` : `${row.closed} signaled`}
+                    </span>
+                  </div>
+                {/each}
+              {:else}
+                <div class="group-row"><p class="small muted">No nodes to close sessions on.</p></div>
+              {/if}
+            {/if}
+            {#if sessions}
+              {#each sessions as row (row.node_id)}
+                <div class="group-row">
+                  <span class="info-label">{row.node_name}</span>
+                  <span class="info-value">{row.error ? 'Not available' : `${row.started_at.length} open`}</span>
+                </div>
+              {/each}
+            {/if}
+          </div>
+        </section>
+      {/if}
+
+      {#if detail.usage.length}
+        <section aria-label="Usage per node in the last 30 days">
+          <div class="group-head"><h3 class="group-title">Last 30 days</h3></div>
+          <div class="group">
+            {#each detail.usage as row (row.node_id)}
+              <div class="group-row">
+                <span class="info-label">{row.node_name}</span>
+                <span class="info-value mono">↑ {bytes(row.up)} · ↓ {bytes(row.down)}</span>
+              </div>
             {/each}
-          </ul>
-        {/if}
-        {#if sessions}
-          <ul class="usage">
-            {#each sessions as row (row.node_id)}<li><span>{row.node_name}</span><span>{row.error ? 'not available' : `${row.started_at.length} open`}</span></li>{/each}
-          </ul>
-        {/if}
+          </div>
+        </section>
+      {/if}
+
+      <section aria-label="Maintenance">
+        <div class="group-head"><h3 class="group-title">Actions</h3></div>
+        <div class="group">
+          <div class="group-row">
+            <div class="setting-copy">
+              <div class="setting-title">Reset usage</div>
+              <p class="setting-desc">Clear recorded traffic for this user.</p>
+            </div>
+            <Button size="compact" onclick={() => { confirm = 'reset'; confirmOpen = true; }}>Reset</Button>
+          </div>
+          <div class="group-row">
+            <div class="setting-copy">
+              <div class="setting-title">Rotate secret</div>
+              <p class="setting-desc">Generate a new key; the old link stops working.</p>
+            </div>
+            <Button size="compact" onclick={() => { confirm = 'secret'; confirmOpen = true; }}>New secret</Button>
+          </div>
+          <div class="group-row">
+            <div class="setting-copy">
+              <div class="setting-title">Remove user</div>
+              <p class="setting-desc">Revoke access and delete this user.</p>
+            </div>
+            <Button size="compact" kind="danger" onclick={() => { confirm = 'delete'; confirmOpen = true; }}>Remove</Button>
+          </div>
+        </div>
       </section>
-      <div class="buttons">
-        <Button icon="edit" onclick={() => { draft = toDraft(user); fields = {}; editing = true; }}>Edit</Button>
-        <Button onclick={toggle}>{user.enabled ? 'Disable' : 'Enable'}</Button>
-        <Button onclick={() => { confirm = 'reset'; confirmOpen = true; }}>Reset usage</Button>
-        <Button onclick={() => { confirm = 'secret'; confirmOpen = true; }}>New secret</Button>
-        <Button onclick={() => { confirm = 'kill'; confirmOpen = true; }}>Close sessions</Button>
-        <Button kind="danger" onclick={() => { confirm = 'delete'; confirmOpen = true; }}>Remove</Button>
-      </div>
     {/if}
   {:else}
-    <p class="muted">Loading…</p>
+    <div class="card"><p class="muted">Loading…</p></div>
   {/if}
 </div>
 
@@ -179,16 +305,16 @@
 {/if}
 
 <style>
-  .pane { display: flex; flex-direction: column; gap: 18px; }
-  .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-  .state { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
-  .label { font-weight: 500; font-size: 12px; color: var(--text); margin-bottom: 6px; }
-  .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; }
-  dt { color: var(--muted); }
-  dd { margin: 0; overflow-wrap: anywhere; }
-  .usage { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-  .usage li { display: flex; justify-content: space-between; gap: 10px; }
+  .pane { display: flex; flex-direction: column; gap: 16px; }
+  .identity-top { padding: 14px 16px; }
+  .user-title { font-size: 17px; font-weight: 600; letter-spacing: -.3px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .state { display: flex; align-items: center; gap: 6px; margin-top: 3px; font-size: 12px; }
+  .quick-bar { justify-content: flex-start; gap: 6px; }
+  .qr-stage { display: flex; justify-content: center; padding: 16px; background: var(--soft); border-bottom: 1px solid var(--line); }
+  .qr-stage :global(.qr) { width: 176px; padding: 6px; }
+  .compact-stack { gap: 10px; }
+  .secret-row { padding: 12px 16px; }
+  .secret-wrap { display: flex; flex-direction: column; gap: 6px; width: 100%; min-width: 0; }
+  .meter-row { padding: 0 16px 12px; }
   .close-failed { color: var(--danger); }
-  .between { justify-content: space-between; }
-  .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 </style>

@@ -1,8 +1,12 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import TopBar from './TopBar.svelte';
   import Button from './Button.svelte';
   import IconButton from './IconButton.svelte';
+  import Icon from './Icon.svelte';
   import Dialog from './Dialog.svelte';
   import Confirm from './Confirm.svelte';
+  import EmptyState from './EmptyState.svelte';
   import Field from './Field.svelte';
   import Select from './Select.svelte';
   import Switch from './Switch.svelte';
@@ -13,6 +17,7 @@
 
   let routing = $state<Routing | null>(null);
   let nodes = $state<NodeView[]>([]);
+  let loading = $state(true);
   let error = $state('');
   let outboundOpen = $state(false);
   let ruleOpen = $state(false);
@@ -51,6 +56,9 @@
       .map((item) => ({ value: item.name, label: item.name }))
   ]);
   const actionLabel = (value: string) => builtIn.find((item) => item.value === value)?.label ?? value;
+  const actionTone = (value: string) => (value === '@block' ? 'danger' : value === '@warp' ? 'accent' : '');
+  const actionIcon = (value: string) => (value === '@block' ? 'block' : value === '@warp' ? 'shield' : value === 'direct' ? 'route' : 'swap');
+  const localNodes = $derived(nodes.filter((node) => node.local));
 
   async function load() {
     try {
@@ -66,10 +74,11 @@
       warpRevision++;
     } catch (failure) {
       error = fieldErrors(failure).form ?? '';
+    } finally {
+      loading = false;
     }
   }
 
-  import { onMount } from 'svelte';
   onMount(load);
 
   function editOutbound(item: OutboundView | null) {
@@ -174,72 +183,131 @@
     await load();
   }
 
-  const summary = (pattern: string) => {
+  function patterns(pattern: string): { shown: string[]; more: number } {
     const lines = pattern.split('\n').map((line) => line.trim()).filter(Boolean);
-    return lines.length > 2 ? `${lines.slice(0, 2).join(', ')} and ${lines.length - 2} more` : lines.join(', ');
-  };
+    return { shown: lines.slice(0, 3), more: Math.max(0, lines.length - 3) };
+  }
 </script>
 
-{#if error}<p class="note error" role="alert">{error}</p>{/if}
-<p class="note">The first matching rule sets the route. Unmatched traffic goes direct.</p>
+<TopBar title="Routing" subtitle="The first matching rule sets the route. Unmatched traffic goes direct.">
+  {#snippet actions()}
+    <Button icon="plus" onclick={() => editOutbound(null)}>Add outbound</Button>
+    <Button kind="primary" icon="plus" onclick={() => editRule(null)}>Add rule</Button>
+  {/snippet}
+</TopBar>
 
-<section class="block" aria-labelledby="routing-rules">
-  <div class="card-header"><h2 id="routing-rules">Rules</h2><Button icon="plus" onclick={() => editRule(null)}>Add rule</Button></div>
-  {#if routing?.rules.length}
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th class="index">#</th><th>Patterns</th><th>Action</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-        <tbody>
-          {#each routing.rules as item, index (item.id)}
-            <tr>
-              <td class="index">{index + 1}</td>
-              <td class="mono pattern">{summary(item.pattern)}</td>
-              <td class="mono">{actionLabel(item.outbound)}{#if item.outbound === '@warp'}<div class="small muted">UDP: {item.udp_fallback ? actionLabel(item.udp_fallback) : 'blocked'}</div>{/if}</td>
-              <td class="actions">
-                <IconButton icon="up" label="Move rule {index + 1} up" disabled={routing.rules[index - 1]?.node_id !== item.node_id} onclick={() => move(index, -1)} />
-                <IconButton icon="down" label="Move rule {index + 1} down" disabled={routing.rules[index + 1]?.node_id !== item.node_id} onclick={() => move(index, 1)} />
-                <IconButton icon="edit" label="Edit rule {index + 1}" onclick={() => editRule(item)} />
-                <IconButton icon="close" label="Remove rule {index + 1}" onclick={() => { removing = { kind: 'rule', id: item.id, name: `rule ${index + 1}` }; removeOpen = true; }} />
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+{#if error}<p class="note error banner" role="alert">{error}</p>{/if}
+
+{#if loading}
+  <p class="muted">Loading…</p>
+{:else}
+  <div class="layout" class:has-side={localNodes.length > 0}>
+    <div class="main">
+      <section aria-labelledby="routing-rules">
+        <div class="group-head">
+          <h2 id="routing-rules" class="group-title">
+            Rules
+            <span class="badge">{routing?.rules.length ?? 0}</span>
+          </h2>
+          {#if routing?.rules.length}
+            <Button size="compact" icon="plus" onclick={() => editRule(null)}>Add rule</Button>
+          {/if}
+        </div>
+        {#if routing?.rules.length}
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th class="index">#</th><th>Patterns</th><th>Action</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+              <tbody>
+                {#each routing.rules as item, index (item.id)}
+                  {@const parsed = patterns(item.pattern)}
+                  <tr>
+                    <td class="index">{index + 1}</td>
+                    <td class="pattern-cell">
+                      <div class="chips">
+                        {#each parsed.shown as entry}<code class="chip">{entry}</code>{/each}
+                        {#if parsed.more}<span class="small muted">+{parsed.more} more</span>{/if}
+                      </div>
+                    </td>
+                    <td>
+                      <div class="action-cell">
+                        <span class="badge {actionTone(item.outbound)}">
+                          <Icon name={actionIcon(item.outbound)} size={14} />
+                          <span>{actionLabel(item.outbound)}</span>
+                        </span>
+                        {#if item.outbound === '@warp'}
+                          <span class="small muted">UDP: {item.udp_fallback ? actionLabel(item.udp_fallback) : 'blocked'}</span>
+                        {/if}
+                      </div>
+                    </td>
+                    <td class="actions">
+                      <IconButton icon="up" label="Move rule {index + 1} up" disabled={routing.rules[index - 1]?.node_id !== item.node_id} onclick={() => move(index, -1)} />
+                      <IconButton icon="down" label="Move rule {index + 1} down" disabled={routing.rules[index + 1]?.node_id !== item.node_id} onclick={() => move(index, 1)} />
+                      <IconButton icon="edit" label="Edit rule {index + 1}" onclick={() => editRule(item)} />
+                      <IconButton icon="close" label="Remove rule {index + 1}" onclick={() => { removing = { kind: 'rule', id: item.id, name: `rule ${index + 1}` }; removeOpen = true; }} />
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <EmptyState icon="route" title="No routing rules" message="Add a rule to send selected traffic through Cloudflare WARP, block domains or IPs, or forward through a custom outbound.">
+            {#snippet actions()}
+              <Button kind="primary" size="compact" icon="plus" onclick={() => editRule(null)}>Add rule</Button>
+            {/snippet}
+          </EmptyState>
+        {/if}
+      </section>
+
+      <section aria-labelledby="routing-outbounds">
+        <div class="group-head">
+          <h2 id="routing-outbounds" class="group-title">
+            Custom outbounds
+            <span class="badge">{routing?.outbounds.length ?? 0}</span>
+          </h2>
+          {#if routing?.outbounds.length}
+            <Button size="compact" icon="plus" onclick={() => editOutbound(null)}>Add outbound</Button>
+          {/if}
+        </div>
+        {#if routing?.outbounds.length}
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Name</th><th>Type</th><th>Target</th><th>UDP</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+              <tbody>
+                {#each routing.outbounds as item (item.id)}
+                  <tr>
+                    <td class="mono name-col">{item.name}</td>
+                    <td><span class="badge">{kinds.find((kind) => kind.value === item.kind)?.label ?? item.kind}</span></td>
+                    <td class="mono">{item.kind === 'fiend' ? nodes.find((other) => other.id === item.link_node_id)?.name ?? '—' : item.server ?? '—'}{#if item.username} <span class="muted">· {item.username}</span>{/if}</td>
+                    <td><span class="badge {item.udp ? 'green' : ''}">{item.udp ? 'Enabled' : item.udp_fallback ? `Via ${item.udp_fallback}` : 'Blocked'}</span></td>
+                    <td class="actions">
+                      <IconButton icon="edit" label="Edit {item.name}" onclick={() => editOutbound(item)} />
+                      <IconButton icon="close" label="Remove {item.name}" onclick={() => { removing = { kind: 'outbound', id: item.id, name: item.name }; removeOpen = true; }} />
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <EmptyState icon="swap" title="No custom outbounds" message="Define an external SOCKS5 or HTTP CONNECT proxy to use as a rule target." compact>
+            {#snippet actions()}
+              <Button size="compact" icon="plus" onclick={() => editOutbound(null)}>Add outbound</Button>
+            {/snippet}
+          </EmptyState>
+        {/if}
+      </section>
     </div>
-  {:else}
-    <p class="empty">No rules. Add a rule to send selected traffic through WARP, block it or use a custom outbound.</p>
-  {/if}
-</section>
 
-<div class="block">
-  {#each nodes.filter((node) => node.local) as node (node.id)}
-    <WarpCard node={node.id} revision={warpRevision} />
-  {/each}
-</div>
-
-<section class="block" aria-labelledby="routing-outbounds">
-  <div class="card-header"><h2 id="routing-outbounds">Custom outbounds</h2><Button icon="plus" onclick={() => editOutbound(null)}>Add outbound</Button></div>
-  {#if routing?.outbounds.length}
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Name</th><th>Type</th><th>Target</th><th>UDP</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
-        <tbody>
-          {#each routing.outbounds as item (item.id)}
-            <tr>
-              <td class="mono">{item.name}</td>
-              <td>{kinds.find((kind) => kind.value === item.kind)?.label ?? item.kind}</td>
-              <td class="mono">{item.kind === 'fiend' ? nodes.find((other) => other.id === item.link_node_id)?.name ?? '—' : item.server ?? '—'}{#if item.username} · {item.username}{/if}</td>
-              <td>{item.udp ? 'Yes' : item.udp_fallback ? `Through ${item.udp_fallback}` : 'Blocked'}</td>
-              <td class="actions"><IconButton icon="edit" label="Edit {item.name}" onclick={() => editOutbound(item)} /><IconButton icon="close" label="Remove {item.name}" onclick={() => { removing = { kind: 'outbound', id: item.id, name: item.name }; removeOpen = true; }} /></td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  {:else}
-    <p class="empty">Add a custom outbound to route through an external proxy.</p>
-  {/if}
-</section>
+    {#if localNodes.length}
+      <aside class="side">
+        {#each localNodes as node (node.id)}
+          <WarpCard node={node.id} revision={warpRevision} />
+        {/each}
+      </aside>
+    {/if}
+  </div>
+{/if}
 
 <Dialog bind:open={outboundOpen} title={editing === null ? 'Add outbound' : 'Edit outbound'}>
   <form id="outbound-form" novalidate class="stack" onsubmit={saveOutbound}>
@@ -289,10 +357,18 @@
 <Confirm bind:open={removeOpen} title="Remove {removing?.name ?? ''}" action="Remove" onconfirm={remove} />
 
 <style>
-  .block { margin-top: 22px; }
-  .empty { padding: 14px; border: 1px dashed var(--line); border-radius: 9px; }
+  .banner { margin-bottom: 16px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; align-items: start; }
+  .layout.has-side { grid-template-columns: minmax(0, 1fr) 360px; }
+  .main { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+  .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   .actions { text-align: right; width: 1%; position: sticky; right: 0; background: var(--panel); }
   tbody tr:hover .actions { background: var(--hover); }
   .index { width: 1%; padding-right: 4px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .pattern { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+  .name-col { font-weight: 500; }
+  .pattern-cell { max-width: 440px; }
+  .chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 0; }
+  .chip { padding: 2px 6px; border-radius: 4px; background: var(--soft); border: 1px solid var(--line); font-size: 11.5px; color: var(--text); }
+  .action-cell { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 4px 0; }
+  @media (max-width: 1080px) { .layout.has-side { grid-template-columns: minmax(0, 1fr); } }
 </style>

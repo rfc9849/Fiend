@@ -22,11 +22,11 @@
 </dialog>
 
 <style>
-  dialog { border: 0; padding: 0; border-radius: 9px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); width: min(480px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); }
+  dialog { border: 1px solid var(--line); padding: 0; border-radius: 9px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); width: min(490px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); }
   dialog.wide { width: min(720px, calc(100vw - 24px)); }
-  dialog::backdrop { background: #0007; }
+  dialog::backdrop { background: var(--scrim); }
   .frame { display: flex; flex-direction: column; max-height: calc(100dvh - 24px); }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 6px 18px; }
-  .body { padding: 8px 18px 16px; overflow: auto; }
-  footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px 13px 18px; border-bottom: 1px solid var(--line); }
+  .body { padding: 16px 18px; overflow: auto; }
+  footer { display: flex; justify-content: flex-end; gap: 8px; padding: 11px 18px; background: var(--soft); border-top: 1px solid var(--line); flex-wrap: wrap; }
 </style>

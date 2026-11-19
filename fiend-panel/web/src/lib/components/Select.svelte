@@ -115,7 +115,8 @@
 
 <style>
   .select { position: relative; min-width: 0; }
-  .trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 34px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; user-select: none; }
+  .trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 35px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); cursor: pointer; user-select: none; transition: border-color .12s; }
+  .trigger:hover:not([aria-disabled=true]) { border-color: var(--dial-edge); }
   .trigger[aria-disabled=true] { opacity: .5; cursor: not-allowed; }
   .trigger > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .placeholder { color: var(--muted); }

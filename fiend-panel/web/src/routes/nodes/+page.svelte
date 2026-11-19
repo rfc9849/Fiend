@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import TopBar from '#lib/components/TopBar.svelte';
+  import EmptyState from '#lib/components/EmptyState.svelte';
+  import Button from '#lib/components/Button.svelte';
   import { api, fieldErrors } from '#lib/api/client.ts';
   import type { NodeView } from '#lib/api/generated/index.ts';
 
@@ -26,10 +28,11 @@
 {#if error}
   <p class="note error" role="alert">{error}</p>
 {:else if empty}
-  <section class="card stack">
-    <h2>No server connected</h2>
-    <a href="/welcome?next=%2Fnodes">Connect the local server</a>
-  </section>
+  <EmptyState icon="server" title="No server connected" message="Connect the local server to manage its address, TLS disguise, routing, and logs.">
+    {#snippet actions()}
+      <Button kind="primary" icon="plus" onclick={() => goto('/welcome?next=%2Fnodes')}>Connect local server</Button>
+    {/snippet}
+  </EmptyState>
 {:else}
   <p class="muted">Loading…</p>
 {/if}
