@@ -554,7 +554,7 @@ async fn local_node_sync_links_statistics_and_limits() {
     assert_eq!(status, StatusCode::OK, "{user}");
     let alice = user["id"].as_i64().unwrap();
     assert!(user["reset_at"].as_i64().unwrap() > fiend_panel::now());
-    sqlx::query("UPDATE nodes SET disguise_version = applied_version + 1 WHERE id = ?")
+    sqlx::query("UPDATE nodes SET disguise_version = 1000000 WHERE id = ?")
         .bind(node_id)
         .execute(&panel.app.db)
         .await
