@@ -485,10 +485,10 @@ where
                 let lone_bulk = state.links.len() == 1
                     && state.links.len() < self.config.max_links
                     && state.links[0].is_bulk();
-                let spread = (loaded || doubtful || lone_bulk)
+                let wait_for_spread = (doubtful || lone_bulk)
                     && state.backoff.delay.is_zero()
                     && spread_until.is_none_or(|until| now < until);
-                if spread {
+                if wait_for_spread {
                     state.spread_request = true;
                     spread_until.get_or_insert(now + SPREAD_WAIT);
                     self.wake.notify_one();
@@ -500,11 +500,12 @@ where
                 {
                     let separate = state.links.len() < self.config.max_links
                         && state.backoff.delay.is_zero()
-                        && !state
-                            .links
-                            .iter()
-                            .filter(|link| !link.is_closed() && link.has_capacity())
-                            .any(|link| fits(link, kind, bar));
+                        && (loaded
+                            || !state
+                                .links
+                                .iter()
+                                .filter(|link| !link.is_closed() && link.has_capacity())
+                                .any(|link| fits(link, kind, bar)));
                     let reservation = link.reserve(kind);
                     if separate && !state.spread_request {
                         state.spread_request = true;
