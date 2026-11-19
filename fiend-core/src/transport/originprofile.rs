@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 
 const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_TICKET_TIMEOUT: Duration = Duration::from_millis(750);
 const PROBE_RECORD_TIMEOUT: Duration = Duration::from_millis(150);
 const PROBE_RECORDS: usize = 8;
 const PROBE_HANDSHAKE_RECORDS: usize = 32;
@@ -190,7 +191,9 @@ async fn probe(
     let mut records = 0;
     while records < PROBE_RECORDS || handshake.is_some() && records < PROBE_HANDSHAKE_RECORDS {
         records += 1;
-        let wait = if handshake.is_some() && profile.post_handshake_sizes.is_empty() {
+        let wait = if finished && profile.post_handshake_sizes.is_empty() {
+            PROBE_TICKET_TIMEOUT
+        } else if handshake.is_some() && !finished {
             PROBE_READ_TIMEOUT
         } else {
             PROBE_RECORD_TIMEOUT

@@ -164,7 +164,7 @@ impl Server {
             stream,
             &self.inner.replay,
             |template| {
-                let mut origin = node.origin_for(template);
+                let mut origin = node.origin_for_mode(template, config.post_handshake_records);
                 if !config.post_handshake_records {
                     origin.post_handshake_sizes.clear();
                 }

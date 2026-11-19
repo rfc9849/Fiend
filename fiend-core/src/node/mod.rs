@@ -472,6 +472,14 @@ impl Node {
     }
 
     pub fn origin_for(&self, template: &crate::fingerprint::Template) -> OriginProfile {
+        self.origin_for_mode(template, false)
+    }
+
+    pub(crate) fn origin_for_mode(
+        &self,
+        template: &crate::fingerprint::Template,
+        post_handshake: bool,
+    ) -> OriginProfile {
         let (host, port, base) = self.origin();
         let version = self.snapshot().state.version;
         let key = template.shape_key();
@@ -519,7 +527,12 @@ impl Node {
                 }
             };
             let target = node.origin_target(&host, port);
-            match crate::transport::probe_origin_handshake(&target, hello).await {
+            let probed = if post_handshake {
+                crate::transport::probe_origin_handshake(&target, hello).await
+            } else {
+                crate::transport::probe_origin(&target, &hello.record).await
+            };
+            match probed {
                 Ok(measured) => {
                     let mut profiles = node
                         .inner
