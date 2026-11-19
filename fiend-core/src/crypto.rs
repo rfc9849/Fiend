@@ -199,17 +199,21 @@ impl RecordCipher {
     pub fn seal_into(&mut self, plaintext: &[u8], output: &mut Vec<u8>) -> Result<(), Error> {
         let start = output.len();
         output.extend_from_slice(plaintext);
+        self.seal_in_place(output, start)
+    }
+
+    pub fn seal_in_place(&mut self, buffer: &mut Vec<u8>, start: usize) -> Result<(), Error> {
         let nonce = self.nonce();
         let tag = self
             .aead
-            .encrypt_inout_detached(&Nonce::from(nonce), b"", (&mut output[start..]).into())
+            .encrypt_inout_detached(&Nonce::from(nonce), b"", (&mut buffer[start..]).into())
             .map_err(|_| Error::Encrypt)?;
-        output.extend_from_slice(&tag);
+        buffer.extend_from_slice(&tag);
         self.counter += 1;
         Ok(())
     }
 
-    pub fn open_in_place(&mut self, buffer: &mut Vec<u8>) -> Result<(), Error> {
+    pub fn open_in_place_slice(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
         if buffer.len() < 16 {
             return Err(Error::Decrypt);
         }
@@ -226,8 +230,13 @@ impl RecordCipher {
                 &tag,
             )
             .map_err(|_| Error::Decrypt)?;
-        buffer.truncate(plaintext_len);
         self.counter += 1;
+        Ok(plaintext_len)
+    }
+
+    pub fn open_in_place(&mut self, buffer: &mut Vec<u8>) -> Result<(), Error> {
+        let plaintext_len = self.open_in_place_slice(buffer)?;
+        buffer.truncate(plaintext_len);
         Ok(())
     }
 }

@@ -18,20 +18,20 @@ const INNER_HANDSHAKE: u8 = 0x16;
 const RECORD_TYPE_APPDATA: u8 = 0x17;
 const MIN_RECORD_BODY: usize = 1 + AEAD_TAG_SIZE;
 const MAX_RECORD_BODY: usize = DEFAULT_RECORD_MAX + 1 + AEAD_TAG_SIZE;
+const READ_BUFFER_SIZE: usize = 32 << 10;
 
 pub struct Session<S> {
     stream: S,
     write_cipher: RecordCipher,
     read_cipher: RecordCipher,
     record_max: usize,
-    read_header: [u8; RECORD_HEADER_SIZE],
-    read_header_pos: usize,
-    read_body: Vec<u8>,
-    read_body_pos: usize,
-    read_body_len: usize,
-    read_plain: Vec<u8>,
+    read_raw: Vec<u8>,
+    read_raw_pos: usize,
+    read_raw_len: usize,
     read_plain_pos: usize,
+    read_plain_end: usize,
     write_buf: Vec<u8>,
+    recycle: Option<Vec<u8>>,
     sealed: VecDeque<Vec<u8>>,
     write_pos: usize,
 }
@@ -48,20 +48,19 @@ impl<S> Session<S> {
         } else {
             record_max
         };
-        let body_capacity = record_max + 1 + AEAD_TAG_SIZE;
+        let record_capacity = RECORD_HEADER_SIZE + record_max + 1 + AEAD_TAG_SIZE;
         Self {
             stream,
             write_cipher,
             read_cipher,
             record_max,
-            read_header: [0u8; RECORD_HEADER_SIZE],
-            read_header_pos: 0,
-            read_body: Vec::with_capacity(body_capacity),
-            read_body_pos: 0,
-            read_body_len: 0,
-            read_plain: Vec::with_capacity(body_capacity),
+            read_raw: vec![0u8; READ_BUFFER_SIZE],
+            read_raw_pos: 0,
+            read_raw_len: 0,
             read_plain_pos: 0,
-            write_buf: Vec::with_capacity(body_capacity + RECORD_HEADER_SIZE),
+            read_plain_end: 0,
+            write_buf: Vec::with_capacity(record_capacity),
+            recycle: Some(Vec::with_capacity(record_capacity)),
             sealed: VecDeque::with_capacity(2),
             write_pos: 0,
         }
@@ -95,12 +94,13 @@ impl<S> Session<S> {
         let plaintext_len = self.write_buf.len() - RECORD_HEADER_SIZE;
         let body_len = plaintext_len + AEAD_TAG_SIZE;
         self.write_buf[3..5].copy_from_slice(&(body_len as u16).to_be_bytes());
-        let mut record = Vec::with_capacity(body_len);
         self.write_cipher
-            .seal_into(&self.write_buf[RECORD_HEADER_SIZE..], &mut record)
+            .seal_in_place(&mut self.write_buf, RECORD_HEADER_SIZE)
             .map_err(crypto_error)?;
-        record.splice(0..0, self.write_buf[..RECORD_HEADER_SIZE].iter().copied());
-        self.write_buf.clear();
+        let next = self.recycle.take().unwrap_or_else(|| {
+            Vec::with_capacity(RECORD_HEADER_SIZE + self.record_max + 1 + AEAD_TAG_SIZE)
+        });
+        let record = std::mem::replace(&mut self.write_buf, next);
         self.sealed.push_back(record);
         Ok(())
     }
@@ -161,8 +161,8 @@ impl<S: AsyncRead + Unpin> AsyncRead for Session<S> {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         loop {
-            if this.read_plain_pos < this.read_plain.len() {
-                let available = &this.read_plain[this.read_plain_pos..];
+            if this.read_plain_pos < this.read_plain_end {
+                let available = &this.read_raw[this.read_plain_pos..this.read_plain_end];
                 let count = available.len().min(buf.remaining());
                 if count == 0 {
                     return Poll::Ready(Ok(()));
@@ -172,91 +172,94 @@ impl<S: AsyncRead + Unpin> AsyncRead for Session<S> {
                 return Poll::Ready(Ok(()));
             }
 
-            if this.read_body_pos < this.read_body_len {
-                let mut read_buf =
-                    ReadBuf::new(&mut this.read_body[this.read_body_pos..this.read_body_len]);
-                match Pin::new(&mut this.stream).poll_read(cx, &mut read_buf) {
-                    Poll::Ready(Ok(())) => {
-                        let count = read_buf.filled().len();
-                        if count == 0 {
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::UnexpectedEof,
-                                "truncated TLS record",
-                            )));
-                        }
-                        this.read_body_pos += count;
-                    }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Pending => return Poll::Pending,
+            let available = this.read_raw_len - this.read_raw_pos;
+            if available >= RECORD_HEADER_SIZE {
+                let header = &this.read_raw[this.read_raw_pos..this.read_raw_pos + RECORD_HEADER_SIZE];
+                if header[0] != REC_APPDATA {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected TLS record type",
+                    )));
                 }
-                if this.read_body_pos < this.read_body_len {
-                    continue;
+                let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+                if !(MIN_RECORD_BODY..=MAX_RECORD_BODY).contains(&length) {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid TLS record length",
+                    )));
                 }
-
-                this.read_cipher
-                    .open_in_place(&mut this.read_body)
-                    .map_err(crypto_error)?;
-                match this.read_body.pop() {
-                    Some(INNER_CONTENT_TYPE) => {}
-                    Some(INNER_HANDSHAKE) => {
-                        this.read_body.clear();
-                        this.read_body_pos = 0;
-                        this.read_body_len = 0;
-                        continue;
-                    }
-                    _ => {
+                let frame_len = RECORD_HEADER_SIZE + length;
+                if available >= frame_len {
+                    let body_start = this.read_raw_pos + RECORD_HEADER_SIZE;
+                    let body_end = this.read_raw_pos + frame_len;
+                    this.read_raw_pos = body_end;
+                    let plain_len = this
+                        .read_cipher
+                        .open_in_place_slice(&mut this.read_raw[body_start..body_end])
+                        .map_err(crypto_error)?;
+                    if plain_len == 0 {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "unexpected inner TLS content type",
                         )));
                     }
+                    match this.read_raw[body_start + plain_len - 1] {
+                        INNER_CONTENT_TYPE => {
+                            this.read_plain_pos = body_start;
+                            this.read_plain_end = body_start + plain_len - 1;
+                            continue;
+                        }
+                        INNER_HANDSHAKE => {
+                            this.read_plain_pos = 0;
+                            this.read_plain_end = 0;
+                            continue;
+                        }
+                        _ => {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "unexpected inner TLS content type",
+                            )));
+                        }
+                    }
                 }
-                std::mem::swap(&mut this.read_body, &mut this.read_plain);
-                this.read_plain_pos = 0;
-                this.read_body_pos = 0;
-                this.read_body_len = 0;
-                continue;
             }
 
-            let mut read_buf = ReadBuf::new(&mut this.read_header[this.read_header_pos..]);
+            this.read_plain_pos = 0;
+            this.read_plain_end = 0;
+            if this.read_raw_pos == this.read_raw_len {
+                this.read_raw_pos = 0;
+                this.read_raw_len = 0;
+            } else if this.read_raw_pos > 0 {
+                this.read_raw
+                    .copy_within(this.read_raw_pos..this.read_raw_len, 0);
+                this.read_raw_len -= this.read_raw_pos;
+                this.read_raw_pos = 0;
+            }
+
+            let mut read_buf = ReadBuf::new(&mut this.read_raw[this.read_raw_len..]);
             match Pin::new(&mut this.stream).poll_read(cx, &mut read_buf) {
                 Poll::Ready(Ok(())) => {
                     let count = read_buf.filled().len();
                     if count == 0 {
-                        if this.read_header_pos == 0 {
+                        let remaining = this.read_raw_len - this.read_raw_pos;
+                        if remaining == 0 {
                             return Poll::Ready(Ok(()));
                         }
+                        let message = if remaining < RECORD_HEADER_SIZE {
+                            "truncated TLS record header"
+                        } else {
+                            "truncated TLS record"
+                        };
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::UnexpectedEof,
-                            "truncated TLS record header",
+                            message,
                         )));
                     }
-                    this.read_header_pos += count;
+                    this.read_raw_len += count;
                 }
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
             }
-            if this.read_header_pos < RECORD_HEADER_SIZE {
-                continue;
-            }
-
-            if this.read_header[0] != REC_APPDATA {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unexpected TLS record type",
-                )));
-            }
-            let length = u16::from_be_bytes([this.read_header[3], this.read_header[4]]) as usize;
-            if !(MIN_RECORD_BODY..=MAX_RECORD_BODY).contains(&length) {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid TLS record length",
-                )));
-            }
-            this.read_body.resize(length, 0);
-            this.read_body_pos = 0;
-            this.read_body_len = length;
-            this.read_header_pos = 0;
         }
     }
 }
@@ -321,6 +324,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Session<S> {
         }
     }
 
+    fn is_write_vectored(&self) -> bool {
+        true
+    }
+
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.seal()?;
@@ -349,7 +356,12 @@ fn flush_pending<S: AsyncWrite + Unpin>(
                 Poll::Pending => return Poll::Pending,
             }
         }
-        session.sealed.pop_front();
+        if let Some(mut done) = session.sealed.pop_front()
+            && session.recycle.is_none()
+        {
+            done.clear();
+            session.recycle = Some(done);
+        }
         session.write_pos = 0;
     }
     Poll::Ready(Ok(()))
@@ -467,6 +479,35 @@ mod tests {
         let mut out = vec![0u8; 13];
         session.read_exact(&mut out).await.expect("read");
         assert_eq!(&out, b"split payload");
+    }
+
+    #[test]
+    fn reports_vectored_write_support() {
+        let (writer, _) = tokio::io::duplex(1024);
+        let session = session(writer, DEFAULT_RECORD_MAX);
+        assert!(session.is_write_vectored());
+    }
+
+    #[tokio::test]
+    async fn reads_back_to_back_records_from_one_buffer() {
+        let (mut wire, reader) = tokio::io::duplex(1 << 20);
+        let mut reader = session(reader, DEFAULT_RECORD_MAX);
+        let mut cipher = RecordCipher::new(&[3u8; 32], [4u8; 12]);
+        let mut combined = Vec::new();
+        for payload in [&b"first record"[..], &b"second record"[..]] {
+            let mut record = vec![RECORD_TYPE_APPDATA, 0x03, 0x03, 0, 0];
+            let mut plain = payload.to_vec();
+            plain.push(INNER_CONTENT_TYPE);
+            cipher.seal_into(&plain, &mut record).expect("seal");
+            let length = (record.len() - RECORD_HEADER_SIZE) as u16;
+            record[3..5].copy_from_slice(&length.to_be_bytes());
+            combined.extend_from_slice(&record);
+        }
+        wire.write_all(&combined).await.expect("write");
+        wire.shutdown().await.expect("shutdown");
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).await.expect("read");
+        assert_eq!(&out, b"first recordsecond record");
     }
 
     fn session_bytes(payload: &[u8]) -> Vec<u8> {
