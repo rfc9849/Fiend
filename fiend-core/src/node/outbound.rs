@@ -23,6 +23,7 @@ pub const MAX_OUTBOUNDS: usize = 64;
 pub const MAX_RULES: usize = 256;
 const MAX_RULE_TEXT: usize = 256 * 1024;
 const UDP_BUFFER: usize = u16::MAX as usize;
+const REMOTE_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -409,7 +410,7 @@ impl Context {
                 if host.parse::<std::net::IpAddr>().is_err() =>
             {
                 if let Ok(Ok(resolved)) =
-                    timeout(Duration::from_secs(5), resolver(host.clone(), *port)).await
+                    timeout(REMOTE_CHECK_TIMEOUT, resolver(host.clone(), *port)).await
                 {
                     for address in resolved {
                         self.policy.check(address)?;
@@ -430,7 +431,7 @@ pub async fn check_remote(address: &Address, policy: &TargetPolicy) -> io::Resul
                 return policy.check(SocketAddr::new(ip, *port));
             }
             let lookup =
-                tokio::time::timeout(Duration::from_secs(5), crate::resolve::lookup(host, *port))
+                tokio::time::timeout(REMOTE_CHECK_TIMEOUT, crate::resolve::lookup(host, *port))
                     .await;
             if let Ok(Ok(resolved)) = lookup {
                 for address in resolved {
@@ -487,8 +488,10 @@ impl Runtime {
                 password,
                 ..
             } => {
-                context.check(address).await?;
-                let mut stream = TcpStream::connect(server.as_str()).await?;
+                let ((), mut stream) = tokio::try_join!(
+                    context.check(address),
+                    TcpStream::connect(server.as_str()),
+                )?;
                 stream.set_nodelay(true)?;
                 socks_connect(
                     &mut stream,
@@ -500,8 +503,9 @@ impl Runtime {
                 Ok(Box::pin(stream))
             }
             OutboundKind::Warp => {
-                context.check(address).await?;
-                let mut stream = TcpStream::connect(warp_address(context)?).await?;
+                let warp = warp_address(context)?;
+                let ((), mut stream) =
+                    tokio::try_join!(context.check(address), TcpStream::connect(warp))?;
                 stream.set_nodelay(true)?;
                 socks_connect(&mut stream, address, None, socks5::CMD_CONNECT).await?;
                 Ok(Box::pin(stream))
@@ -511,8 +515,10 @@ impl Runtime {
                 username,
                 password,
             } => {
-                context.check(address).await?;
-                let mut stream = TcpStream::connect(server.as_str()).await?;
+                let ((), mut stream) = tokio::try_join!(
+                    context.check(address),
+                    TcpStream::connect(server.as_str()),
+                )?;
                 stream.set_nodelay(true)?;
                 http_connect(
                     &mut stream,
@@ -585,8 +591,11 @@ impl Runtime {
                 password,
                 udp: true,
             } => {
-                context.check(address).await?;
-                let mut control = TcpStream::connect(server.as_str()).await?;
+                let ((), mut control) = tokio::try_join!(
+                    context.check(address),
+                    TcpStream::connect(server.as_str()),
+                )?;
+                control.set_nodelay(true)?;
                 let proxy = control.peer_addr()?;
                 let any = Address::Ip(SocketAddr::from(([0, 0, 0, 0], 0)));
                 let mut relay = match socks_connect(
