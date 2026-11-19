@@ -28,6 +28,8 @@ fn rejected(status: http::StatusCode) -> io::Error {
 }
 
 pub const LANE_HEADER: &str = "x-lane";
+const H2_FRAME_HEADER_SIZE: usize = 9;
+const MAX_ALIGNED_H2_DATA: usize = crate::fingerprint::DEFAULT_RECORD_MAX - H2_FRAME_HEADER_SIZE;
 pub(crate) type IoMeter = Arc<dyn Fn(usize, bool) + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -314,10 +316,11 @@ impl AsyncWrite for H2Lane {
         }
 
         this.set_blocked(false);
+        let limit = this.lane_share.min(MAX_ALIGNED_H2_DATA);
         loop {
             let capacity = this.send.capacity();
             if capacity == 0 {
-                let wanted = buf.len().min(this.lane_share);
+                let wanted = buf.len().min(limit);
                 this.send.reserve_capacity(wanted);
                 match this.send.poll_capacity(cx) {
                     Poll::Ready(Some(Ok(_))) => continue,
@@ -334,7 +337,7 @@ impl AsyncWrite for H2Lane {
                 }
             }
 
-            let count = buf.len().min(capacity).min(this.lane_share);
+            let count = buf.len().min(capacity).min(limit);
             let data = Bytes::copy_from_slice(&buf[..count]);
             if let Err(error) = this.send.send_data(data, false) {
                 return Poll::Ready(Err(io::Error::other(error)));
