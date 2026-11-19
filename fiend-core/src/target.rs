@@ -35,7 +35,7 @@ impl TargetPolicy {
     }
 
     fn check_v4(&self, address: SocketAddr, ip: Ipv4Addr) -> io::Result<()> {
-        let [first, second, _, _] = ip.octets();
+        let [first, second, third, _] = ip.octets();
         if ip.is_loopback() {
             return self.allow(address, self.allow_loopback);
         }
@@ -51,7 +51,9 @@ impl TargetPolicy {
         if first == 0 || first >= 240 || ip.is_multicast() {
             return Err(blocked(address));
         }
-        if (first == 192 && second == 0) || (first == 198 && (18..=19).contains(&second)) {
+        if (first == 192 && second == 0 && (third == 0 || third == 2))
+            || (first == 198 && (18..=19).contains(&second))
+        {
             return Err(blocked(address));
         }
         Ok(())
@@ -159,7 +161,10 @@ pub async fn connect_tcp(
         )
         .await
         {
-            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Ok(stream)) => {
+                stream.set_nodelay(true)?;
+                return Ok(stream);
+            }
             Ok(Err(error)) => last = Some(error),
             Err(_) => last = Some(timed_out()),
         }
@@ -198,6 +203,7 @@ mod tests {
     fn public_targets_are_allowed() {
         let policy = TargetPolicy::default();
         assert!(policy.check(ip("8.8.8.8:443")).is_ok());
+        assert!(policy.check(ip("192.0.78.24:443")).is_ok());
         assert!(policy.check(ip("[2001:4860:4860::8888]:53")).is_ok());
         assert!(policy.check(ip("[::ffff:8.8.8.8]:443")).is_ok());
     }
@@ -354,5 +360,23 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn direct_tcp_connects_enable_nodelay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let accept = tokio::spawn(async move { listener.accept().await });
+        let stream = connect_tcp(
+            &Address::ip(address),
+            &TargetPolicy::allow_all(),
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .expect("connect");
+        assert!(stream.nodelay().expect("nodelay"));
+        let _ = accept.await;
     }
 }
