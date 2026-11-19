@@ -14,6 +14,8 @@ export type { Event } from './Event';
 export type { LocalNodeDefaults } from './LocalNodeDefaults';
 export type { LocalNodeInput } from './LocalNodeInput';
 export type { Login } from './Login';
+export type { LoginChallenge } from './LoginChallenge';
+export type { LoginTotp } from './LoginTotp';
 export type { NodeInput } from './NodeInput';
 export type { NodeLogs } from './NodeLogs';
 export type { NodeSessions } from './NodeSessions';

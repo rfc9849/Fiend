@@ -35,6 +35,17 @@ pub struct Login {
     pub totp_code: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, TS)]
+pub struct LoginChallenge {
+    pub challenge: String,
+}
+
+#[derive(Serialize, Deserialize, TS)]
+pub struct LoginTotp {
+    pub challenge: String,
+    pub code: String,
+}
+
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 pub struct AdminView {
     pub id: i64,
@@ -427,6 +438,8 @@ pub fn export(dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         TotpSetup,
         SetupAdmin,
         Login,
+        LoginChallenge,
+        LoginTotp,
         AdminView,
         SessionInfo,
         WizardState,

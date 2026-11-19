@@ -209,6 +209,7 @@ pub struct Inner {
     pub db: SqlitePool,
     pub events: broadcast::Sender<types::Event>,
     pub limiter: auth::Limiter,
+    pub(crate) pending_logins: auth::PendingLogins,
     pub sync: sync::Sync,
     pub totp_steps: Mutex<HashMap<i64, u64>>,
 }
@@ -229,6 +230,7 @@ impl App {
             db,
             events,
             limiter: auth::Limiter::default(),
+            pending_logins: auth::PendingLogins::default(),
             sync: sync::Sync::default(),
             totp_steps: Mutex::new(HashMap::new()),
         })))

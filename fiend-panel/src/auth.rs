@@ -15,7 +15,8 @@ use sha2::{Digest, Sha256};
 use totp_rs::{Builder, Secret, Totp};
 
 use crate::types::{
-    AdminView, Login, SessionInfo, SetupAdmin, SetupStatus, TotpSetup, WizardState,
+    AdminView, Login, LoginChallenge, LoginTotp, SessionInfo, SetupAdmin, SetupStatus, TotpSetup,
+    WizardState,
 };
 use crate::{ApiError, ApiResult, App, now};
 
@@ -31,6 +32,8 @@ pub const ACCOUNT_FREE: u32 = 50;
 pub const CODE_FREE: u32 = 5;
 pub const PASSWORD_FREE: u32 = 5;
 const MAX_NAME: usize = 64;
+const LOGIN_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_PENDING_LOGINS: usize = 1024;
 
 struct Entry {
     failures: u32,
@@ -399,17 +402,30 @@ impl FromRequestParts<App> for Admin {
     }
 }
 
-async fn create_session(app: &App, admin_id: i64) -> ApiResult<String> {
+async fn create_session(
+    app: &App,
+    admin_id: i64,
+    password_hash: &str,
+    totp_secret: Option<&str>,
+) -> ApiResult<String> {
     let token = hex::encode(rand::random::<[u8; 32]>());
     let csrf = hex::encode(rand::random::<[u8; 32]>());
-    sqlx::query("INSERT INTO sessions (id_hash, admin_id, csrf, created_at, last_seen) VALUES (?, ?, ?, ?, ?)")
-        .bind(hash_token(&token))
-        .bind(admin_id)
-        .bind(csrf)
-        .bind(now())
-        .bind(now())
-        .execute(&app.db)
-        .await?;
+    let result = sqlx::query(
+        "INSERT INTO sessions (id_hash, admin_id, csrf, created_at, last_seen)
+         SELECT ?, id, ?, ?, ? FROM admins WHERE id = ? AND password_hash = ? AND totp_secret IS ?",
+    )
+    .bind(hash_token(&token))
+    .bind(csrf)
+    .bind(now())
+    .bind(now())
+    .bind(admin_id)
+    .bind(password_hash)
+    .bind(totp_secret)
+    .execute(&app.db)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(sign_in_again());
+    }
     sqlx::query("DELETE FROM sessions WHERE last_seen < ? OR created_at < ?")
         .bind(now() - IDLE)
         .bind(now() - ABSOLUTE)
@@ -515,8 +531,8 @@ pub async fn setup_admin(
     }
     let id: i64 = sqlx::query_scalar("INSERT INTO admins (name, password_hash, totp_secret, created_at) VALUES (?, ?, ?, ?) RETURNING id")
         .bind(&input.name)
-        .bind(hash)
-        .bind(totp_secret)
+        .bind(&hash)
+        .bind(&totp_secret)
         .bind(now())
         .fetch_one(&mut *transaction)
         .await?;
@@ -528,7 +544,7 @@ pub async fn setup_admin(
         "first admin created",
     )
     .await;
-    let token = create_session(&app, id).await?;
+    let token = create_session(&app, id, &hash, totp_secret.as_deref()).await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -544,58 +560,192 @@ fn login_failed() -> ApiError {
     )
 }
 
-pub async fn login(
-    State(app): State<App>,
-    client: Client,
-    Json(input): Json<Login>,
-) -> ApiResult<Response> {
-    let source_key = format!("login-source:{}", client.source);
-    app.limiter.check(&source_key)?;
-    if input.name.len() > MAX_NAME {
-        app.limiter.fail(&source_key, SOURCE_FREE);
-        return Err(login_failed());
+fn sign_in_again() -> ApiError {
+    ApiError::new(StatusCode::UNAUTHORIZED, "Sign in again to continue.")
+}
+
+#[derive(Clone, sqlx::FromRow)]
+struct LoginAdmin {
+    id: i64,
+    name: String,
+    password_hash: String,
+    totp_secret: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingLogins(Mutex<HashMap<String, (Instant, LoginAdmin)>>);
+
+impl PendingLogins {
+    fn entries(&self) -> MutexGuard<'_, HashMap<String, (Instant, LoginAdmin)>> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
     }
-    let account_key = format!("login-name:{}", input.name);
-    app.limiter.check(&account_key)?;
-    let row: Option<(i64, String, Option<String>)> =
-        sqlx::query_as("SELECT id, password_hash, totp_secret FROM admins WHERE name = ?")
-            .bind(&input.name)
-            .fetch_optional(&app.db)
-            .await?;
-    let fail = |app: &App| {
-        app.limiter.fail(&source_key, SOURCE_FREE);
-        app.limiter.fail(&account_key, ACCOUNT_FREE);
-        login_failed()
-    };
-    let Some((id, hash, totp_secret)) = row else {
-        static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let dummy = DUMMY.get_or_init(|| hash_password("fiend dummy password").unwrap_or_default());
-        let _ = verify_password(&input.password, dummy);
-        return Err(fail(&app));
-    };
-    if totp_secret.is_some() {
-        app.limiter.check(&code_key(id))?;
+
+    fn issue(&self, admin: LoginAdmin) -> ApiResult<LoginChallenge> {
+        let now = Instant::now();
+        let mut entries = self.entries();
+        entries.retain(|_, (expires, _)| *expires > now);
+        if entries.len() >= MAX_PENDING_LOGINS {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many sign-ins in progress. Wait a few minutes and try again.",
+            ));
+        }
+        let challenge = hex::encode(rand::random::<[u8; 32]>());
+        entries.insert(hash_token(&challenge), (now + LOGIN_TTL, admin));
+        Ok(LoginChallenge { challenge })
     }
-    if !verify_password(&input.password, &hash) {
-        return Err(fail(&app));
+
+    fn get(&self, hash: &str) -> ApiResult<LoginAdmin> {
+        self.entries()
+            .get(hash)
+            .filter(|(expires, _)| *expires > Instant::now())
+            .map(|(_, admin)| admin.clone())
+            .ok_or_else(sign_in_again)
     }
-    if let Some(secret) = &totp_secret {
-        let code = input.totp_code.as_deref().unwrap_or("");
-        if !app.verify_code(id, secret, code)? {
-            return Err(fail(&app));
+
+    fn consume(&self, hash: &str) -> ApiResult<()> {
+        self.entries()
+            .remove(hash)
+            .filter(|(expires, _)| *expires > Instant::now())
+            .map(|_| ())
+            .ok_or_else(sign_in_again)
+    }
+}
+
+struct LoginLimits {
+    source: String,
+    account: String,
+}
+
+impl LoginLimits {
+    fn new(client: &Client, name: &str) -> Self {
+        Self {
+            source: format!("login-source:{}", client.source),
+            account: format!("login-name:{name}"),
         }
     }
-    app.limiter.clear(&source_key);
-    app.limiter.clear(&account_key);
-    let token = create_session(&app, id).await?;
-    app.audit(Some(id), "login", &format!("admin {}", input.name), "")
-        .await;
+
+    fn check(&self, app: &App) -> ApiResult<()> {
+        app.limiter.check(&self.source)?;
+        app.limiter.check(&self.account)
+    }
+
+    fn fail(&self, app: &App) {
+        app.limiter.fail(&self.source, SOURCE_FREE);
+        app.limiter.fail(&self.account, ACCOUNT_FREE);
+    }
+
+    fn clear(&self, app: &App) {
+        app.limiter.clear(&self.source);
+        app.limiter.clear(&self.account);
+    }
+}
+
+async fn finish_login(
+    app: &App,
+    client: &Client,
+    admin: &LoginAdmin,
+    limits: &LoginLimits,
+) -> ApiResult<Response> {
+    let token = create_session(
+        app,
+        admin.id,
+        &admin.password_hash,
+        admin.totp_secret.as_deref(),
+    )
+    .await?;
+    limits.clear(app);
+    app.audit(
+        Some(admin.id),
+        "login",
+        &format!("admin {}", admin.name),
+        "",
+    )
+    .await;
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         session_cookie(&token, ABSOLUTE, client.https),
     );
     Ok(response)
+}
+
+pub async fn login(
+    State(app): State<App>,
+    client: Client,
+    Json(input): Json<Login>,
+) -> ApiResult<Response> {
+    if input.name.len() > MAX_NAME {
+        let key = format!("login-source:{}", client.source);
+        app.limiter.check(&key)?;
+        app.limiter.fail(&key, SOURCE_FREE);
+        return Err(login_failed());
+    }
+    let limits = LoginLimits::new(&client, &input.name);
+    limits.check(&app)?;
+    let row: Option<LoginAdmin> =
+        sqlx::query_as("SELECT id, name, password_hash, totp_secret FROM admins WHERE name = ?")
+            .bind(&input.name)
+            .fetch_optional(&app.db)
+            .await?;
+    let Some(admin) = row else {
+        static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let dummy = DUMMY.get_or_init(|| hash_password("fiend dummy password").unwrap_or_default());
+        let _ = verify_password(&input.password, dummy);
+        limits.fail(&app);
+        return Err(login_failed());
+    };
+    if !verify_password(&input.password, &admin.password_hash) {
+        limits.fail(&app);
+        return Err(login_failed());
+    }
+    if let Some(secret) = &admin.totp_secret {
+        let Some(code) = input
+            .totp_code
+            .as_deref()
+            .filter(|code| !code.trim().is_empty())
+        else {
+            app.limiter.check(&code_key(admin.id))?;
+            return Ok(Json(app.pending_logins.issue(admin)?).into_response());
+        };
+        if !app.verify_code(admin.id, secret, code)? {
+            limits.fail(&app);
+            return Err(login_failed());
+        }
+    }
+    finish_login(&app, &client, &admin, &limits).await
+}
+
+pub async fn login_totp(
+    State(app): State<App>,
+    client: Client,
+    Json(input): Json<LoginTotp>,
+) -> ApiResult<Response> {
+    if input.challenge.len() != 64 {
+        return Err(sign_in_again());
+    }
+    let hash = hash_token(&input.challenge);
+    let admin = app.pending_logins.get(&hash)?;
+    let limits = LoginLimits::new(&client, &admin.name);
+    limits.check(&app)?;
+    let secret = admin.totp_secret.as_deref().ok_or_else(sign_in_again)?;
+    let current: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM admins WHERE id = ? AND password_hash = ? AND totp_secret = ?)",
+    )
+    .bind(admin.id)
+    .bind(&admin.password_hash)
+    .bind(secret)
+    .fetch_one(&app.db)
+    .await?;
+    if !current {
+        return Err(sign_in_again());
+    }
+    if !app.verify_code(admin.id, secret, &input.code)? {
+        limits.fail(&app);
+        return Err(ApiError::field("code", "The code is not correct."));
+    }
+    app.pending_logins.consume(&hash)?;
+    finish_login(&app, &client, &admin, &limits).await
 }
 
 pub async fn logout(State(app): State<App>, client: Client, admin: Admin) -> ApiResult<Response> {

@@ -209,38 +209,54 @@ async fn setup_is_one_time_and_validates_input() {
     let (status, _) = panel
         .post(
             "/api/login",
-            json!({"name": "owner", "password": "a long test password", "totp_code": null}),
+            json!({"name": "owner", "password": "wrong password value"}),
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let mut accepted = false;
-    for _ in 0..40 {
-        let code = totp_code(totp["secret"].as_str().unwrap());
-        let (status, _) = panel
-            .post(
-                "/api/login",
-                json!({"name": "owner", "password": "a long test password", "totp_code": code}),
-            )
-            .await;
-        if status == StatusCode::NO_CONTENT {
-            accepted = true;
-            let (replay, _) = panel
-                .post(
-                    "/api/login",
-                    json!({"name": "owner", "password": "a long test password", "totp_code": code}),
-                )
-                .await;
-            assert_eq!(
-                replay,
-                StatusCode::UNAUTHORIZED,
-                "a TOTP code works one time"
-            );
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    assert!(accepted);
+
+    let (status, body) = panel
+        .post(
+            "/api/login",
+            json!({"name": "owner", "password": "a long test password"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let challenge = body["challenge"].as_str().unwrap();
+    assert!(panel.cookie.is_none());
+    assert_eq!(panel.get("/api/session").await.0, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = panel
+        .post(
+            "/api/login/totp",
+            json!({"challenge": challenge, "code": "not a code"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["field"], "code");
+    assert!(panel.cookie.is_none());
+
+    let code = totp_code(totp["secret"].as_str().unwrap());
+    let verification = json!({"challenge": challenge, "code": code});
+    let (status, _) = panel.post("/api/login/totp", verification.clone()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(panel.get("/api/session").await.0, StatusCode::OK);
+
+    panel.cookie = None;
+    let (status, _) = panel.post("/api/login/totp", verification).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(panel.cookie.is_none());
+
+    let (status, _) = panel
+        .post(
+            "/api/login",
+            json!({"name": "owner", "password": "a long test password", "totp_code": code}),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a TOTP code works one time"
+    );
 }
 
 #[tokio::test]
@@ -250,6 +266,16 @@ async fn sessions_csrf_origin_and_rate_limits() {
     assert_eq!(panel.get("/api/session").await.0, StatusCode::UNAUTHORIZED);
     assert_eq!(panel.get("/api/users").await.0, StatusCode::UNAUTHORIZED);
     panel.setup().await;
+    panel.cookie = None;
+    let (status, _) = panel
+        .post(
+            "/api/login",
+            json!({"name": "owner", "password": "a long test password"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    panel.refresh().await;
+
     let user = json!({"name": "alice", "enabled": true, "note": "", "traffic_limit": null, "expire_at": null, "hold_days": null, "reset_period": "none", "nodes": []});
     let (status, _) = panel
         .send("POST", "/api/users", Some(user.clone()), false)

@@ -30,6 +30,7 @@ pub fn routes() -> Router<App> {
         .route("/setup/{token}/totp", get(auth::setup_totp))
         .route("/setup", post(auth::setup_admin))
         .route("/login", post(auth::login))
+        .route("/login/totp", post(auth::login_totp))
         .route("/logout", post(auth::logout))
         .route("/session", get(auth::session))
         .route("/events", get(events))
