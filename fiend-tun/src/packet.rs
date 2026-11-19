@@ -169,6 +169,31 @@ impl Packet {
     }
 }
 
+pub fn fin_flow_key(raw: &[u8]) -> Option<FlowKey> {
+    let sliced = SlicedPacket::from_ip(raw).ok()?;
+    let (source, destination) = match &sliced.net {
+        Some(NetSlice::Ipv4(ip)) => (
+            IpAddr::V4(ip.header().source_addr()),
+            IpAddr::V4(ip.header().destination_addr()),
+        ),
+        Some(NetSlice::Ipv6(ip)) => (
+            IpAddr::V6(ip.header().source_addr()),
+            IpAddr::V6(ip.header().destination_addr()),
+        ),
+        _ => return None,
+    };
+    let Some(TransportSlice::Tcp(tcp)) = &sliced.transport else {
+        return None;
+    };
+    if !tcp.fin() || tcp.rst() {
+        return None;
+    }
+    Some(FlowKey {
+        source: SocketAddr::new(destination, tcp.destination_port()),
+        destination: SocketAddr::new(source, tcp.source_port()),
+    })
+}
+
 pub fn abort_fin(raw: &[u8]) -> Option<(FlowKey, Vec<Vec<u8>>)> {
     let sliced = SlicedPacket::from_ip(raw).ok()?;
     let (source, destination) = match &sliced.net {

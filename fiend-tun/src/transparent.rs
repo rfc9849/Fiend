@@ -27,7 +27,8 @@ use nix::sys::socket::{
     ControlMessageOwned, MsgFlags, SockaddrIn, SockaddrIn6, SockaddrLike, SockaddrStorage, recvmsg,
 };
 use tokio::io::{
-    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, ReadBuf, copy_bidirectional,
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, ReadBuf,
+    copy_bidirectional_with_sizes,
 };
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{OnceCell, mpsc};
@@ -469,7 +470,7 @@ async fn tcp_flow(
                     direct.write_all(&first).await?;
                 }
             }
-            copy_bidirectional(&mut stream, &mut direct).await?;
+            copy_bidirectional_with_sizes(&mut stream, &mut direct, 64 * 1024, 64 * 1024).await?;
             Ok(())
         }
         Route::Proxy => {
@@ -484,11 +485,47 @@ async fn tcp_flow(
                     .await
                     .inspect_err(|_| reset(&stream.inner))?;
             }
-            copy_bidirectional(&mut stream, &mut lane)
-                .await
-                .inspect_err(|_| reset(&stream.inner))?;
+            let (mut app_read, mut app_write) = tokio::io::split(stream);
+            let (mut lane_read, mut lane_write) = lane.into_split();
+            let app_to_lane = async {
+                copy_half(&mut app_read, &mut lane_write)
+                    .await
+                    .map_err(|(error, from_app)| (error, !from_app))
+            };
+            let lane_to_app = async {
+                copy_half(&mut lane_read, &mut app_write)
+                    .await
+                    .map_err(|(error, from_lane)| (error, from_lane))
+            };
+            let result = tokio::try_join!(app_to_lane, lane_to_app);
+            let stream = app_read.unsplit(app_write);
+            if let Err((error, tunnel_broken)) = result {
+                if tunnel_broken {
+                    reset(&stream.inner);
+                }
+                return Err(error);
+            }
             Ok(())
         }
+    }
+}
+
+async fn copy_half<R, W>(reader: &mut R, writer: &mut W) -> Result<(), (io::Error, bool)>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer).await.map_err(|error| (error, true))?;
+        if count == 0 {
+            writer.shutdown().await.map_err(|error| (error, false))?;
+            return Ok(());
+        }
+        writer
+            .write_all(&buffer[..count])
+            .await
+            .map_err(|error| (error, false))?;
     }
 }
 

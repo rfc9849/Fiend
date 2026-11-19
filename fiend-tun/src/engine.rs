@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,7 @@ use fiend_core::client::Client;
 use fiend_core::net::ProtectSocket;
 use futures::{SinkExt, StreamExt};
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional_with_sizes};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::desync;
 use crate::dns::FakeDns;
 use crate::icmp::{self, Echo};
-use crate::packet::{FlowKey, Packet, Reassembly, Transport, abort_fin, udp_packets};
+use crate::packet::{FlowKey, Packet, Reassembly, Transport, abort_fin, fin_flow_key, udp_packets};
 use crate::resolve::{Resolver, parse_server};
 use crate::rules::{Route, RuleFile, Rules, is_blocked_udp_port, is_null_network};
 
@@ -140,10 +140,17 @@ pub(crate) struct Context {
     resolver: Resolver,
     dns: Arc<Mutex<FakeDns>>,
     pub(crate) counters: Counters,
-    aborted: Mutex<HashMap<FlowKey, Instant>>,
+    aborted: Mutex<HashMap<FlowKey, AbortEntry>>,
+    aborted_count: AtomicUsize,
+}
+
+struct AbortEntry {
+    since: Instant,
+    sent_rst: bool,
 }
 
 const ABORT_TTL: Duration = Duration::from_secs(30);
+const TCP_RELAY_BUFFER: usize = 64 * 1024;
 
 impl TunEngine {
     pub fn new(client: Client, options: TunOptions) -> io::Result<Self> {
@@ -491,31 +498,53 @@ impl Context {
             dns,
             counters: Counters::default(),
             aborted: Mutex::new(HashMap::new()),
+            aborted_count: AtomicUsize::new(0),
         })
     }
 
     fn abort_tcp(&self, key: FlowKey) {
         let now = Instant::now();
         let mut aborted = self.aborted.lock().unwrap_or_else(|e| e.into_inner());
-        aborted.retain(|_, since| now.duration_since(*since) < ABORT_TTL);
-        aborted.insert(key, now);
+        aborted.retain(|_, entry| now.duration_since(entry.since) < ABORT_TTL);
+        aborted.insert(
+            key,
+            AbortEntry {
+                since: now,
+                sent_rst: false,
+            },
+        );
+        self.aborted_count.store(aborted.len(), Ordering::Release);
     }
 
     fn forget_abort(&self, key: &FlowKey) {
+        if self.aborted_count.load(Ordering::Acquire) == 0 {
+            return;
+        }
         let mut aborted = self.aborted.lock().unwrap_or_else(|e| e.into_inner());
-        if !aborted.is_empty() {
-            aborted.remove(key);
+        if aborted.remove(key).is_some() {
+            self.aborted_count.store(aborted.len(), Ordering::Release);
         }
     }
 
     fn reset_instead_of_fin(&self, packet: &[u8]) -> Option<Vec<Vec<u8>>> {
-        let mut aborted = self.aborted.lock().unwrap_or_else(|e| e.into_inner());
-        if aborted.is_empty() {
+        if self.aborted_count.load(Ordering::Acquire) == 0 {
             return None;
         }
-        let (key, packets) = abort_fin(packet)?;
-        aborted.remove(&key)?;
-        Some(packets)
+        let key = fin_flow_key(packet)?;
+        let already_sent = {
+            let now = Instant::now();
+            let mut aborted = self.aborted.lock().unwrap_or_else(|e| e.into_inner());
+            aborted.retain(|_, entry| now.duration_since(entry.since) < ABORT_TTL);
+            self.aborted_count.store(aborted.len(), Ordering::Release);
+            let entry = aborted.get_mut(&key)?;
+            let was_sent = entry.sent_rst;
+            entry.sent_rst = true;
+            was_sent
+        };
+        if already_sent {
+            return Some(Vec::new());
+        }
+        abort_fin(packet).map(|(_, packets)| packets)
     }
 
     fn destination(&self, address: SocketAddr) -> io::Result<Address> {
@@ -659,7 +688,13 @@ async fn tcp_flow(
             });
             if !dpi {
                 let mut direct = dial.await??;
-                copy_bidirectional(&mut stream, &mut direct).await?;
+                copy_bidirectional_with_sizes(
+                    &mut stream,
+                    &mut direct,
+                    TCP_RELAY_BUFFER,
+                    TCP_RELAY_BUFFER,
+                )
+                .await?;
                 return Ok(());
             }
             let (direct, first) = tokio::join!(
@@ -670,24 +705,69 @@ async fn tcp_flow(
             let first = first?;
             direct.set_nodelay(true)?;
             desync::write_first(&mut direct, &first).await?;
-            copy_bidirectional(&mut stream, &mut direct).await?;
+            copy_bidirectional_with_sizes(
+                &mut stream,
+                &mut direct,
+                TCP_RELAY_BUFFER,
+                TCP_RELAY_BUFFER,
+            )
+            .await?;
         }
         Plan::Proxy => {
-            let result = async {
-                let mut lane = context
-                    .client
-                    .open_tcp(&destination)
-                    .await
-                    .map_err(io::Error::other)?;
-                copy_bidirectional(&mut stream, &mut lane).await
+            let lane = match context.client.open_tcp(&destination).await {
+                Ok(lane) => lane,
+                Err(error) => {
+                    context.abort_tcp(key);
+                    return Err(io::Error::other(error));
+                }
+            };
+            if let Err((error, tunnel_broken)) = relay_lane(stream, lane).await {
+                if tunnel_broken {
+                    context.abort_tcp(key);
+                }
+                return Err(error);
             }
-            .await;
-            if result.is_err() {
-                context.abort_tcp(key);
-            }
-            result?;
         }
     }
+    Ok(())
+}
+
+async fn copy_half<R, W>(reader: &mut R, writer: &mut W) -> Result<(), (io::Error, bool)>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buffer = vec![0u8; TCP_RELAY_BUFFER];
+    loop {
+        let count = reader.read(&mut buffer).await.map_err(|error| (error, true))?;
+        if count == 0 {
+            writer.shutdown().await.map_err(|error| (error, false))?;
+            return Ok(());
+        }
+        writer
+            .write_all(&buffer[..count])
+            .await
+            .map_err(|error| (error, false))?;
+    }
+}
+
+async fn relay_lane<S>(stream: S, lane: fiend_core::mux::H2Lane) -> Result<(), (io::Error, bool)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut app_read, mut app_write) = tokio::io::split(stream);
+    let (mut lane_read, mut lane_write) = lane.into_split();
+    let app_to_lane = async {
+        copy_half(&mut app_read, &mut lane_write)
+            .await
+            .map_err(|(error, from_app)| (error, !from_app))
+    };
+    let lane_to_app = async {
+        copy_half(&mut lane_read, &mut app_write)
+            .await
+            .map_err(|(error, from_lane)| (error, from_lane))
+    };
+    tokio::try_join!(app_to_lane, lane_to_app)?;
     Ok(())
 }
 
