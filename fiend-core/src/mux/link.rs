@@ -651,7 +651,12 @@ async fn keepalive_loop(
     loop {
         if !first {
             let idle = if timing.measure {
-                timing.tick
+                let since = Duration::from_millis(
+                    shared
+                        .elapsed_ms()
+                        .saturating_sub(shared.probed_ms.load(Ordering::Acquire)),
+                );
+                timing.tick.saturating_sub(since)
             } else {
                 idle_wait.saturating_sub(shared.idle_for())
             };
@@ -669,6 +674,13 @@ async fn keepalive_loop(
                 }
             }
         }
+        let measure_due = first
+            || (timing.measure
+                && Duration::from_millis(
+                    shared
+                        .elapsed_ms()
+                        .saturating_sub(shared.probed_ms.load(Ordering::Acquire)),
+                ) >= timing.tick);
         first = false;
         if shared.is_closed() {
             return;
@@ -677,7 +689,7 @@ async fn keepalive_loop(
         let quiet = shared.idle_for();
         let quiet_probe = shared.quiet_probe_due().is_some_and(|left| left.is_zero());
         let busy_probe = shared.busy_probe_due().is_some_and(|left| left.is_zero());
-        let due = timing.measure
+        let due = measure_due
             || quiet >= idle_wait
             || checked && quiet >= STALE
             || quiet_probe
@@ -1126,6 +1138,44 @@ mod tests {
         let (_, age) = link.shared().rtt().expect("busy sample");
         assert!(age < Duration::from_millis(200), "{age:?}");
         assert!(!link.is_closed());
+        served.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_measured_link_does_not_ping_flood_under_traffic() {
+        use crate::mux::ServerConnection;
+
+        let (client, server) = tokio::io::duplex(64 << 10);
+        let config = Config {
+            rtt_interval: Some(Duration::from_secs(5)),
+            ..Config::default()
+        };
+        let server_config = config.clone();
+        let served = tokio::spawn(async move {
+            let mut connection = ServerConnection::handshake(test_session(server), &server_config)
+                .await
+                .expect("server handshake");
+            while let Ok(Some(_)) = connection.accept().await {}
+        });
+        let link = ClientLink::connect(test_session(client), &config, 1, Arc::new(Notify::new()))
+            .await
+            .expect("client handshake");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(link.shared().rtt().is_some());
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            link.shared().note_io(4096, true);
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+        }
+        let (_, age) = link.shared().rtt().expect("sample");
+        assert!(
+            age >= Duration::from_millis(700),
+            "expected no extra ping before tick, got age {age:?}"
+        );
         served.abort();
     }
 
