@@ -329,18 +329,17 @@ fn network_state(
     addresses: impl IntoIterator<Item = (String, IpAddr)>,
 ) -> Vec<String> {
     let use_v6 = v4.is_none();
-    let routes: Vec<String> = if use_v6 {
+    let mut state: Vec<String> = if use_v6 {
         v6
     } else {
         v4.into_iter().collect()
     };
-    let interfaces: Vec<&str> = routes
-        .iter()
-        .filter_map(|route| route.split_whitespace().next())
-        .collect();
-    let mut state = routes;
+    let mut extra = Vec::new();
     for (interface, address) in addresses {
-        if !interfaces.contains(&interface.as_str()) {
+        if !state
+            .iter()
+            .any(|route| route.split_whitespace().next() == Some(interface.as_str()))
+        {
             continue;
         }
         let address = match address {
@@ -358,8 +357,9 @@ fn network_state(
             }
             _ => continue,
         };
-        state.push(format!("{interface} {address}"));
+        extra.push(format!("{interface} {address}"));
     }
+    state.extend(extra);
     state.sort();
     state.dedup();
     state
