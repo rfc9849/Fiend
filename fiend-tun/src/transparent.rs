@@ -492,11 +492,7 @@ async fn tcp_flow(
                     .await
                     .map_err(|(error, from_app)| (error, !from_app))
             };
-            let lane_to_app = async {
-                copy_half(&mut lane_read, &mut app_write)
-                    .await
-                    .map_err(|(error, from_lane)| (error, from_lane))
-            };
+            let lane_to_app = copy_half(&mut lane_read, &mut app_write);
             let result = tokio::try_join!(app_to_lane, lane_to_app);
             let stream = app_read.unsplit(app_write);
             if let Err((error, tunnel_broken)) = result {
