@@ -146,30 +146,26 @@ pub async fn connect_tcp(
     let candidates = tokio::time::timeout_at(deadline, resolve_all(address, policy))
         .await
         .map_err(|_| timed_out())??;
-    let total = candidates.len();
-    let mut last = None;
-    for (index, candidate) in candidates.into_iter().enumerate() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            last = Some(timed_out());
-            break;
-        }
-        let attempts_left = (total - index) as u32;
-        match tokio::time::timeout(
-            remaining / attempts_left,
-            tokio::net::TcpStream::connect(candidate),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => {
-                stream.set_nodelay(true)?;
-                return Ok(stream);
-            }
-            Ok(Err(error)) => last = Some(error),
-            Err(_) => last = Some(timed_out()),
-        }
+    let candidates = crate::net::interleave_families(candidates);
+    if candidates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "target has no addresses",
+        ));
     }
-    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "target has no addresses")))
+    let mut iter = candidates.into_iter();
+    let total = iter.len();
+    let stream = tokio::time::timeout_at(
+        deadline,
+        crate::net::race_connects(total, crate::net::HAPPY_EYEBALLS_DELAY, || {
+            let candidate = iter.next().expect("bounded by candidate count");
+            tokio::net::TcpStream::connect(candidate)
+        }),
+    )
+    .await
+    .map_err(|_| timed_out())??;
+    stream.set_nodelay(true)?;
+    Ok(stream)
 }
 
 fn timed_out() -> io::Error {

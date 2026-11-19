@@ -30,18 +30,51 @@ impl<T: std::os::windows::io::AsSocket> AsSocketRef for T {
 
 pub const CONNECT_ATTEMPTS: usize = 3;
 pub const CONNECT_ATTEMPT_DELAY: Duration = Duration::from_millis(500);
+pub(crate) const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 
-pub async fn dial(server: &str, protect: &ProtectSocket) -> io::Result<TcpStream> {
-    let mut last = io::Error::new(io::ErrorKind::AddrNotAvailable, "server has no addresses");
-    for address in lookup_host(server).await? {
-        let protect = protect.clone();
-        let attempt = move || connect_once(address, protect.clone());
-        match race_connects(CONNECT_ATTEMPTS, CONNECT_ATTEMPT_DELAY, attempt).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last = error,
+pub(crate) fn interleave_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let mut v4 = std::collections::VecDeque::new();
+    let mut v6 = std::collections::VecDeque::new();
+    for address in addresses {
+        if address.is_ipv4() {
+            v4.push_back(address);
+        } else {
+            v6.push_back(address);
         }
     }
-    Err(last)
+    let mut ordered = Vec::with_capacity(v4.len() + v6.len());
+    while !v4.is_empty() || !v6.is_empty() {
+        if let Some(address) = v4.pop_front() {
+            ordered.push(address);
+        }
+        if let Some(address) = v6.pop_front() {
+            ordered.push(address);
+        }
+    }
+    ordered
+}
+
+pub async fn dial(server: &str, protect: &ProtectSocket) -> io::Result<TcpStream> {
+    let addresses = interleave_families(lookup_host(server).await?.collect());
+    if addresses.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "server has no addresses",
+        ));
+    }
+    let attempts = addresses.len().max(CONNECT_ATTEMPTS);
+    let delay = if addresses.len() > 1 {
+        HAPPY_EYEBALLS_DELAY
+    } else {
+        CONNECT_ATTEMPT_DELAY
+    };
+    let mut index = 0usize;
+    race_connects(attempts, delay, || {
+        let address = addresses[index % addresses.len()];
+        index += 1;
+        connect_once(address, protect.clone())
+    })
+    .await
 }
 
 async fn connect_once(address: SocketAddr, protect: ProtectSocket) -> io::Result<TcpStream> {
@@ -57,7 +90,11 @@ async fn connect_once(address: SocketAddr, protect: ProtectSocket) -> io::Result
         .await
 }
 
-async fn race_connects<T, F, Fut>(attempts: usize, delay: Duration, mut start: F) -> io::Result<T>
+pub(crate) async fn race_connects<T, F, Fut>(
+    attempts: usize,
+    delay: Duration,
+    mut start: F,
+) -> io::Result<T>
 where
     T: Send + 'static,
     F: FnMut() -> Fut,
@@ -326,6 +363,34 @@ mod tests {
         let _peer = listener.accept().expect("accept");
         set_tcp_keepalive(&stream).expect("set keepalive");
         assert!(socket2::SockRef::from(&stream).keepalive().expect("read"));
+    }
+
+    #[test]
+    fn interleaves_ipv4_and_ipv6_addresses() {
+        let addresses: Vec<SocketAddr> = [
+            "[2001:db8::1]:443",
+            "[2001:db8::2]:443",
+            "192.0.2.1:443",
+            "192.0.2.2:443",
+            "192.0.2.3:443",
+        ]
+        .iter()
+        .map(|text| text.parse().expect("address"))
+        .collect();
+        let ordered: Vec<String> = interleave_families(addresses)
+            .into_iter()
+            .map(|address| address.to_string())
+            .collect();
+        assert_eq!(
+            ordered,
+            [
+                "192.0.2.1:443",
+                "[2001:db8::1]:443",
+                "192.0.2.2:443",
+                "[2001:db8::2]:443",
+                "192.0.2.3:443",
+            ]
+        );
     }
 }
 
