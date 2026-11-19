@@ -246,10 +246,13 @@ where
     ) -> Result<H2Lane> {
         let mut last = Error::Unavailable;
         for _ in 0..self.inner.config.attempts {
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout);
+            }
             let reservation = self.inner.acquire(deadline, kind).await?;
             let link = reservation.link.clone();
             match link
-                .open_lane(authority, kind, &self.inner.config, reservation)
+                .open_lane(authority, kind, &self.inner.config, deadline, reservation)
                 .await
             {
                 Ok(lane) => {

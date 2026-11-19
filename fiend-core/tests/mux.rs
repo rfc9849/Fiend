@@ -183,6 +183,7 @@ async fn pending_connect_cancellation_and_timeout_release_work() {
     let pool = Arc::new(test_pool_with_config(
         Config {
             open_timeout: Duration::from_secs(2),
+            ping_interval: Duration::from_secs(60),
             ..Config::default()
         },
         handler(move |incoming| {
@@ -192,6 +193,8 @@ async fn pending_connect_cancellation_and_timeout_release_work() {
             }
         }),
     ));
+    pool.ready().await.unwrap();
+    tokio::time::advance(Duration::from_secs(11)).await;
     let open = {
         let pool = pool.clone();
         tokio::spawn(async move { pool.open_lane("pending.test:80", LaneKind::Udp).await })
@@ -202,6 +205,7 @@ async fn pending_connect_cancellation_and_timeout_release_work() {
     assert!(matches!(open.await, Err(error) if error.is_cancelled()));
     assert_eq!(pool.stats().pending_lanes, 0);
     drop(incoming);
+    tokio::time::advance(Duration::from_secs(11)).await;
     let open = {
         let pool = pool.clone();
         tokio::spawn(async move { pool.open_lane("timeout.test:80", LaneKind::Udp).await })
@@ -291,11 +295,16 @@ async fn rejection_and_reset_leave_other_lanes_usable() {
         .await
         .unwrap();
     let id = healthy.link_id();
-    let rejected = pool.open_lane("reject.test:80", LaneKind::Udp).await;
-    assert!(matches!(
-        rejected,
-        Err(fiend_core::mux::Error::Rejected(502))
-    ));
+    let mut rejected = pool
+        .open_lane("reject.test:80", LaneKind::Udp)
+        .await
+        .expect("a fresh UDP lane opens optimistically without waiting for the server");
+    let error = rejected
+        .read(&mut [0; 1])
+        .await
+        .expect_err("the UDP rejection arrives on read");
+    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+    drop(rejected);
     let mut optimistic = pool
         .open_lane("reject-tcp.test:80", LaneKind::Tcp)
         .await

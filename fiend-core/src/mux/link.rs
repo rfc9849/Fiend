@@ -35,7 +35,7 @@ impl LinkIo for tokio::io::DuplexStream {}
 
 pub(crate) const LOAD_INTERVAL: Duration = Duration::from_millis(250);
 const LOAD_COOLDOWN: Duration = Duration::from_secs(1);
-pub(crate) const STALE: Duration = Duration::from_secs(5);
+pub(crate) const STALE: Duration = Duration::from_secs(10);
 const QUIET_PROBE: Duration = Duration::from_secs(2);
 const SUSPECT_FLOOR: Duration = Duration::from_secs(1);
 const BUSY_PROBE: Duration = Duration::from_secs(1);
@@ -509,6 +509,7 @@ impl ClientLink {
         authority: &str,
         kind: LaneKind,
         config: &Config,
+        deadline: Instant,
         mut reservation: LaneReservation,
     ) -> Result<H2Lane> {
         if self.is_closed() {
@@ -530,7 +531,7 @@ impl ClientLink {
             .map_err(|_| Error::InvalidConnect)?;
 
         let sender = self.sender.clone();
-        let mut sender = timeout(config.open_timeout, sender.ready())
+        let mut sender = timeout_at(deadline, sender.ready())
             .await
             .map_err(|_| Error::Timeout)??;
         let (response, mut send) = sender.send_request(request, false)?;
@@ -542,7 +543,7 @@ impl ClientLink {
         );
         if self.shared.is_stale() {
             self.shared.request_check();
-        } else if kind == LaneKind::Tcp {
+        } else {
             reservation.disarm();
             return Ok(H2Lane::pending(
                 kind,
@@ -552,7 +553,7 @@ impl ClientLink {
                 options,
             ));
         }
-        let response = timeout(config.open_timeout, response)
+        let response = timeout_at(deadline, response)
             .await
             .map_err(|_| Error::Timeout)??;
         let status = response.status();

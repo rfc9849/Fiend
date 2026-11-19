@@ -389,7 +389,14 @@ async fn rules_send_traffic_to_socks_http_block_and_a_chained_node() {
         .unwrap()
         .unwrap();
     assert_eq!(response.payload, b"datagram");
-    assert!(alice.open_udp(&domain("www.http.invalid")).await.is_err());
+    let denied = match alice.open_udp(&domain("www.http.invalid")).await {
+        Ok(mut flow) => timeout(Duration::from_secs(5), flow.recv())
+            .await
+            .unwrap()
+            .is_err(),
+        Err(_) => true,
+    };
+    assert!(denied);
 
     let seen = seen.lock().unwrap().clone();
     assert!(seen.contains(&"1:socks.invalid:443".to_owned()), "{seen:?}");
