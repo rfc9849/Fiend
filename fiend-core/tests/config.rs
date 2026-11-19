@@ -48,7 +48,7 @@ origin_host = "origin.example"
         settings.config.tcp_idle,
         Duration::from_secs(2 * 3600 + 4 * 60)
     );
-    assert_eq!(settings.config.tcp_notsent_lowat, 128 << 10);
+    assert_eq!(settings.config.tcp_notsent_lowat, 512 << 10);
     assert_eq!(settings.config.target, TargetPolicy::default());
     assert_eq!(settings.config.mux.max_links, 8);
 }

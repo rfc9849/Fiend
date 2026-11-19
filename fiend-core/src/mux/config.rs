@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-const PROBE_FLOOR: Duration = Duration::from_secs(3);
+const PROBE_FLOOR: Duration = Duration::from_secs(5);
 const PROBE_CEILING: Duration = Duration::from_secs(20);
 const PROBE_UNMEASURED: Duration = Duration::from_secs(5);
 const PROBE_RTTS: u32 = 8;

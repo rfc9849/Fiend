@@ -7,7 +7,7 @@ use tokio::net::{TcpListener, TcpSocket, TcpStream, lookup_host};
 
 pub type ProtectSocket = std::sync::Arc<dyn Fn(&Socket) -> io::Result<()> + Send + Sync>;
 
-pub const DEFAULT_TCP_NOTSENT_LOWAT: u32 = 128 << 10;
+pub const DEFAULT_TCP_NOTSENT_LOWAT: u32 = 512 << 10;
 
 #[doc(hidden)]
 pub trait AsSocketRef {
