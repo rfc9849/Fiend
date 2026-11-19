@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, split};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
@@ -418,7 +418,7 @@ async fn bridge_udp(
         guard,
     } = path;
     let _guard = guard;
-    let (mut read, mut write) = split(lane);
+    let (mut read, mut write) = lane.into_split();
     let activity = Arc::new(AtomicU64::new(0));
     let sent = AtomicU64::new(0);
     let received = AtomicU64::new(0);
@@ -444,10 +444,10 @@ async fn bridge_udp(
     let socket_activity = activity.clone();
     let socket_to_lane = async {
         while let Ok(Some((source, payload))) = rx.recv().await {
-            if udp::write_response(&mut write, &source, &payload)
-                .await
-                .is_err()
-            {
+            let Ok(frame) = udp::encode_response_bytes(&source, &payload) else {
+                continue;
+            };
+            if write.write_all_bytes(frame).await.is_err() {
                 break;
             }
             received.fetch_add(payload.len() as u64, Ordering::Relaxed);
@@ -482,7 +482,7 @@ async fn bridge_icmp(
     idle_timeout: Duration,
 ) {
     let source = crate::addr::Address::Ip(std::net::SocketAddr::new(socket.target(), 0));
-    let (mut read, mut write) = split(lane);
+    let (mut read, mut write) = lane.into_split();
     let activity = AtomicU64::new(0);
     let epoch = Instant::now();
     let requests = async {
@@ -504,10 +504,10 @@ async fn bridge_icmp(
             let mut payload = Vec::with_capacity(2 + data.len());
             payload.extend_from_slice(&sequence.to_be_bytes());
             payload.extend_from_slice(&data);
-            if udp::write_response(&mut write, &source, &payload)
-                .await
-                .is_err()
-            {
+            let Ok(frame) = udp::encode_response_bytes(&source, &payload) else {
+                continue;
+            };
+            if write.write_all_bytes(frame).await.is_err() {
                 break;
             }
         }

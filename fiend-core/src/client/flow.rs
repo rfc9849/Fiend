@@ -1,9 +1,10 @@
 use std::io;
 
-use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf, split};
+use bytes::Bytes;
+use tokio::io::AsyncWriteExt;
 
 use crate::addr::Address;
-use crate::mux::H2Lane;
+use crate::mux::{H2Lane, H2LaneRead, H2LaneWrite};
 use crate::udp::{self, Response};
 
 pub struct UdpFlow {
@@ -12,17 +13,17 @@ pub struct UdpFlow {
 }
 
 pub struct UdpSender {
-    lane: WriteHalf<H2Lane>,
+    lane: H2LaneWrite,
 }
 
 pub struct UdpReceiver {
-    lane: ReadHalf<H2Lane>,
+    lane: H2LaneRead,
     destination: Address,
 }
 
 impl UdpFlow {
     pub(super) fn new(lane: H2Lane, destination: Address) -> Self {
-        let (read, write) = split(lane);
+        let (read, write) = lane.into_split();
         Self {
             sender: UdpSender { lane: write },
             receiver: UdpReceiver {
@@ -47,11 +48,12 @@ impl UdpFlow {
 
 impl UdpSender {
     pub async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
-        udp::write_frame(&mut self.lane, payload).await
+        let frame = udp::encode_frame_bytes(payload)?;
+        self.lane.write_all_bytes(frame).await
     }
 
     pub async fn keepalive(&mut self) -> io::Result<()> {
-        udp::write_keepalive(&mut self.lane).await
+        self.lane.write_all_bytes(Bytes::from_static(&[0, 0])).await
     }
 
     pub async fn shutdown(&mut self) -> io::Result<()> {

@@ -7,7 +7,7 @@ mod server;
 
 pub use config::Config;
 pub use error::{Error, Result};
-pub use lane::{H2Lane, LANE_HEADER, LaneKind};
+pub use lane::{H2Lane, H2LaneRead, H2LaneWrite, LANE_HEADER, LaneKind};
 pub use link::LinkIo;
 pub use pool::{DialFn, DialFuture, LinkPool, PoolStats};
 pub use server::{Incoming, ServerConnection};

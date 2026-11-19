@@ -128,15 +128,13 @@ impl Incoming {
             .body(())
             .map_err(|_| Error::InvalidConnect)?;
         let send = self.respond.send_response(response, false)?;
-        let mut lane = H2Lane::new(
+        Ok(H2Lane::new(
             self.kind,
             self.authority,
             send,
             self.body,
-            LaneOptions::server(self.lane_share),
-        );
-        lane.set_meter(self.meter);
-        Ok(lane)
+            LaneOptions::server(self.lane_share, self.meter),
+        ))
     }
 
     pub fn reject(mut self, status: http::StatusCode) {

@@ -1,5 +1,6 @@
 use std::io;
 
+use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::addr::Address;
@@ -37,6 +38,16 @@ pub fn encode_frame(payload: &[u8]) -> io::Result<Vec<u8>> {
     frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
     frame.extend_from_slice(payload);
     Ok(frame)
+}
+
+pub fn encode_frame_bytes(payload: &[u8]) -> io::Result<Bytes> {
+    if payload.len() > MAX_FRAME {
+        return Err(invalid("UDP frame is too large"));
+    }
+    let mut frame = BytesMut::with_capacity(2 + payload.len());
+    frame.put_u16(payload.len() as u16);
+    frame.extend_from_slice(payload);
+    Ok(frame.freeze())
 }
 
 pub async fn write_frame<W>(writer: &mut W, payload: &[u8]) -> io::Result<()>
@@ -87,10 +98,7 @@ where
     }))
 }
 
-pub async fn write_response<W>(writer: &mut W, source: &Address, payload: &[u8]) -> io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
+pub fn encode_response_bytes(source: &Address, payload: &[u8]) -> io::Result<Bytes> {
     let mut frame = Vec::with_capacity(3 + 19 + payload.len());
     frame.extend_from_slice(&[0, 0, FLAG_ADDRESS]);
     source
@@ -102,6 +110,14 @@ where
         return Err(invalid("UDP response is too large"));
     }
     frame[..2].copy_from_slice(&(length as u16).to_be_bytes());
+    Ok(Bytes::from(frame))
+}
+
+pub async fn write_response<W>(writer: &mut W, source: &Address, payload: &[u8]) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let frame = encode_response_bytes(source, payload)?;
     writer.write_all(&frame).await
 }
 
