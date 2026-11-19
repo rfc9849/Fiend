@@ -560,13 +560,15 @@ impl Runtime {
                     } else {
                         "[::]:0"
                     };
-                    let socket = UdpSocket::bind(bind).await?;
-                    match socket.connect(target).await {
-                        Ok(()) => {
+                    match UdpSocket::bind(bind).await {
+                        Ok(socket) => {
                             let socket = Arc::new(socket);
                             return Ok(UdpPath {
-                                tx: UdpTx::Socket(socket.clone()),
-                                rx: UdpRx::Socket(socket),
+                                tx: UdpTx::Socket(socket.clone(), target),
+                                rx: UdpRx::Socket {
+                                    socket,
+                                    buffer: vec![0u8; UDP_BUFFER],
+                                },
                                 guard: None,
                             });
                         }
@@ -611,7 +613,10 @@ impl Runtime {
                 let socket = Arc::new(socket);
                 Ok(UdpPath {
                     tx: UdpTx::Socks(socket.clone(), address.clone()),
-                    rx: UdpRx::Socks(socket),
+                    rx: UdpRx::Socks {
+                        socket,
+                        buffer: vec![0u8; UDP_BUFFER],
+                    },
                     guard: Some(control),
                 })
             }
@@ -628,7 +633,10 @@ impl Runtime {
                     .into_split();
                 Ok(UdpPath {
                     tx: UdpTx::Fiend(tx),
-                    rx: UdpRx::Fiend(rx),
+                    rx: UdpRx::Fiend {
+                        receiver: rx,
+                        buffer: Vec::new(),
+                    },
                     guard: None,
                 })
             }
@@ -644,21 +652,30 @@ pub struct UdpPath {
 }
 
 pub enum UdpTx {
-    Socket(Arc<UdpSocket>),
+    Socket(Arc<UdpSocket>, SocketAddr),
     Socks(Arc<UdpSocket>, Address),
     Fiend(UdpSender),
 }
 
 pub enum UdpRx {
-    Socket(Arc<UdpSocket>),
-    Socks(Arc<UdpSocket>),
-    Fiend(UdpReceiver),
+    Socket {
+        socket: Arc<UdpSocket>,
+        buffer: Vec<u8>,
+    },
+    Socks {
+        socket: Arc<UdpSocket>,
+        buffer: Vec<u8>,
+    },
+    Fiend {
+        receiver: UdpReceiver,
+        buffer: Vec<u8>,
+    },
 }
 
 impl UdpTx {
     pub async fn send(&mut self, payload: &[u8]) -> io::Result<()> {
         match self {
-            Self::Socket(socket) => socket.send(payload).await.map(drop),
+            Self::Socket(socket, target) => socket.send_to(payload, *target).await.map(drop),
             Self::Socks(socket, destination) => {
                 let datagram = socks5::encode_udp_request(destination, payload)?;
                 socket.send(&datagram).await.map(drop)
@@ -669,27 +686,27 @@ impl UdpTx {
 }
 
 impl UdpRx {
-    pub async fn recv(&mut self) -> io::Result<Option<(Address, Vec<u8>)>> {
+    pub async fn recv(&mut self) -> io::Result<Option<(Address, &[u8])>> {
         match self {
-            Self::Socket(socket) => {
-                let mut buffer = vec![0u8; UDP_BUFFER];
-                let (length, source) = socket.recv_from(&mut buffer).await?;
-                buffer.truncate(length);
-                Ok(Some((Address::Ip(source), buffer)))
+            Self::Socket { socket, buffer } => {
+                let (length, source) = socket.recv_from(buffer).await?;
+                Ok(Some((Address::Ip(source), &buffer[..length])))
             }
-            Self::Socks(socket) => loop {
-                let mut buffer = vec![0u8; UDP_BUFFER];
-                let length = socket.recv(&mut buffer).await?;
+            Self::Socks { socket, buffer } => loop {
+                let length = socket.recv(buffer).await?;
                 if let Some((source, payload)) = socks5::parse_udp_request(&buffer[..length]) {
-                    return Ok(Some((source, payload.to_vec())));
+                    let start = payload.as_ptr() as usize - buffer.as_ptr() as usize;
+                    let end = start + payload.len();
+                    return Ok(Some((source, &buffer[start..end])));
                 }
             },
-            Self::Fiend(receiver) => loop {
+            Self::Fiend { receiver, buffer } => loop {
                 match receiver.recv().await? {
                     None => return Ok(None),
                     Some(response) => {
                         if let Some(source) = response.source {
-                            return Ok(Some((source, response.payload)));
+                            *buffer = response.payload;
+                            return Ok(Some((source, buffer.as_slice())));
                         }
                     }
                 }

@@ -429,7 +429,11 @@ async fn bridge_udp(
         loop {
             match udp::read_frame(&mut read).await {
                 Ok(Some(payload)) => {
-                    if tx.send(&payload).await.is_err() {
+                    if let Err(error) = tx.send(&payload).await {
+                        if is_transient_udp_error(&error) {
+                            tracing::trace!(%error, "ignoring transient UDP send error");
+                            continue;
+                        }
                         break;
                     }
                     sent.fetch_add(payload.len() as u64, Ordering::Relaxed);
@@ -443,15 +447,24 @@ async fn bridge_udp(
 
     let socket_activity = activity.clone();
     let socket_to_lane = async {
-        while let Ok(Some((source, payload))) = rx.recv().await {
-            let Ok(frame) = udp::encode_response_bytes(&source, &payload) else {
-                continue;
-            };
-            if write.write_all_bytes(frame).await.is_err() {
-                break;
+        loop {
+            match rx.recv().await {
+                Ok(Some((source, payload))) => {
+                    let Ok(frame) = udp::encode_response_bytes(&source, payload) else {
+                        continue;
+                    };
+                    if write.write_all_bytes(frame).await.is_err() {
+                        break;
+                    }
+                    received.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                    touch(&socket_activity, epoch);
+                }
+                Ok(None) => break,
+                Err(error) if is_transient_udp_error(&error) => {
+                    tracing::trace!(%error, "ignoring transient UDP recv error");
+                }
+                Err(_) => break,
             }
-            received.fetch_add(payload.len() as u64, Ordering::Relaxed);
-            touch(&socket_activity, epoch);
         }
     };
 
@@ -466,6 +479,25 @@ async fn bridge_udp(
         sent.load(Ordering::Relaxed),
         received.load(Ordering::Relaxed),
     ))
+}
+
+fn is_transient_udp_error(error: &io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::AddrNotAvailable
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    if matches!(error.raw_os_error(), Some(libc::EMSGSIZE | libc::ENOBUFS)) {
+        return true;
+    }
+    false
 }
 
 fn elapsed_ms(epoch: Instant) -> u64 {
@@ -499,7 +531,8 @@ async fn bridge_icmp(
         }
     };
     let replies = async {
-        while let Ok((sequence, data)) = socket.recv().await {
+        let mut buffer = vec![0u8; 2048];
+        while let Ok((sequence, data)) = socket.recv_into(&mut buffer).await {
             touch(&activity, epoch);
             let mut payload = Vec::with_capacity(2 + data.len());
             payload.extend_from_slice(&sequence.to_be_bytes());

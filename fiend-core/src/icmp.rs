@@ -80,9 +80,13 @@ impl EchoSocket {
     }
 
     pub async fn recv(&self) -> io::Result<(u16, Vec<u8>)> {
-        let mut buffer = vec![0u8; 65535];
+        let mut buffer = vec![0u8; 2048];
+        self.recv_into(&mut buffer).await
+    }
+
+    pub async fn recv_into(&self, buffer: &mut [u8]) -> io::Result<(u16, Vec<u8>)> {
         loop {
-            let (size, from) = self.socket.recv_from(&mut buffer).await?;
+            let (size, from) = self.socket.recv_from(buffer).await?;
             if from.ip().to_canonical() != self.target.to_canonical() {
                 continue;
             }
