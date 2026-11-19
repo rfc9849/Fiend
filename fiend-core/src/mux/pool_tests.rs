@@ -466,7 +466,7 @@ async fn optional_dial_never_blocks_existing_capacity_or_moves_work() {
         .acquire(before + Duration::from_secs(1), LaneKind::Tcp)
         .await
         .unwrap();
-    assert_eq!(Instant::now(), before + SPREAD_WAIT);
+    assert_eq!(Instant::now(), before);
     assert_eq!(reservation.link.id(), held.link.id());
     pool.inner.dial_finished(Err(Error::Timeout));
     drop(dial);
@@ -809,23 +809,28 @@ async fn a_loaded_single_link_spreads_in_the_background_without_blocking() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_lone_bulk_link_spreads_a_new_lane() {
+async fn a_lone_bulk_link_spreads_in_the_background_without_blocking() {
     let pool = pool(Config::default());
     let link = add_link(&pool).await;
     let _upload = link.reserve(LaneKind::Tcp);
     pressure(&link, false).await;
-    let inner = pool.inner.clone();
-    let task = tokio::spawn(async move {
-        inner
-            .acquire(Instant::now() + Duration::from_secs(5), LaneKind::Tcp)
-            .await
-            .map(|reservation| reservation.link.id())
-    });
-    settle_until(|| pool.inner.state().spread_request).await;
+    let before = Instant::now();
+    let first = pool
+        .inner
+        .acquire(before + Duration::from_secs(5), LaneKind::Tcp)
+        .await
+        .unwrap();
+    assert_eq!(Instant::now(), before);
+    assert_eq!(first.link.id(), link.id());
+    assert!(pool.inner.state().spread_request);
     let dial = pool.inner.maintain().expect("spread dial");
     pool.inner.dial_finished(dial.await);
-    let id = task.await.unwrap().unwrap();
-    assert_ne!(id, link.id());
+    let second = pool
+        .inner
+        .acquire(Instant::now() + Duration::from_secs(5), LaneKind::Tcp)
+        .await
+        .unwrap();
+    assert_ne!(second.link.id(), link.id());
     assert_eq!(pool.stats().links, 2);
 }
 

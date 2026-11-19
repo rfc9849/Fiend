@@ -488,7 +488,7 @@ where
                 let lone_bulk = state.links.len() == 1
                     && state.links.len() < self.config.max_links
                     && state.links[0].is_bulk();
-                let wait_for_spread = (doubtful || lone_bulk)
+                let wait_for_spread = doubtful
                     && state.backoff.delay.is_zero()
                     && spread_until.is_none_or(|until| now < until);
                 if wait_for_spread {
@@ -504,6 +504,7 @@ where
                     let separate = state.links.len() < self.config.max_links
                         && state.backoff.delay.is_zero()
                         && (loaded
+                            || lone_bulk
                             || !state
                                 .links
                                 .iter()
